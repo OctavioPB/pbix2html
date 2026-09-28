@@ -110,7 +110,7 @@ class FakeBackend:
 
 def _safe_ident(s: str) -> str:
     if not re.fullmatch(r"[\w.@-]+", s):
-        raise ValueError(f"proxy_user inválido: {s!r}")
+        raise ValueError(f"invalid proxy_user: {s!r}")
     return s
 
 

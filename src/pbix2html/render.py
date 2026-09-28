@@ -52,8 +52,14 @@ def _text_of(visual: dict) -> str | None:
     return visual.get("text")
 
 
-def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_hidden: bool = False) -> dict:
-    """Structure consumed by the template/JS: pages → visuals with position in % and kind."""
+def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_hidden: bool = False,
+               include_sql: bool = False) -> dict:
+    """Structure consumed by the template/JS: pages → visuals with position in % and kind.
+
+    `include_sql` (mode="hah" only, see ADR-004) additionally embeds each visual's raw
+    `sql`/`params` — HAH has no server of ours to fetch data from, so the client has to
+    run the query itself.
+    """
     pages = []
     for i, p in enumerate(layout["pages"]):
         if p.get("hidden") and not include_hidden:
@@ -68,7 +74,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             if kind == "slicer":
                 continue  # slicers are parameters, they're shown in the top bar
             r = (spec.raw.get("visuals") or {}).get(v["id"]) or {}
-            visuals.append({
+            entry = {
                 "id": v["id"], "kind": kind, "type": v["type"],
                 "title": (vs.title if vs and vs.title else v.get("title")),
                 "left": round(100 * (v["x"] or 0) / W, 3), "top": round(100 * (v["y"] or 0) / H, 3),
@@ -78,8 +84,12 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "stacked": "stacked" in v["type"].lower(), "area": "area" in v["type"].lower(),
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
-            })
-        pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Página {i + 1}",
+            }
+            if include_sql:
+                entry["sql"] = vs.sql if vs else None
+                entry["params"] = vs.params if vs else []
+            visuals.append(entry)
+        pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "visuals": visuals})
     parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
                   for name, p in spec.parameters.items()}
@@ -87,13 +97,25 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
 
 
 def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: dict[str, dict] | None,
-                mode: str = "snapshot", role: str | None = None, include_hidden: bool = False) -> str:
+                mode: str = "snapshot", role: str | None = None, include_hidden: bool = False,
+                hah_base: str | None = None) -> str:
     env = Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape(["html", "j2"]))
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if mode == "hah":
+        # ADR-004: unverified against a real HAH environment.
+        page_spec = build_spec(layout, spec, values, include_hidden, include_sql=True)
+        tpl = env.get_template("report_hah.html.j2")
+        return tpl.render(
+            spec=page_spec, theme=page_spec["theme"], mode=mode, role=role, generated_at=generated_at,
+            hah_base=hah_base, sql_api=f"{hah_base}/api/execute", static_base=f"{hah_base}/static",
+            spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
+        )
+
     tpl = env.get_template("report.html.j2")
     page_spec = build_spec(layout, spec, values, include_hidden)
     return tpl.render(
-        spec=page_spec, theme=page_spec["theme"], mode=mode, role=role,
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        spec=page_spec, theme=page_spec["theme"], mode=mode, role=role, generated_at=generated_at,
         echarts_cdn=settings.echarts_cdn, api_base=settings.api_base,
         spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
         data_json=json.dumps(data or {}, ensure_ascii=False, default=str).replace("</", "<\\/"),

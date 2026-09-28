@@ -30,7 +30,7 @@
 ## Per-visual data format (contract between query, serve, and render)
 
 ```json
-{"columns": ["category", "value"], "rows": [["Norte", 1234.5], ["Sur", 987.0]]}
+{"columns": ["category", "value"], "rows": [["North", 1234.5], ["South", 987.0]]}
 ```
 
 ## Yaml structure (`metrics/_template.yaml` is the annotated reference)

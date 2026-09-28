@@ -6,13 +6,13 @@ from pbix2html.render import render_html, build_spec
 from pbix2html.validate import compare
 
 FIX = {
-    "SELECT SUM(importe) AS value FROM ventas WHERE anio = ?": {"columns": ["value"], "rows": [[1234567.8]]},
-    "SELECT region AS category, margen AS value FROM v_margen_region WHERE anio = ?":
-        {"columns": ["category", "value"], "rows": [["Norte", 0.21], ["Sur", 0.18], ["Centro", None]]},
-    "SELECT mes AS category, importe AS value FROM v_ingresos_mes WHERE anio = ?":
-        {"columns": ["category", "value"], "rows": [["Ene", 10], ["Feb", 12]]},
-    "SELECT cliente, importe FROM v_top_clientes WHERE anio = ?":
-        {"columns": ["cliente", "importe"], "rows": [["ACME", 100.5], ["Globex", 90.0]]},
+    "SELECT SUM(amount) AS value FROM sales WHERE year = ?": {"columns": ["value"], "rows": [[1234567.8]]},
+    "SELECT region AS category, margin AS value FROM v_margin_region WHERE year = ?":
+        {"columns": ["category", "value"], "rows": [["North", 0.21], ["South", 0.18], ["Center", None]]},
+    "SELECT month AS category, amount AS value FROM v_revenue_month WHERE year = ?":
+        {"columns": ["category", "value"], "rows": [["Jan", 10], ["Feb", 12]]},
+    "SELECT customer, amount FROM v_top_customers WHERE year = ?":
+        {"columns": ["customer", "amount"], "rows": [["ACME", 100.5], ["Globex", 90.0]]},
 }
 
 
@@ -24,7 +24,7 @@ def test_bind_expands_lists():
 def test_scaffold_from_layout(fake_pbix):
     L = ex.extract_layout(fake_pbix)
     sc = semantic.scaffold(L, {})
-    assert "anio" in sc["parameters"]                 # slicer → parameter
+    assert "year" in sc["parameters"]                  # slicer → parameter
     assert sc["visuals"]["v1"]["kind"] == "card" and "TODO" in sc["visuals"]["v1"]["sql"]
     assert sc["visuals"]["v4"]["kind"] == "custom"
     assert "v3" not in sc["visuals"]                  # slicers aren't visuals with data
@@ -32,9 +32,9 @@ def test_scaffold_from_layout(fake_pbix):
 
 def test_snapshot_html(fake_pbix, tmp_path):
     L = ex.extract_layout(fake_pbix)
-    spec = semantic.load("Dashboard_Ejecutivo")
-    values = semantic.resolve_params(spec, {"anio": "2025"})
-    assert values == {"anio": 2025}
+    spec = semantic.load("Executive_Dashboard")
+    values = semantic.resolve_params(spec, {"year": "2025"})
+    assert values == {"year": 2025}
     be = FakeBackend(fixtures=FIX, calls=[])
     data = run_report(spec, values, be, use_cache=False)
     assert data["v1"]["rows"][0][0] == 1234567.8
@@ -48,9 +48,23 @@ def test_snapshot_html(fake_pbix, tmp_path):
 
 def test_live_html_has_api_base(fake_pbix):
     L = ex.extract_layout(fake_pbix)
-    spec = semantic.load("Dashboard_Ejecutivo")
-    html = render_html(L, spec, {"anio": 2026}, None, mode="live")
+    spec = semantic.load("Executive_Dashboard")
+    html = render_html(L, spec, {"year": 2026}, None, mode="live")
     assert "window.API_BASE" in html and 'id="data"' not in html
+
+
+def test_hah_html_renders(fake_pbix):
+    """ADR-004: only checks the template renders and embeds what the client-side JS
+    needs (sql/params per visual, the SQL_API endpoint) — not verified against a real HAH."""
+    L = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    html = render_html(L, spec, {"year": 2026}, None, mode="hah", hah_base="https://hah.example/dev")
+    assert "https://hah.example/dev/static/echarts.min.js" in html
+    assert '"https://hah.example/dev/api/execute"' in html
+    assert '"sql":' in html and 'SELECT SUM' in html   # visual sql embedded for client-side fetch
+    assert "bindSql" in html and "safeSql" in html
+    assert "__SNAPSHOT_CAPTURE__" in html
+    assert 'id="data"' not in html and "window.API_BASE" not in html
 
 
 def test_compare_tolerance():

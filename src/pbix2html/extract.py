@@ -266,9 +266,15 @@ def extract_theme(z: zipfile.ZipFile, layout: dict) -> dict:
 def extract_layout(pbix: Path) -> dict:
     with zipfile.ZipFile(pbix) as z:
         names = z.namelist()
+        has_datamodel = any(n.endswith("DataModel") for n in names)
         layout_member = next((n for n in names if n.endswith("Report/Layout")), None)
         if layout_member is None:
-            raise ValueError("No se encontró Report/Layout (¿es formato PBIR/PBIP? ver README)")
+            if "Report/definition/report.json" in names:
+                return _extract_layout_pbir(z, names, pbix, has_datamodel)
+            raise ValueError(
+                "Unrecognized format: neither Report/Layout (classic) nor "
+                "Report/definition/report.json (PBIR) found in the .pbix."
+            )
         layout = decode_layout(z.read(layout_member))
         theme = extract_theme(z, layout)
         custom_packages = [
@@ -276,7 +282,6 @@ def extract_layout(pbix: Path) -> dict:
             for p in layout.get("resourcePackages", [])
             if (p.get("resourcePackage") or {}).get("type") == 0   # 0 = custom visual package
         ]
-        has_datamodel = any(n.endswith("DataModel") for n in names)
     return {
         "report": pbix.stem,
         "source": str(pbix),
@@ -285,6 +290,134 @@ def extract_layout(pbix: Path) -> dict:
         "theme": theme,
         "custom_visual_packages": [c for c in custom_packages if c],
         "pages": [parse_page(s) for s in layout.get("sections", [])],
+        "format": "classic",
+    }
+
+
+# ----------------------------------------------------------------------------
+# Layout — PBIR / Enhanced Report Format (Power BI Desktop 2024+)
+#
+# Structure discovered against real .pbix files that no longer ship a classic
+# Report/Layout blob (see pbix2html-fixv1.md #6 and skill pbix-layout):
+#   Report/definition/report.json                                  ← presence = PBIR
+#   Report/definition/pages/pages.json                              → pageOrder
+#   Report/definition/pages/<pageId>/page.json                      → one per page
+#   Report/definition/pages/<pageId>/visuals/<visualId>/visual.json → one per visual
+# A few field paths below (visual hidden/group state, page filters) are still
+# best-effort guesses pending confirmation against a real file — see the TODOs.
+# ----------------------------------------------------------------------------
+
+def _pbir_read_json(z: zipfile.ZipFile, path: str) -> dict:
+    """Missing entry or malformed JSON both just mean "nothing here": PBIR has one
+    file per page/visual, so a single bad entry shouldn't be worse than a missing one."""
+    try:
+        with z.open(path) as f:
+            return json.loads(f.read().decode("utf-8-sig"))
+    except (KeyError, ValueError):
+        return {}
+
+
+def _pbir_fields(query_state: dict) -> list[dict]:
+    """[{role, entity, property, queryRef}], one per field well entry."""
+    fields = []
+    for role_name, role_data in (query_state or {}).items():
+        for proj in (role_data or {}).get("projections") or []:
+            field = proj.get("field") or {}
+            query_ref = proj.get("queryRef", "")
+            col = (field.get("Column") or field.get("Measure")
+                   or (field.get("Aggregation") or {}).get("Expression", {}).get("Column"))
+            if col:
+                entity = ((col.get("Expression") or {}).get("SourceRef") or {}).get("Entity", "")
+                prop = col.get("Property", "")
+            else:
+                entity, prop = "", ""
+            fields.append({"role": role_name, "entity": entity, "property": prop, "queryRef": query_ref})
+    return fields
+
+
+def _pbir_title(container_objects: dict) -> str | None:
+    try:
+        val = (container_objects["title"][0]["properties"]
+               .get("text", {}).get("expr", {}).get("Literal", {}).get("Value", ""))
+        return val.strip("'\"") or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
+    try:
+        pos = vdata.get("position") or {}
+        vis = vdata.get("visual") or {}
+        qs = ((vis.get("query") or {}).get("queryState")) or {}
+        vtype = vis.get("visualType", "unknown")
+        fields = _pbir_fields(qs)
+        projections: dict[str, list] = {}
+        for f in fields:
+            projections.setdefault(f["role"], []).append(f["queryRef"])
+        return {
+            "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
+            "width": pos.get("width", 0), "height": pos.get("height", 0),
+            "tab_order": pos.get("tabOrder"), "parent_group": None,
+            "type": vtype, "is_group": False,   # TODO: PBIR group representation not confirmed yet
+            "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
+            "title": _pbir_title(vdata.get("visualContainerObjects") or {}),
+            "hidden": vis.get("visible") is False,   # TODO: confirm against a real hidden visual
+            "projections": projections,
+            "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
+            "filters": [],   # TODO: PBIR page/visual filter shape not mapped yet
+            "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
+            "objects_keys": sorted((vis.get("objects") or {}).keys()),
+        }
+    except Exception as e:
+        stub = _empty_visual_stub({}, e)
+        stub["id"] = vid
+        return stub
+
+
+def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict:
+    page_data = _pbir_read_json(z, f"Report/definition/pages/{page_id}/page.json")
+    visual_ids = sorted({
+        n.split("/")[5] for n in names
+        if n.startswith(f"Report/definition/pages/{page_id}/visuals/") and n.endswith("visual.json")
+    })
+    visuals = []
+    for vid in visual_ids:
+        vdata = _pbir_read_json(z, f"Report/definition/pages/{page_id}/visuals/{vid}/visual.json")
+        if vdata:
+            visuals.append(_parse_visual_pbir(vdata, vid))
+    return {
+        "name": page_id,
+        "display_name": page_data.get("displayName", page_id),
+        "ordinal": None,
+        "width": page_data.get("width", 1280),
+        "height": page_data.get("height", 720),
+        "hidden": False,   # TODO: PBIR page-visibility key not confirmed yet
+        "filters": [],   # TODO: PBIR page filter shape not mapped yet
+        "visuals": visuals,
+    }
+
+
+def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_datamodel: bool) -> dict:
+    pages_meta = _pbir_read_json(z, "Report/definition/pages/pages.json")
+    page_order = pages_meta.get("pageOrder") or sorted({
+        n.split("/")[3] for n in names
+        if n.startswith("Report/definition/pages/") and n.count("/") >= 4 and not n.endswith("pages.json")
+    })
+    theme: dict[str, Any] = {"base": None, "custom": None, "custom_json": None}
+    theme_entry = next(
+        (n for n in names if n.startswith("Report/StaticResources/SharedResources/BaseThemes/")
+         and n.endswith(".json")), None)
+    if theme_entry:
+        theme = {"base": None, "custom": {"name": theme_entry}, "custom_json": _pbir_read_json(z, theme_entry)}
+    return {
+        "report": pbix.stem,
+        "source": str(pbix),
+        "layout_version": None,
+        "has_embedded_datamodel": has_datamodel,
+        "theme": theme,
+        "custom_visual_packages": [],   # TODO: PBIR custom-visual package listing not mapped yet
+        "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
+        "format": "pbir",
     }
 
 
@@ -398,15 +531,15 @@ def write_inventory(out_dir: Path, reports: list[tuple[dict, dict]]) -> None:
     dump_csv(out_dir / "inventory_visuals.csv", vis_rows)
     dump_csv(out_dir / "inventory_measures.csv", meas_rows)
 
-    lines = ["# Inventario de migración Power BI → HTML\n",
-             f"Reportes procesados: **{len(reports)}**  ",
-             f"Visuales totales: **{sum(type_counter.values())}**  ",
-             f"Medidas totales: **{len(meas_rows)}**\n",
-             "## Visuales por tipo\n", "| Tipo | Cantidad | Custom |", "|---|---:|:---:|"]
+    lines = ["# Power BI → HTML migration inventory\n",
+             f"Reports processed: **{len(reports)}**  ",
+             f"Total visuals: **{sum(type_counter.values())}**  ",
+             f"Total measures: **{len(meas_rows)}**\n",
+             "## Visuals by type\n", "| Type | Count | Custom |", "|---|---:|:---:|"]
     for t, n in type_counter.most_common():
-        lines.append(f"| {t} | {n} | {'sí' if t in custom_counter else ''} |")
-    lines += ["\n## Por reporte\n",
-              "| Reporte | Páginas | Visuales | Custom | Medidas | Reglas RLS | Modos | Error modelo |",
+        lines.append(f"| {t} | {n} | {'yes' if t in custom_counter else ''} |")
+    lines += ["\n## By report\n",
+              "| Report | Pages | Visuals | Custom | Measures | RLS rules | Modes | Model error |",
               "|---|---:|---:|---:|---:|---:|---|---|"]
     for r in per_report:
         lines.append(f"| {r['report']} | {r['pages']} | {r['visuals']} | {r['custom_visuals']} | "
@@ -428,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
     src = Path(args.path)
     files = sorted(src.rglob("*.pbix")) if src.is_dir() else [src]
     if not files:
-        print("No se encontraron archivos .pbix", file=sys.stderr)
+        print("No .pbix files found", file=sys.stderr)
         return 1
 
     out_dir = Path(args.out)
@@ -444,19 +577,19 @@ def main(argv: list[str] | None = None) -> int:
             continue
         model = {} if args.no_model else extract_model(pbix)
         if model.get("error"):
-            print(f"   ! modelo: {model['error']}")
+            print(f"   ! model: {model['error']}")
 
         rdir = out_dir / safe_name(pbix.stem)
         rdir.mkdir(exist_ok=True)
         (rdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
         (rdir / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         n_vis = sum(len(p["visuals"]) for p in layout["pages"])
-        print(f"   ✓ {len(layout['pages'])} páginas, {n_vis} visuales, "
-              f"{len(model.get('measures') or []) if isinstance(model.get('measures'), list) else 0} medidas")
+        print(f"   ✓ {len(layout['pages'])} pages, {n_vis} visuals, "
+              f"{len(model.get('measures') or []) if isinstance(model.get('measures'), list) else 0} measures")
         results.append((layout, model))
 
     write_inventory(out_dir, results)
-    print(f"\nInventario en {out_dir}/summary.md")
+    print(f"\nInventory at {out_dir}/summary.md")
     return 0
 
 

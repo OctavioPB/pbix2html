@@ -1,48 +1,48 @@
 # Annotated template for metrics/<Report>.yaml. `pbix2html scaffold` generates one from the .pbix.
-report: Nombre_Del_Reporte          # = the .pbix name without the extension
-source: reportes/Nombre_Del_Reporte.pbix
+report: Report_Name                 # = the .pbix name without the extension
+source: reports/Report_Name.pbix
 connection: teradata
 delivery: snapshot                  # snapshot | live   (ADR-001)
 
 parameters:                         # one per slicer (and per unlocked page filter)
-  anio:
+  year:
     type: int                       # int | string | date
     default: 2026
-    from_slicer: Calendario.Anio    # the slicer's queryRef in layout.json
+    from_slicer: Calendar.Year      # the slicer's queryRef in layout.json
     multi: false                    # true → list; used as IN (:param) in SQL
-    label: Año
+    label: Year
 
 roles:                              # from model.json → rls, or defined by hand
-  Ventas_Norte:
-    proxy_user: usr_norte           # trusted session (live mode and per-role snapshot)
+  Sales_North:
+    proxy_user: usr_north           # trusted session (live mode and per-role snapshot)
     where: null                     # alternative: a fixed predicate the yaml must include
     dax: "[Region] = LOOKUPVALUE(...)"   # documentation only
 
 visuals:
   v1:                               # id = the visual's config.name in layout.json
     kind: card                      # see the column contract in the html-renderer skill
-    title: Ingresos netos
+    title: Net Revenue
     fields:                         # documentation only (filled in by scaffold)
-      - "Values: Ventas.Ingresos Netos  -- DAX: SUM(Ventas[Importe])"
+      - "Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"
     sql: |
-      SELECT SUM(v.importe) AS value
-      FROM sec.v_ventas v
-      JOIN dim_calendario c ON c.fecha = v.fecha
-      WHERE c.anio = :anio
-    params: [anio]
+      SELECT SUM(v.amount) AS value
+      FROM sec.v_sales v
+      JOIN dim_calendar c ON c.date = v.date
+      WHERE c.year = :year
+    params: [year]
     reference_sql: |                # SQL captured from DBQL (what Power BI ran). For validation only.
-      SELECT SUM("importe") FROM ...
+      SELECT SUM("amount") FROM ...
     format: { value: "#,##0" }
     tolerance: { rel: 1.0e-6 }      # or { abs: 0.5 }
     notes: null
   v2:
     kind: bar
-    title: Margen por región
+    title: Margin by Region
     sql: |
-      SELECT r.nombre AS category, SUM(v.margen) / NULLIFZERO(SUM(v.importe)) AS value
-      FROM sec.v_ventas v JOIN dim_region r ON r.id = v.region_id
-      JOIN dim_calendario c ON c.fecha = v.fecha
-      WHERE c.anio = :anio
+      SELECT r.name AS category, SUM(v.margin) / NULLIFZERO(SUM(v.amount)) AS value
+      FROM sec.v_sales v JOIN dim_region r ON r.id = v.region_id
+      JOIN dim_calendar c ON c.date = v.date
+      WHERE c.year = :year
       GROUP BY 1 ORDER BY 2 DESC
-    params: [anio]
+    params: [year]
     format: { value: "0.0%" }

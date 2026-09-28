@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<p><a class="link" href="/">&larr; Todos los reportes</a></p>
+<p><a class="link" href="/">&larr; All reports</a></p>
 <h1>{{ name }}</h1>
 <p class="muted">{{ pbix }}</p>
 
@@ -8,96 +8,112 @@
 <div class="banner {{ 'ok' if result.ok else 'err' }}">
   <strong>{{ result.title }}</strong><br>{{ result.message }}
   {% if result.detail %}<ul>{% for d in result.detail %}<li>{{ d }}</li>{% endfor %}</ul>{% endif %}
-  {% if result.html_link %}<div><a class="btn" href="{{ result.html_link }}" target="_blank">Abrir el HTML generado</a></div>{% endif %}
+  {% if result.html_link %}<div><a class="btn" href="{{ result.html_link }}" target="_blank">Open the generated HTML</a></div>{% endif %}
 </div>
 {% endif %}
 
 {% if yaml_error %}
-<div class="banner err"><strong>La plantilla de métricas tiene un problema</strong><br>{{ yaml_error }}</div>
+<div class="banner err"><strong>The metrics template has a problem</strong><br>{{ yaml_error }}</div>
 {% endif %}
 
 <div class="card">
-  <div class="paso"><span class="n">1</span><h2>Extraer la estructura del reporte</h2></div>
-  <p class="muted">Lee el .pbix y guarda sus páginas, visuales y medidas en <code>out/</code>.
-     Es el primer paso y no toca Teradata.</p>
-  <form method="post" action="/reportes/{{ name }}/extraer">
-    <button type="submit">Extraer</button>
+  <div class="step"><span class="n">1</span><h2>Extract the report's structure</h2></div>
+  <p class="muted">Reads the .pbix and saves its pages, visuals, and measures under <code>out/</code>.
+     This is the first step and doesn't touch Teradata.</p>
+  <form method="post" action="/reports/{{ name }}/extract">
+    <button type="submit">Extract</button>
   </form>
 </div>
 
 <div class="card">
-  <div class="paso"><span class="n">2</span><h2>Plantilla de métricas (SQL por visual)</h2></div>
+  <div class="step"><span class="n">2</span><h2>Metrics template (SQL per visual)</h2></div>
   {% if has_yaml %}
-    <p class="muted">Ya existe <code>metrics/{{ name }}.yaml</code>. Ahí vive el SQL de cada visual;
-       se edita a mano (skill <code>dax-to-teradata-sql</code>), esta pantalla no lo pisa salvo
-       que lo pidas explícitamente.</p>
-    <form method="post" action="/reportes/{{ name }}/plantilla" onsubmit="return confirm('Esto reescribe metrics/{{ name }}.yaml y se pierde el SQL que ya esté escrito. ¿Seguro?');">
+    <p class="muted"><code>metrics/{{ name }}.yaml</code> already exists. That's where each visual's
+       SQL lives; it's edited by hand (skill <code>dax-to-teradata-sql</code>) — this screen won't
+       overwrite it unless you explicitly ask it to.</p>
+    <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml and any SQL already written is lost. Are you sure?');">
       <div class="checkbox-row">
-        <input type="checkbox" id="regenerar" name="regenerar">
-        <label for="regenerar" style="margin:0">Regenerar desde cero (perdés el SQL ya escrito)</label>
+        <input type="checkbox" id="regenerate" name="regenerate">
+        <label for="regenerate" style="margin:0">Regenerate from scratch (loses the SQL already written)</label>
       </div>
-      <button type="submit" class="secundario">Regenerar plantilla</button>
+      <button type="submit" class="secondary">Regenerate template</button>
     </form>
   {% else %}
-    <p class="muted">Genera <code>metrics/{{ name }}.yaml</code> con un <code>TODO</code> por
-       visual para que alguien complete el SQL de Teradata.</p>
-    <form method="post" action="/reportes/{{ name }}/plantilla">
-      <button type="submit">Generar plantilla</button>
+    <p class="muted">Generates <code>metrics/{{ name }}.yaml</code> with a <code>TODO</code> per
+       visual for someone to fill in the Teradata SQL.</p>
+    <form method="post" action="/reports/{{ name }}/scaffold">
+      <button type="submit">Generate template</button>
     </form>
   {% endif %}
 </div>
 
 <div class="card">
-  <div class="paso"><span class="n">3</span><h2>Convertir a HTML</h2></div>
+  <div class="step"><span class="n">2b</span><h2>Map Power BI tables to Teradata (optional)</h2></div>
+  <p class="muted">Power BI uses logical table names that don't exist as such in Teradata. Map them
+     once here and step 2 will pre-fill the SQL's <code>FROM</code> instead of leaving it empty.</p>
+  <a class="btn secondary" href="/reports/{{ name }}/table-map">Map tables</a>
+</div>
+
+<div class="card">
+  <div class="step"><span class="n">3</span><h2>Convert to HTML</h2></div>
   {% if not spec %}
-    <p class="muted">Primero completá el paso 2 y escribí el SQL de cada visual en el yaml.</p>
+    <p class="muted">Finish step 2 first and write the SQL for each visual in the yaml.</p>
   {% else %}
-  <form method="post" action="/reportes/{{ name }}/convertir">
-    <label>Modo de entrega</label>
+  <form method="post" action="/reports/{{ name }}/convert">
+    <label>Delivery mode</label>
     <div class="radios">
-      <label style="margin:0"><input type="radio" name="modo" value="snapshot" checked> Foto (datos incrustados)</label>
-      <label style="margin:0"><input type="radio" name="modo" value="live"> En vivo (requiere el servicio corriendo)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true"> Snapshot (embedded data)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true"> Live (needs the service running)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false"> HAH (HTML App Host — see ADR-004, untested against a real HAH)</label>
+    </div>
+    <div id="hah-options" hidden>
+      <label for="hah_env">HAH environment</label>
+      <select id="hah_env" name="hah_env">
+        <option value="dev">dev</option>
+        <option value="uat">uat</option>
+        <option value="prd">prd</option>
+      </select>
     </div>
 
     {% if roles %}
-    <label for="rol">Rol / permiso</label>
-    <select id="rol" name="rol">
-      <option value="">— elegí un rol —</option>
+    <label for="role">Role / permission</label>
+    <select id="role" name="role">
+      <option value="">— pick a role —</option>
       {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
     </select>
     {% endif %}
 
     {% for pname, p in spec.parameters.items() %}
-    <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separá varios valores con comas){% endif %}</label>
+    <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separate multiple values with commas){% endif %}</label>
     <input type="{{ 'number' if p.get('type') == 'int' else 'text' }}" id="param__{{ pname }}"
            name="param__{{ pname }}" value="{{ p.get('default') if p.get('default') is not none else '' }}">
     {% endfor %}
 
-    {% if not has_teradata and demo_disponible %}
+    {% if not has_teradata and demo_available %}
     <div class="checkbox-row">
-      <input type="checkbox" id="usar_demo" name="usar_demo">
-      <label for="usar_demo" style="margin:0">Usar datos de prueba (no hay Teradata configurado; esto es solo para ver el diseño)</label>
+      <input type="checkbox" id="use_demo" name="use_demo">
+      <label for="use_demo" style="margin:0">Use test data (no Teradata configured; this is just to preview the design)</label>
     </div>
     {% elif not has_teradata %}
-    <p class="muted">⚠ No hay Teradata configurado en <code>.env</code>; el modo foto no va a poder traer datos reales.</p>
+    <p class="muted">⚠ No Teradata configured in <code>.env</code>; snapshot mode won't be able to fetch real data.</p>
     {% endif %}
 
-    <button type="submit">Generar HTML</button>
+    <button type="submit">Generate HTML</button>
   </form>
   {% endif %}
 </div>
 
 <div class="card">
-  <div class="paso"><span class="n">4</span><h2>Validar contra Power BI</h2></div>
+  <div class="step"><span class="n">4</span><h2>Validate against Power BI</h2></div>
   {% if not spec %}
-    <p class="muted">Primero completá el paso 2.</p>
+    <p class="muted">Finish step 2 first.</p>
   {% elif not has_teradata %}
-    <p class="muted">Necesita Teradata configurado en <code>.env</code> (pedíselo al equipo técnico).</p>
+    <p class="muted">Needs Teradata configured in <code>.env</code> (ask the technical team).</p>
   {% else %}
-    <p class="muted">Ejecuta el <code>sql</code> de cada visual y lo compara contra <code>reference_sql</code>
-       (o el CSV de referencia), con la tolerancia definida en el yaml.</p>
-    <form method="post" action="/reportes/{{ name }}/validar">
-      <button type="submit">Validar</button>
+    <p class="muted">Runs each visual's <code>sql</code> and compares it against <code>reference_sql</code>
+       (or the reference CSV), with the tolerance defined in the yaml.</p>
+    <form method="post" action="/reports/{{ name }}/validate">
+      <button type="submit">Validate</button>
     </form>
   {% endif %}
 </div>

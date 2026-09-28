@@ -220,7 +220,7 @@ def extract_layout(pbix: Path) -> dict:
         names = z.namelist()
         layout_member = next((n for n in names if n.endswith("Report/Layout")), None)
         if layout_member is None:
-            raise ValueError("No se encontró Report/Layout (¿es formato PBIR/PBIP? ver README)")
+            raise ValueError("Report/Layout not found (PBIR/PBIP format? see README)")
         layout = decode_layout(z.read(layout_member))
         theme = extract_theme(z, layout)
         custom_packages = [
@@ -350,15 +350,15 @@ def write_inventory(out_dir: Path, reports: list[tuple[dict, dict]]) -> None:
     dump_csv(out_dir / "inventory_visuals.csv", vis_rows)
     dump_csv(out_dir / "inventory_measures.csv", meas_rows)
 
-    lines = ["# Inventario de migración Power BI → HTML\n",
-             f"Reportes procesados: **{len(reports)}**  ",
-             f"Visuales totales: **{sum(type_counter.values())}**  ",
-             f"Medidas totales: **{len(meas_rows)}**\n",
-             "## Visuales por tipo\n", "| Tipo | Cantidad | Custom |", "|---|---:|:---:|"]
+    lines = ["# Power BI → HTML migration inventory\n",
+             f"Reports processed: **{len(reports)}**  ",
+             f"Total visuals: **{sum(type_counter.values())}**  ",
+             f"Total measures: **{len(meas_rows)}**\n",
+             "## Visuals by type\n", "| Type | Count | Custom |", "|---|---:|:---:|"]
     for t, n in type_counter.most_common():
-        lines.append(f"| {t} | {n} | {'sí' if t in custom_counter else ''} |")
-    lines += ["\n## Por reporte\n",
-              "| Reporte | Páginas | Visuales | Custom | Medidas | Reglas RLS | Modos | Error modelo |",
+        lines.append(f"| {t} | {n} | {'yes' if t in custom_counter else ''} |")
+    lines += ["\n## By report\n",
+              "| Report | Pages | Visuals | Custom | Measures | RLS rules | Modes | Model error |",
               "|---|---:|---:|---:|---:|---:|---|---|"]
     for r in per_report:
         lines.append(f"| {r['report']} | {r['pages']} | {r['visuals']} | {r['custom_visuals']} | "
@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     src = Path(args.path)
     files = sorted(src.rglob("*.pbix")) if src.is_dir() else [src]
     if not files:
-        print("No se encontraron archivos .pbix", file=sys.stderr)
+        print("No .pbix files found", file=sys.stderr)
         return 1
 
     out_dir = Path(args.out)
@@ -396,19 +396,19 @@ def main(argv: list[str] | None = None) -> int:
             continue
         model = {} if args.no_model else extract_model(pbix)
         if model.get("error"):
-            print(f"   ! modelo: {model['error']}")
+            print(f"   ! model: {model['error']}")
 
         rdir = out_dir / safe_name(pbix.stem)
         rdir.mkdir(exist_ok=True)
         (rdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
         (rdir / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         n_vis = sum(len(p["visuals"]) for p in layout["pages"])
-        print(f"   ✓ {len(layout['pages'])} páginas, {n_vis} visuales, "
-              f"{len(model.get('measures') or []) if isinstance(model.get('measures'), list) else 0} medidas")
+        print(f"   ✓ {len(layout['pages'])} pages, {n_vis} visuals, "
+              f"{len(model.get('measures') or []) if isinstance(model.get('measures'), list) else 0} measures")
         results.append((layout, model))
 
     write_inventory(out_dir, results)
-    print(f"\nInventario en {out_dir}/summary.md")
+    print(f"\nInventory at {out_dir}/summary.md")
     return 0
 
 

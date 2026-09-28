@@ -16,7 +16,7 @@ credentials in the yaml or in code.
 import teradatasql
 con = teradatasql.connect(host=H, user=U, password=P, logmech=LOGMECH, encryptdata="true")
 with con.cursor() as cur:
-    cur.execute("SELECT ... WHERE anio = ?", [2026])   # positional ? parameters
+    cur.execute("SELECT ... WHERE year = ?", [2026])   # positional ? parameters
     cols = [d[0].lower() for d in cur.description]
     rows = cur.fetchall()
 ```
@@ -30,15 +30,15 @@ The service account shouldn't see everything. Teradata lets it act *on behalf of
 
 ```sql
 -- DBA, once:
-GRANT CONNECT THROUGH svc_pbix2html TO PERMANENT usuario1, usuario2 WITH ROLE rol_ventas;
+GRANT CONNECT THROUGH svc_pbix2html TO PERMANENT user1, user2 WITH ROLE role_sales;
 -- or WITHOUT ROLE to inherit the proxy user's own roles.
 
 -- The app, per session/request:
-SET QUERY_BAND = 'PROXYUSER=usuario1;APPNAME=pbix2html;REPORT=Ventas;' FOR SESSION;
+SET QUERY_BAND = 'PROXYUSER=user1;APPNAME=pbix2html;REPORT=Sales;' FOR SESSION;
 ```
 
 After `SET QUERY_BAND`, secure views that filter by `USER`/`CURRENT_ROLE` and RLS
-constraints are evaluated as `usuario1`, and DBQL records `ProxyUser`. To go back to the
+constraints are evaluated as `user1`, and DBQL records `ProxyUser`. To go back to the
 service account: `SET QUERY_BAND = NONE FOR SESSION;` or close the session.
 `serve.py` takes the user from the auth token; **never** from a URL parameter.
 
@@ -48,17 +48,17 @@ to a `PROXYUSER` representative of the role, or to a fixed predicate. One HTML =
 ## Power BI model RLS → Teradata
 
 `model.json → rls` carries `RoleName`, `TableName`, `FilterExpression` (DAX). Typical
-pattern: `[Region] = LOOKUPVALUE(Seguridad[Region], Seguridad[Usuario],
+pattern: `[Region] = LOOKUPVALUE(Security[Region], Security[User],
 USERPRINCIPALNAME())`. Teradata equivalent: a secure view
 
 ```sql
-REPLACE VIEW sec.v_ventas AS
-SELECT v.* FROM ventas v
-JOIN seguridad_usuario s ON s.region = v.region
-WHERE s.usuario = USER;   -- USER = the proxy user after SET QUERY_BAND
+REPLACE VIEW sec.v_sales AS
+SELECT v.* FROM sales v
+JOIN security_user s ON s.region = v.region
+WHERE s.user_name = USER;   -- USER = the proxy user after SET QUERY_BAND
 ```
 
-and the yaml queries `sec.v_ventas` instead of `ventas`. Record it in ADR-003.
+and the yaml queries `sec.v_sales` instead of `sales`. Record it in ADR-003.
 
 ## DBQL: capturing Power BI's SQL
 

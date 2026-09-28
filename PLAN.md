@@ -8,11 +8,16 @@ Status: **Phase 0 done, Phase 1 in progress.** Update this file when you close o
 - [x] Global inventory `out/summary.md`, `inventory_visuals.csv`, `inventory_measures.csv`.
 - [ ] Run the extractor over the ~50 real reports and paste the numbers here:
       unique visuals by type, custom visuals, unique measures, reports with RLS, storage modes.
-      **Blocked:** we still don't have access to the real .pbix files (2026-09-13). Copy them to `reportes/`
-      (or point to the path) so `pbix2html extract reportes --out out` can be run over the batch.
-      In the meantime: fixed a Windows extractor bug (`UnicodeEncodeError` when
-      printing `→ ✓ ✗` on cp1252 consoles, see `cli.py`/`extract.py`) and validated end
-      to end against the repo's only `.pbix` (synthetic, no `DataModel`, used by the tests).
+      **Progress (2026-09-28):** an external user ran the tool against real files and hit
+      several environment/format issues, written up in `pbix2html-fixv1.md` and fixed in the
+      repo: a Windows `UnicodeEncodeError` printing `→ ✓ ✗` on cp1252 consoles; a
+      Python 3.13 + Starlette `Jinja2Templates` incompatibility in the panel; and — the big
+      one — **all of their real `.pbix` files were PBIR format** (Power BI Desktop 2024+'s
+      default), which the extractor didn't support at all. PBIR support is now in
+      `extract.py` (see skill `pbix-layout`), but a few field paths (visual groups, page/visual
+      filters, hidden-page key) are still best-effort guesses pending confirmation against a
+      real file. Still blocked on actually getting the ~50 files copied into `reports/` to
+      run the batch and fill in these numbers.
 - [ ] ADR-001: snapshot vs live (draft in `docs/decisions/`). Decide per-report or globally.
       **Blocked by the previous point** (the decision depends on the real inventory).
 - [ ] ADR-002: build (this app) vs buy (Superset/Metabase/Evidence over Teradata). Input: inventory.
@@ -64,4 +69,10 @@ Suggested order: by business area, starting with the ones that reuse measures al
 - Measures with complex time intelligence (nested SAMEPERIODLASTYEAR, TOTALYTD with filters) need windowed SQL; estimate separately.
 - Custom visuals: manual reinterpretation. List which ones and how many after Phase 0.
 - Cross-filter interactions between visuals: out of scope unless an owner requires it; in that case, live mode only.
-- .pbix format variations across Desktop versions; extend `make_fake_pbix.py` and tests with each new real case found.
+- .pbix format variations across Desktop versions; extend `make_fake_pbix.py` (classic) /
+  `make_fake_pbir_pbix.py` (PBIR) and tests with each new real case found.
+- **New delivery mode `hah`** (ADR-004, added 2026-09-28): emits HTML compatible with the
+  teradata-report skill / HTML App Host, as an alternative to `serve.py` for live mode.
+  Implemented per spec in `pbix2html-fixv1.md` #10, but **not validated against a real HAH
+  environment or the teradata-report MCP tools** in this session — treat generated `hah`
+  HTML as unverified until someone with HAH access tries an actual upload/view.

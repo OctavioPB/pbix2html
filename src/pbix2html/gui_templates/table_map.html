@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a class="link" href="/reports/{{ name }}">&larr; {{ name }}</a></p>
+<h1>Table mapping — {{ name }}</h1>
+<p class="muted">{{ pbix }}</p>
+
+<div class="card">
+  <p class="muted">Power BI uses logical names (the ones you see here) that don't exist as such in
+     Teradata. Tell step 2's template which real Teradata table or view each one corresponds to,
+     and the generated SQL will start with a <code>FROM</code> already built instead of an empty
+     <code>TODO</code> — you'll still need to fill in columns and filters by hand
+     (skill <code>dax-to-teradata-sql</code>).</p>
+
+  {% if not entities %}
+  <p class="muted">There are no fields to map yet: run step 1 (Extract structure) on the
+     report's page first.</p>
+  {% else %}
+  <form method="post" action="/reports/{{ name }}/table-map">
+    <table>
+      <tr><th>Power BI table</th><th></th><th>Teradata table/view</th></tr>
+      {% for entity in entities %}
+      <tr>
+        <td>{{ entity }}</td>
+        <td class="muted">&rarr;</td>
+        <td><input type="text" name="td__{{ entity }}" value="{{ mapping.get(entity, '') }}"
+                   placeholder="schema.view_or_table"></td>
+      </tr>
+      {% endfor %}
+    </table>
+    <button type="submit">Save mapping</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

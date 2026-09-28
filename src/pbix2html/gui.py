@@ -21,7 +21,7 @@ from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader
 
 from . import extract as ex
 from . import semantic
@@ -30,13 +30,32 @@ from .query import FakeBackend, TeradataBackend, run_report
 from .render import render_html
 from .validate import validate_report, write_markdown
 
-REPORTES_DIR = Path("reportes")
+REPORTS_DIR = Path("reports")
 OUT_DIR = Path("out")
 DEMO_FIXTURE = Path("tests/fixtures/fake_block.json")
 TEMPLATES_DIR = Path(__file__).parent / "gui_templates"
 
 app = FastAPI(title="pbix2html — panel")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+_jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
+
+
+class _Templates:
+    """Thin stand-in for starlette's Jinja2Templates.
+
+    Starlette's wrapper stashes `env.globals` (a dict) inside Jinja2's template LRU
+    cache key; Python 3.13 tightened hashability rules and that raises
+    `TypeError: unhashable type: 'dict'` on every request. Calling Jinja2 directly
+    sidesteps it — same `TemplateResponse(name, context)` call shape, so nothing
+    downstream needs to change.
+    """
+
+    def TemplateResponse(self, name: str, context: dict) -> HTMLResponse:
+        template = _jinja_env.get_template(name)
+        return HTMLResponse(template.render(context))
+
+
+templates = _Templates()
 
 
 # ----------------------------------------------------------------------------
@@ -44,18 +63,18 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # ----------------------------------------------------------------------------
 
 def _pbix_files() -> list[Path]:
-    if not REPORTES_DIR.exists():
+    if not REPORTS_DIR.exists():
         return []
-    return sorted(REPORTES_DIR.glob("*.pbix"))
+    return sorted(REPORTS_DIR.glob("*.pbix"))
 
 
 def _find_pbix(name: str) -> Path:
-    """Only accepts names that match a real .pbix under reportes/: prevents
+    """Only accepts names that match a real .pbix under reports/: prevents
     someone from editing the URL by hand and trying to read another disk path."""
     for p in _pbix_files():
         if p.stem == name:
             return p
-    raise HTTPException(status_code=404, detail=f"No se encontró '{name}.pbix' en reportes/")
+    raise HTTPException(status_code=404, detail=f"'{name}.pbix' not found under reports/")
 
 
 def _load_spec(name: str) -> tuple[semantic.ReportSpec | None, str | None]:
@@ -66,7 +85,7 @@ def _load_spec(name: str) -> tuple[semantic.ReportSpec | None, str | None]:
     try:
         return semantic.load(name), None
     except Exception as e:
-        return None, f"metrics/{name}.yaml tiene un error y no se pudo leer: {type(e).__name__}: {e}"
+        return None, f"metrics/{name}.yaml has an error and couldn't be read: {type(e).__name__}: {e}"
 
 
 def _real_roles(spec: semantic.ReportSpec | None) -> list[str]:
@@ -88,7 +107,7 @@ def _page(request: Request, pbix: Path, result: dict[str, Any] | None = None) ->
         "spec": spec,
         "roles": _real_roles(spec),
         "has_teradata": settings.has_teradata,
-        "demo_disponible": DEMO_FIXTURE.exists(),
+        "demo_available": DEMO_FIXTURE.exists(),
         "result": result,
     }
     return templates.TemplateResponse("report.html", ctx)
@@ -110,19 +129,19 @@ def home(request: Request):
             "has_yaml": yaml_path.exists(),
             "n_html": len(html_files),
         })
-    return templates.TemplateResponse("index.html", {"request": request, "reportes": rows})
+    return templates.TemplateResponse("index.html", {"request": request, "reports": rows})
 
 
-@app.post("/subir")
-def subir_pbix(archivo: UploadFile):
-    nombre = Path(archivo.filename or "").name  # strips any path; just the filename
-    if not nombre.lower().endswith(".pbix") or not re.fullmatch(r"[\w\-. ]+\.pbix", nombre, re.I):
-        raise HTTPException(400, "Subí un archivo .pbix con nombre simple (letras, números, espacios, - o _).")
-    REPORTES_DIR.mkdir(exist_ok=True)
-    destino = REPORTES_DIR / nombre
-    destino.write_bytes(archivo.file.read())
+@app.post("/upload")
+def upload_pbix(file: UploadFile):
+    filename = Path(file.filename or "").name  # strips any path; just the filename
+    if not filename.lower().endswith(".pbix") or not re.fullmatch(r"[\w\-. ]+\.pbix", filename, re.I):
+        raise HTTPException(400, "Upload a .pbix file with a simple name (letters, digits, spaces, - or _).")
+    REPORTS_DIR.mkdir(exist_ok=True)
+    destination = REPORTS_DIR / filename
+    destination.write_bytes(file.file.read())
     return HTMLResponse(
-        f'<meta http-equiv="refresh" content="0; url=/reportes/{destino.stem}">', status_code=303
+        f'<meta http-equiv="refresh" content="0; url=/reports/{destination.stem}">', status_code=303
     )
 
 
@@ -130,14 +149,14 @@ def subir_pbix(archivo: UploadFile):
 # Report detail
 # ----------------------------------------------------------------------------
 
-@app.get("/reportes/{name}", response_class=HTMLResponse)
-def ver_reporte(request: Request, name: str):
+@app.get("/reports/{name}", response_class=HTMLResponse)
+def view_report(request: Request, name: str):
     pbix = _find_pbix(name)
     return _page(request, pbix)
 
 
-@app.post("/reportes/{name}/extraer")
-def accion_extraer(request: Request, name: str):
+@app.post("/reports/{name}/extract")
+def action_extract(request: Request, name: str):
     pbix = _find_pbix(name)
     try:
         layout = ex.extract_layout(pbix)
@@ -149,83 +168,151 @@ def accion_extraer(request: Request, name: str):
         n_vis = sum(len(p["visuals"]) for p in layout["pages"])
         n_meas = len(model.get("measures") or []) if isinstance(model.get("measures"), list) else 0
         result = {
-            "ok": True, "title": "Estructura extraída",
-            "message": f"{len(layout['pages'])} páginas, {n_vis} visuales, {n_meas} medidas.",
-            "detail": [f"Aviso del modelo: {model['error']}"] if model.get("error") else [],
+            "ok": True, "title": "Structure extracted",
+            "message": f"{len(layout['pages'])} pages, {n_vis} visuals, {n_meas} measures.",
+            "detail": [f"Model warning: {model['error']}"] if model.get("error") else [],
         }
     except Exception as e:
-        result = {"ok": False, "title": "No se pudo extraer", "message": f"{type(e).__name__}: {e}", "detail": []}
+        result = {"ok": False, "title": "Couldn't extract", "message": f"{type(e).__name__}: {e}", "detail": []}
     return _page(request, pbix, result)
 
 
-@app.post("/reportes/{name}/plantilla")
-def accion_plantilla(request: Request, name: str, regenerar: bool = Form(False)):
+@app.post("/reports/{name}/scaffold")
+def action_scaffold(request: Request, name: str, regenerate: bool = Form(False)):
     pbix = _find_pbix(name)
     try:
         layout = ex.extract_layout(pbix)
         model = ex.extract_model(pbix)
-        path = semantic.write_scaffold(layout, model, overwrite=regenerar)
-        result = {"ok": True, "title": "Plantilla generada", "message": f"Se escribió {path}.",
-                  "detail": ["Completá el SQL a mano (buscá \"TODO\" en el archivo) antes de convertir."]}
+        table_map = _load_table_map(name)
+        path = semantic.write_scaffold(layout, model, overwrite=regenerate, table_map=table_map)
+        detail = ["Fill in the SQL by hand (look for \"TODO\" in the file) before converting."]
+        if table_map:
+            detail.append(f"Used the {len(table_map)} Power BI → Teradata table mapping(s) to "
+                          f"pre-fill the SQL (step 2b).")
+        result = {"ok": True, "title": "Template generated", "message": f"Wrote {path}.", "detail": detail}
     except FileExistsError as e:
-        result = {"ok": False, "title": "Ya existe una plantilla", "message": str(e), "detail": []}
+        result = {"ok": False, "title": "A template already exists", "message": str(e), "detail": []}
     except Exception as e:
-        result = {"ok": False, "title": "No se pudo generar la plantilla", "message": f"{type(e).__name__}: {e}", "detail": []}
+        result = {"ok": False, "title": "Couldn't generate the template", "message": f"{type(e).__name__}: {e}", "detail": []}
     return _page(request, pbix, result)
 
 
-@app.post("/reportes/{name}/convertir")
-async def accion_convertir(request: Request, name: str):
+# ----------------------------------------------------------------------------
+# Step 2b: Power BI table → Teradata table/view mapping
+# ----------------------------------------------------------------------------
+
+def _table_map_path(name: str) -> Path:
+    return semantic.METRICS_DIR / f"{name}.table_map.json"
+
+
+def _load_table_map(name: str) -> dict[str, str]:
+    path = _table_map_path(name)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _pbi_entities(name: str) -> list[str]:
+    """Unique Power BI entity names referenced by the report's visuals, taken from the
+    layout already extracted in step 1 (out/<name>/layout.json)."""
+    layout_path = OUT_DIR / ex.safe_name(name) / "layout.json"
+    if not layout_path.exists():
+        return []
+    layout = json.loads(layout_path.read_text(encoding="utf-8"))
+    entities: set[str] = set()
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            for ref in v.get("fields") or []:
+                if isinstance(ref, str) and "." in ref:
+                    entities.add(ref.split(".", 1)[0])
+    return sorted(entities)
+
+
+@app.get("/reports/{name}/table-map", response_class=HTMLResponse)
+def view_table_map(request: Request, name: str):
+    pbix = _find_pbix(name)
+    entities = _pbi_entities(name)
+    return templates.TemplateResponse("table_map.html", {
+        "request": request, "name": name, "pbix": str(pbix),
+        "entities": entities, "mapping": _load_table_map(name),
+    })
+
+
+@app.post("/reports/{name}/table-map")
+async def save_table_map(request: Request, name: str):
+    pbix = _find_pbix(name)
+    form = await request.form()
+    mapping = {}
+    for key, val in form.items():
+        if key.startswith("td__") and str(val).strip():
+            mapping[key[len("td__"):]] = str(val).strip()
+    _table_map_path(name).write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+    result = {"ok": True, "title": "Mapping saved",
+              "message": f"{len(mapping)} Power BI table(s) mapped to Teradata.", "detail": []}
+    return _page(request, pbix, result)
+
+
+@app.post("/reports/{name}/convert")
+async def action_convert(request: Request, name: str):
     pbix = _find_pbix(name)
     spec, yaml_error = _load_spec(name)
     if spec is None:
-        result = {"ok": False, "title": "Falta la plantilla de métricas", "detail": [yaml_error] if yaml_error else [],
-                   "message": "Generá primero la plantilla (paso 2) y completá el SQL antes de convertir."}
+        result = {"ok": False, "title": "Missing the metrics template", "detail": [yaml_error] if yaml_error else [],
+                   "message": "Generate the template first (step 2) and fill in the SQL before converting."}
         return _page(request, pbix, result)
 
     form = await request.form()
-    modo = form.get("modo", "snapshot")
-    rol = form.get("rol", "")
-    usar_demo = form.get("usar_demo") == "on"
+    mode = form.get("mode", "snapshot")
+    role_name = form.get("role", "")
+    use_demo = form.get("use_demo") == "on"
+    hah_env = form.get("hah_env", "dev")
     overrides = {}
     for pname in spec.parameters:
         val = form.get(f"param__{pname}")
         if val not in (None, ""):
             overrides[pname] = val
-    return _convertir_impl(request, pbix, spec, modo, rol, usar_demo, overrides)
+    return _convert_impl(request, pbix, spec, mode, role_name, use_demo, overrides, hah_env)
 
 
-def _convertir_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, modo: str, rol: str,
-                     usar_demo: bool, overrides: dict[str, str]) -> HTMLResponse:
+def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode: str, role_name: str,
+                   use_demo: bool, overrides: dict[str, str], hah_env: str = "dev") -> HTMLResponse:
     name = pbix.stem
     try:
         layout = ex.extract_layout(pbix)
         values = semantic.resolve_params(spec, overrides)
 
-        role = rol or None
+        role = role_name or None
         proxy_user = None
         if role:
             r = spec.roles.get(role)
             if r is None:
-                raise ValueError(f"rol '{role}' no está definido en metrics/{name}.yaml")
+                raise ValueError(f"role '{role}' isn't defined in metrics/{name}.yaml")
             proxy_user = r.get("proxy_user")
 
         data = None
-        if modo == "snapshot":
+        hah_base = None
+        if mode == "hah":
+            # ADR-004: the HAH platform fetches each visual's SQL itself, client-side —
+            # there's nothing to run against Teradata here, same as live mode.
+            hah_base = settings.hah_bases.get(hah_env, settings.hah_bases["dev"])
+        elif mode == "snapshot":
             if settings.has_teradata:
                 backend = TeradataBackend()
-            elif usar_demo and DEMO_FIXTURE.exists():
+            elif use_demo and DEMO_FIXTURE.exists():
                 block = json.loads(DEMO_FIXTURE.read_text(encoding="utf-8"))
                 backend = FakeBackend(fixtures={}, default=block)
             else:
                 raise ValueError(
-                    "No hay conexión a Teradata configurada (.env) y no marcaste "
-                    "\"usar datos de prueba\". Pedile al equipo técnico que configure "
-                    "las credenciales, o tildá la casilla de demo para probar el diseño."
+                    "No Teradata connection is configured (.env) and you didn't check "
+                    "\"use test data\". Ask the technical team to set up the credentials, "
+                    "or check the demo box to preview the design."
                 )
             data = run_report(spec, values, backend, proxy_user=proxy_user)
 
-        html = render_html(layout, spec, values, data, mode=modo, role=role)
+        html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base)
         out_name = f"{name}" + (f".{role}" if role else "") + ".html"
         OUT_DIR.mkdir(exist_ok=True)
         (OUT_DIR / out_name).write_text(html, encoding="utf-8")
@@ -233,29 +320,35 @@ def _convertir_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mod
         n_err = sum(1 for d in (data or {}).values() if d.get("error")) if data else None
         detail = []
         if n_err:
-            detail.append(f"{n_err} visual(es) con error al traer datos (se muestran dentro del HTML).")
+            detail.append(f"{n_err} visual(s) had an error fetching data (shown inside the HTML).")
+        if mode == "hah":
+            detail.append(
+                f"HTML generated for HAH ({hah_env}, {hah_base}); not tested against a real HAH "
+                f"yet (see ADR-004). Upload it with the teradata-report skill's create_report "
+                f"tool before trusting it for production."
+            )
+        mode_label = {"snapshot": "snapshot", "live": "live", "hah": f"HAH ({hah_env})"}.get(mode, mode)
         result = {
-            "ok": True, "title": "HTML generado", "detail": detail,
-            "message": f"Modo {'foto' if modo == 'snapshot' else 'en vivo'}"
-                       + (f", rol {role}" if role else "") + ".",
-            "html_link": f"/archivos/{out_name}",
+            "ok": True, "title": "HTML generated", "detail": detail,
+            "message": f"{mode_label} mode" + (f", role {role}" if role else "") + ".",
+            "html_link": f"/files/{out_name}",
         }
     except Exception as e:
-        result = {"ok": False, "title": "No se pudo convertir", "message": f"{type(e).__name__}: {e}", "detail": []}
+        result = {"ok": False, "title": "Couldn't convert", "message": f"{type(e).__name__}: {e}", "detail": []}
     return _page(request, pbix, result)
 
 
-@app.post("/reportes/{name}/validar")
-def accion_validar(request: Request, name: str):
+@app.post("/reports/{name}/validate")
+def action_validate(request: Request, name: str):
     pbix = _find_pbix(name)
     spec, yaml_error = _load_spec(name)
     if spec is None:
-        result = {"ok": False, "title": "Falta la plantilla de métricas", "detail": [yaml_error] if yaml_error else [],
-                   "message": "Generá primero la plantilla (paso 2) y completá el SQL antes de validar."}
+        result = {"ok": False, "title": "Missing the metrics template", "detail": [yaml_error] if yaml_error else [],
+                   "message": "Generate the template first (step 2) and fill in the SQL before validating."}
         return _page(request, pbix, result)
     if not settings.has_teradata:
-        result = {"ok": False, "title": "Validar requiere Teradata", "detail": [],
-                   "message": "Pedile al equipo técnico que configure TERADATA_HOST/USER/PASSWORD en .env."}
+        result = {"ok": False, "title": "Validating needs Teradata", "detail": [],
+                   "message": "Ask the technical team to set TERADATA_HOST/USER/PASSWORD in .env."}
         return _page(request, pbix, result)
     try:
         values = semantic.resolve_params(spec, {})
@@ -265,13 +358,13 @@ def accion_validar(request: Request, name: str):
         detail = [f"{vid}: {r['status']}" + (f" — {r['detail'][0]}" if r.get("detail") else "")
                   for vid, r in results.items() if r["status"] != "OK"]
         result = {
-            "ok": counts["DIFF"] == 0 and counts["ERROR"] == 0, "title": "Validación terminada",
+            "ok": counts["DIFF"] == 0 and counts["ERROR"] == 0, "title": "Validation finished",
             "message": f"OK {counts['OK']} · DIFF {counts['DIFF']} · SKIP {counts['SKIP']} · ERROR {counts['ERROR']} "
-                       f"(detalle completo en {path}).",
+                       f"(full detail in {path}).",
             "detail": detail[:20],
         }
     except Exception as e:
-        result = {"ok": False, "title": "No se pudo validar", "message": f"{type(e).__name__}: {e}", "detail": []}
+        result = {"ok": False, "title": "Couldn't validate", "message": f"{type(e).__name__}: {e}", "detail": []}
     return _page(request, pbix, result)
 
 
@@ -279,13 +372,13 @@ def accion_validar(request: Request, name: str):
 # Serve the generated HTML files
 # ----------------------------------------------------------------------------
 
-@app.get("/archivos/{filename}")
-def ver_archivo(filename: str):
+@app.get("/files/{filename}")
+def serve_file(filename: str):
     if "/" in filename or "\\" in filename or not filename.lower().endswith(".html"):
-        raise HTTPException(400, "nombre de archivo inválido")
+        raise HTTPException(400, "invalid file name")
     path = OUT_DIR / filename
     if not path.exists():
-        raise HTTPException(404, "archivo no encontrado")
+        raise HTTPException(404, "file not found")
     return FileResponse(path, media_type="text/html")
 
 
@@ -298,5 +391,5 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) ->
     url = f"http://{host}:{port}/"
     if open_browser:
         Timer(1.0, webbrowser.open, [url]).start()
-    print(f"Panel de pbix2html: {url}  (cerrá esta ventana para apagarlo)")
+    print(f"pbix2html panel: {url}  (close this window to shut it down)")
     uvicorn.run(app, host=host, port=port, log_level="warning")

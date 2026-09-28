@@ -1,0 +1,32 @@
+# Working example against the tests' synthetic .pbix (no Teradata; see tests/test_pipeline.py)
+report: Executive_Dashboard
+connection: teradata
+delivery: snapshot
+parameters:
+  year: { type: int, default: 2026, from_slicer: Calendar.Year, label: Year }
+roles:
+  default: { proxy_user: null }
+visuals:
+  v1:
+    kind: card
+    title: Net Revenue
+    sql: SELECT SUM(amount) AS value FROM sales WHERE year = :year
+    params: [year]
+    format: { value: "#,##0" }
+  v2:
+    kind: bar
+    title: Margin by Region
+    sql: SELECT region AS category, margin AS value FROM v_margin_region WHERE year = :year
+    params: [year]
+    format: { value: "0.0%" }
+  v4:
+    kind: column
+    title: Custom (Deneb) reinterpreted
+    sql: SELECT month AS category, amount AS value FROM v_revenue_month WHERE year = :year
+    params: [year]
+    notes: "Custom Deneb visual reinterpreted as columns; the original annotation is lost."
+  v5:
+    kind: table
+    sql: SELECT customer, amount FROM v_top_customers WHERE year = :year
+    params: [year]
+    format: { amount: "#,##0.00" }

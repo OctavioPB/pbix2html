@@ -80,11 +80,40 @@ def _query_ref_parts(ref: str) -> tuple[str | None, str, str]:
     return agg, table, col
 
 
-def scaffold(layout: dict, model: dict) -> dict:
-    """Builds the initial yaml dict. Does not write to disk."""
+def _sql_stub(fields_doc: list[str], table_map: dict[str, str]) -> str:
+    """Best-effort SQL skeleton once the Power BI entities involved are mapped to
+    Teradata tables/views (panel step 2b); a bare TODO otherwise. Always needs a
+    person to fill in real columns/filters — see skill dax-to-teradata-sql."""
+    if not table_map:
+        return "TODO -- see skill dax-to-teradata-sql; columns per kind"
+    td_tables = []
+    for ref in fields_doc:
+        # ref looks like "Values: Calendar.Year  -- DAX: ..."
+        entity = ref.split(": ", 1)[-1].split(".", 1)[0]
+        td = table_map.get(entity)
+        if td and td not in td_tables:
+            td_tables.append(td)
+    if not td_tables:
+        return "TODO -- see skill dax-to-teradata-sql; columns per kind"
+    return (
+        f"LOCKING ROW FOR ACCESS\n"
+        f"SELECT -- TODO: columns per kind (see skill html-renderer)\n"
+        f"FROM {', '.join(td_tables)}\n"
+        f"WHERE -- TODO: filters / parameters (:param)"
+    )
+
+
+def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict:
+    """Builds the initial yaml dict. Does not write to disk.
+
+    `table_map` (Power BI entity name → Teradata schema.table_or_view, see the panel's
+    step 2b / `metrics/<Report>.table_map.json`) is optional: when given, it's used to
+    pre-fill a best-effort `sql` stub per visual instead of a bare `TODO`.
+    """
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
     rls = model.get("rls") if isinstance(model.get("rls"), list) else []
+    table_map = table_map or {}
 
     parameters: dict[str, dict] = {}
     visuals: dict[str, dict] = {}
@@ -111,12 +140,12 @@ def scaffold(layout: dict, model: dict) -> dict:
                     dax = measures.get((table, col))
                     fields_doc.append(f"{role}: {ref}" + (f"  -- DAX: {dax}" if dax else ""))
             entry["fields"] = fields_doc
-            entry["sql"] = "TODO -- ver skill dax-to-teradata-sql; columnas según kind"
+            entry["sql"] = _sql_stub(fields_doc, table_map)
             entry["params"] = []
             entry["reference_sql"] = None
             entry["tolerance"] = {"rel": 1.0e-6}
             if v.get("is_custom"):
-                entry["notes"] = f"Custom visual '{v['type']}': elegir kind estándar y documentar diferencias."
+                entry["notes"] = f"Custom visual '{v['type']}': pick a standard kind and document the differences."
             if v.get("filters"):
                 entry["visual_filters"] = [f"{f['target']} ({f['type']})" for f in v["filters"]]
             visuals[v["id"]] = entry
@@ -128,22 +157,24 @@ def scaffold(layout: dict, model: dict) -> dict:
         "delivery": "snapshot",  # snapshot | live  (ADR-001)
         "page_filters": [f"{f['target']} ({f['type']})" for p in layout["pages"] for f in p["filters"]],
         "parameters": parameters,
-        "roles": {r.get("RoleName", "rol"): {"proxy_user": None, "where": None,
+        "roles": {r.get("RoleName", "role"): {"proxy_user": None, "where": None,
                                              "dax": r.get("FilterExpression"), "table": r.get("TableName")}
                   for r in rls} or {"default": {"proxy_user": None, "where": None}},
         "visuals": visuals,
     }
 
 
-def write_scaffold(layout: dict, model: dict, overwrite: bool = False) -> Path:
+def write_scaffold(layout: dict, model: dict, overwrite: bool = False,
+                    table_map: dict[str, str] | None = None) -> Path:
     path = yaml_path(layout["report"])
     if path.exists() and not overwrite:
-        raise FileExistsError(f"{path} ya existe; usa --overwrite para regenerar (perderás el SQL escrito)")
+        raise FileExistsError(f"{path} already exists; use --overwrite to regenerate (you'll lose the written SQL)")
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = ("# Capa semántica del reporte. Editar a mano: aquí vive la lógica migrada.\n"
-              "# Contratos de columnas por kind: .claude/skills/html-renderer/SKILL.md\n")
-    path.write_text(header + yaml.safe_dump(scaffold(layout, model), allow_unicode=True, sort_keys=False, width=110),
-                    encoding="utf-8")
+    header = ("# Report semantic layer. Edit by hand: this is where the migrated logic lives.\n"
+              "# Column contracts per kind: .claude/skills/html-renderer/SKILL.md\n")
+    path.write_text(
+        header + yaml.safe_dump(scaffold(layout, model, table_map), allow_unicode=True, sort_keys=False, width=110),
+        encoding="utf-8")
     return path
 
 
@@ -152,6 +183,7 @@ def load(report: str) -> ReportSpec:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     visuals = {}
     for vid, v in (raw.get("visuals") or {}).items():
+        v = v or {}  # a visual written as "v3:" with nothing under it parses as None
         visuals[str(vid)] = VisualSpec(
             id=str(vid), kind=v.get("kind", "unsupported"), title=v.get("title"), sql=v.get("sql"),
             params=list(v.get("params") or []), reference_sql=v.get("reference_sql"),
@@ -169,6 +201,7 @@ def resolve_params(spec: ReportSpec, overrides: dict[str, str]) -> dict[str, Any
     """Final parameter values: yaml default overridden by --params k=v."""
     values: dict[str, Any] = {}
     for name, p in spec.parameters.items():
+        p = p or {}  # a parameter written as "year:" with nothing under it parses as None
         val = overrides.get(name, p.get("default"))
         if p.get("multi") and isinstance(val, str):
             val = [x.strip() for x in val.split(",") if x.strip()]
@@ -177,5 +210,5 @@ def resolve_params(spec: ReportSpec, overrides: dict[str, str]) -> dict[str, Any
         values[name] = val
     unknown = set(overrides) - set(spec.parameters)
     if unknown:
-        raise KeyError(f"Parámetros no definidos en el yaml: {sorted(unknown)}")
+        raise KeyError(f"Parameters not defined in the yaml: {sorted(unknown)}")
     return values

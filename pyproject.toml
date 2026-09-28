@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pbix2html"
 version = "0.1.0"
-description = "Migración de reportes Power BI (.pbix, DirectQuery Teradata) a HTML"
+description = "Power BI report (.pbix, DirectQuery Teradata) to HTML migration"
 requires-python = ">=3.11"
 dependencies = [
   "pandas>=2.0",
@@ -31,7 +31,7 @@ pbix2html = ["templates/*.j2", "gui_templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["teradata: requiere conexión real a Teradata"]
+markers = ["teradata: requires a real Teradata connection"]
 
 [tool.ruff]
 line-length = 110

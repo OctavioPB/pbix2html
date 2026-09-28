@@ -37,15 +37,15 @@ simple expressions also fold. Don't expect complex RANKX or virtual tables.
 
 | DAX | Teradata SQL |
 |---|---|
-| `SUM(Ventas[Importe])` | `SUM(v.importe)` |
+| `SUM(Sales[Amount])` | `SUM(v.amount)` |
 | `DIVIDE([A],[B])` | `CASE WHEN SUM(b)=0 THEN NULL ELSE SUM(a)/SUM(b) END` (use `CAST(... AS DECIMAL(18,6))` if they're integers) |
-| `DISTINCTCOUNT(Clientes[Id])` | `COUNT(DISTINCT c.id)` |
-| `CALCULATE([M], Tabla[Col]="X")` | same aggregate with `WHERE col='X'` **in addition to** the visual's filters; or `SUM(CASE WHEN col='X' THEN … END)` if the visual groups by `col` |
-| `CALCULATE([M], ALL(Tabla[Col]))` | aggregate without that predicate: subquery or `SUM(...) OVER ()` |
+| `DISTINCTCOUNT(Customers[Id])` | `COUNT(DISTINCT c.id)` |
+| `CALCULATE([M], Table[Col]="X")` | same aggregate with `WHERE col='X'` **in addition to** the visual's filters; or `SUM(CASE WHEN col='X' THEN … END)` if the visual groups by `col` |
+| `CALCULATE([M], ALL(Table[Col]))` | aggregate without that predicate: subquery or `SUM(...) OVER ()` |
 | `CALCULATE([M], ALLSELECTED(...))` | `SUM(...) OVER ()` within the set already filtered by slicers |
-| `TOTALYTD([M], Calendario[Fecha])` | `SUM(m) OVER (PARTITION BY anio ORDER BY fecha ROWS UNBOUNDED PRECEDING)` or `WHERE fecha BETWEEN inicio_anio AND fecha_ref` |
-| `SAMEPERIODLASTYEAR` | self-join with `ADD_MONTHS(fecha, -12)` or a predicate over `anio - 1` |
-| `DATEADD(..., -1, MONTH)` | `ADD_MONTHS(fecha, -1)` |
+| `TOTALYTD([M], Calendar[Date])` | `SUM(m) OVER (PARTITION BY year ORDER BY date ROWS UNBOUNDED PRECEDING)` or `WHERE date BETWEEN year_start AND ref_date` |
+| `SAMEPERIODLASTYEAR` | self-join with `ADD_MONTHS(date, -12)` or a predicate over `year - 1` |
+| `DATEADD(..., -1, MONTH)` | `ADD_MONTHS(date, -1)` |
 | `[Var %] = DIVIDE([Actual]-[PY],[PY])` | two aggregates in the same query and the division in `SELECT` |
 | `RELATED(Dim[Col])` | JOIN to the dimension via the relationship from `model.json → relationships` |
 | `USERELATIONSHIP` | JOIN via the alternate column indicated |
@@ -53,13 +53,13 @@ simple expressions also fold. Don't expect complex RANKX or virtual tables.
 | `FORMAT(...)` | no; formatting is applied in the renderer (`format` in the yaml) |
 
 Relationships: `model.json → relationships` gives `FromTable/FromColumn/ToTable/ToColumn`
-and the filter direction. A visual that shows `Region.Nombre` alongside `Ventas.Margen`
+and the filter direction. A visual that shows `Region.Name` alongside `Sales.Margin`
 implies `JOIN region r ON r.id = v.region_id` per that relationship.
 
 ## Slicers → parameters
 
 Each slicer in the layout becomes a yaml parameter (`parameters:`), and every SQL that
-uses it carries `WHERE col = ?` with the name in `params: [anio]`. A multi-select slicer
+uses it carries `WHERE col = ?` with the name in `params: [year]`. A multi-select slicer
 is modeled as a list and expands to `IN (?,?,?)` in `query.py`. Page/visual filters with
 `isLockedInViewMode` are written as fixed values in the SQL, not as a parameter.
 

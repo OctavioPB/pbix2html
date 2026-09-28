@@ -44,7 +44,7 @@ def compare(actual: DataBlock, expected: DataBlock, tol: dict[str, float]) -> li
     ncols_a, idx_a = _index(actual)
     ncols_e, idx_e = _index(expected)
     if len(ncols_a) != len(ncols_e):
-        diffs.append(f"columnas numéricas distintas: {ncols_a} vs {ncols_e}")
+        diffs.append(f"different numeric columns: {ncols_a} vs {ncols_e}")
     for key in sorted(set(idx_a) | set(idx_e)):
         ra, re_ = idx_a.get(key), idx_e.get(key)
         if ra is None:
@@ -99,7 +99,7 @@ def validate_report(spec: ReportSpec, values: dict[str, Any], backend: Backend, 
 def write_markdown(spec: ReportSpec, results: dict[str, dict], out_dir: Path = Path("out")) -> Path:
     out_dir.mkdir(exist_ok=True)
     path = out_dir / f"{spec.report}.validation.md"
-    lines = [f"# Validación — {spec.report}\n", "| Visual | Kind | Estado | Detalle |", "|---|---|---|---|"]
+    lines = [f"# Validation — {spec.report}\n", "| Visual | Kind | Status | Detail |", "|---|---|---|---|"]
     for vid, r in results.items():
         v = spec.visuals[vid]
         detail = "<br>".join(r["detail"][:5]) + (" …" if len(r["detail"]) > 5 else "")

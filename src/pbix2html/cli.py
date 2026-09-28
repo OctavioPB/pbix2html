@@ -36,7 +36,7 @@ def _backend(args):
         block = json.loads(Path(args.fake_data).read_text(encoding="utf-8"))
         return FakeBackend(fixtures={}, default=block)
     if not settings.has_teradata:
-        sys.exit("Sin TERADATA_HOST/USER en .env. Usa --fake-data <json> para desarrollo.")
+        sys.exit("No TERADATA_HOST/USER in .env. Use --fake-data <json> for development.")
     return TeradataBackend()
 
 
@@ -47,7 +47,7 @@ def cmd_extract(args):
 def cmd_scaffold(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
     path = semantic.write_scaffold(layout, model, overwrite=args.overwrite)
-    print(f"yaml generado: {path}  (completa los `sql: TODO`)")
+    print(f"yaml generated: {path}  (fill in the `sql: TODO` entries)")
 
 
 def cmd_convert(args):
@@ -55,7 +55,7 @@ def cmd_convert(args):
     layout, model = _layout_and_model(pbix, Path(args.out))
     if not semantic.yaml_path(layout["report"]).exists():
         semantic.write_scaffold(layout, model)
-        print(f"! No existía metrics/{layout['report']}.yaml: se generó el scaffold. Completa el SQL y vuelve a convertir.")
+        print(f"! metrics/{layout['report']}.yaml didn't exist: generated the scaffold. Fill in the SQL and convert again.")
     spec = semantic.load(layout["report"])
     values = semantic.resolve_params(spec, _kv(args.params))
     role = args.role
@@ -63,7 +63,7 @@ def cmd_convert(args):
     if role:
         r = spec.roles.get(role)
         if r is None:
-            sys.exit(f"rol {role!r} no definido en el yaml")
+            sys.exit(f"role {role!r} not defined in the yaml")
         proxy_user = r.get("proxy_user")
     data = None
     if args.mode == "snapshot":
@@ -74,14 +74,14 @@ def cmd_convert(args):
     out.write_text(html, encoding="utf-8")
     n_ok = sum(1 for d in (data or {}).values() if d.get("rows")) if data else 0
     n_err = sum(1 for d in (data or {}).values() if d.get("error")) if data else 0
-    print(f"HTML: {out}  ({args.mode}; visuales con datos: {n_ok}; errores: {n_err})")
+    print(f"HTML: {out}  ({args.mode}; visuals with data: {n_ok}; errors: {n_err})")
 
 
 def cmd_gui(args):
     try:
         from . import gui
     except ImportError:
-        sys.exit("Falta fastapi/uvicorn para el panel. Instalá con: pip install -e \".[live]\"")
+        sys.exit("Missing fastapi/uvicorn for the panel. Install with: pip install -e \".[live]\"")
     gui.run(host=args.host, port=args.port, open_browser=not args.no_browser)
 
 

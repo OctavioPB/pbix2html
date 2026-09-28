@@ -31,7 +31,7 @@ def _spec(report: str) -> semantic.ReportSpec:
     try:
         return semantic.load(report)
     except FileNotFoundError:
-        raise HTTPException(404, f"reporte {report} no tiene yaml")
+        raise HTTPException(404, f"report {report} has no yaml")
 
 
 def _backend() -> TeradataBackend:
@@ -45,10 +45,10 @@ def visual(report: str, visual_id: str, request: Request):
     spec = _spec(report)
     v = spec.visuals.get(visual_id)
     if v is None:
-        raise HTTPException(404, "visual no definido en el yaml")
+        raise HTTPException(404, "visual not defined in the yaml")
     user = request.headers.get(AUTH_HEADER)
     if REQUIRE_AUTH and not user:
-        raise HTTPException(401, f"falta cabecera {AUTH_HEADER} (SSO)")
+        raise HTTPException(401, f"missing header {AUTH_HEADER} (SSO)")
     try:
         values = semantic.resolve_params(spec, dict(request.query_params))
     except (KeyError, ValueError) as e:

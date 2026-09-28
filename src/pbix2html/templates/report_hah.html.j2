@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ spec.report }}</title>
-<script src="{{ echarts_cdn }}"></script>
+<!-- ADR-004: self-hosted from HAH, no CDN. Assumes HAH's static path serves an ECharts
+     UMD build under this name — unverified, see ADR-004. -->
+<script src="{{ static_base }}/echarts.min.js"></script>
 <style>
   :root {
     --bg: {{ theme.background }};
@@ -13,24 +15,30 @@
     --border: {{ theme.border }};
     --accent: {{ theme.data_colors[0] }};
     --font: {{ theme.font_family }};
+    --td-teal: #00C7B1;
+    --td-orange: #FF6D00;
+    --td-navy: #1A1A2E;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
-  header { display: flex; align-items: baseline; gap: 1.5rem; padding: .75rem 1.25rem; border-bottom: 1px solid var(--border); }
+  header { display: flex; align-items: baseline; gap: 1.5rem; padding: .9rem 1.25rem;
+           color: #fff; background: linear-gradient(135deg, var(--td-navy) 0%, #2d2d5e 100%);
+           border-bottom: 3px solid var(--td-teal); }
   header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
-  header .meta { color: var(--muted); font-size: .8rem; }
+  header .meta { color: #c8c8e0; font-size: .8rem; }
   nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
   nav.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .4rem .6rem; cursor: pointer; color: var(--muted); font: inherit; }
-  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--td-teal); }
   .params { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; padding: .5rem 1.25rem; font-size: .85rem; color: var(--muted); }
   .params label { display: inline-flex; gap: .4rem; align-items: center; }
-  .params input, .params select { font: inherit; padding: .15rem .3rem; }
+  .params input { font: inherit; padding: .15rem .3rem; }
   .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; }
+  .visual.card, .visual.kpi { border-top: 4px solid var(--td-teal); }
   .visual .title { font-size: .85rem; font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
-  .chart { position: absolute; inset: 0; }
+  .chart { position: absolute; inset: 0; bottom: 1.2rem; }
   .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
   .card .value { font-size: clamp(1.2rem, 3.2vw, 2.6rem); font-weight: 600; line-height: 1; }
   .card .label { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
@@ -44,8 +52,13 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
-  .error { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
+  .error-state { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
   .loading { color: var(--muted); font-size: .75rem; padding: .5rem .6rem; }
+  .card-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 1.2rem; line-height: 1.2rem;
+                 padding: 0 .6rem; font-size: .68rem; color: var(--muted); border-top: 1px solid var(--border); }
+  .spinner { width: 1.1rem; height: 1.1rem; margin: .8rem; border: 2px solid var(--border);
+             border-top-color: var(--td-teal); border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
   @media print { nav.tabs, .params { display: none; } .page[hidden] { display: block; page-break-after: always; } }
 </style>
@@ -53,7 +66,7 @@
 <body>
 <header>
   <h1>{{ spec.report }}</h1>
-  <span class="meta">{% if mode == "snapshot" %}Data as of {{ generated_at }}{% if role %} · role {{ role }}{% endif %}{% else %}Live data{% endif %}</span>
+  <span class="meta">HAH{% if role %} · role {{ role }}{% endif %} · generated {{ generated_at }}</span>
 </header>
 
 {% if spec.pages|length > 1 %}
@@ -65,9 +78,7 @@
 {% if spec.parameters %}
 <div class="params">
   {% for name, p in spec.parameters.items() %}
-  <label>{{ p.label }}
-    {% if mode == "live" %}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}">{% else %}<strong>{{ p.value if p.value is not none else '—' }}</strong>{% endif %}
-  </label>
+  <label>{{ p.label }}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}"></label>
   {% endfor %}
 </div>
 {% endif %}
@@ -75,7 +86,7 @@
 {% for p in spec.pages %}
 <section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}" {% if not loop.first %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
+  <div class="visual {{ v.kind }} {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     <div class="body"></div>
@@ -85,18 +96,56 @@
 {% endfor %}
 
 <script id="spec" type="application/json">{{ spec_json|safe }}</script>
-{% if mode == "snapshot" %}<script id="data" type="application/json">{{ data_json|safe }}</script>
-{% else %}<script>window.API_BASE = {{ api_base|tojson }};</script>{% endif %}
+<script>window.__PBIX2HTML_SQL_API__ = {{ sql_api|tojson }};</script>
 
 <script>
 (function () {
   const spec = JSON.parse(document.getElementById('spec').textContent);
   const theme = spec.theme;
+  const SQL_API = window.__PBIX2HTML_SQL_API__;
   const visualsById = {};
-  spec.pages.forEach(p => p.visuals.forEach(v => { visualsById[v.id] = v; }));
+  const pageOfVisual = {};
+  spec.pages.forEach(p => p.visuals.forEach(v => { visualsById[v.id] = v; pageOfVisual[v.id] = p.id; }));
   const charts = {};
+  const loadedPages = new Set();
 
-  // ---------- formatting ----------
+  // ---------- HAH SQL contract (ADR-004; unverified against a real HAH) ----------
+  // HAH returns HTTP 200 even for SQL errors — always check j.error before j.data.
+  async function fetchSQL(sql) {
+    const resp = await fetch(SQL_API, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
+    });
+    const j = await resp.json();
+    if (j.error) throw new Error(j.error_message || 'SQL error on HAH');
+    return j.data || [];
+  }
+  function safeSql(v) { return String(v).replace(/'/g, "''").replace(/;/g, ''); }
+  // Mirrors query.py's bind(): substitutes :name tokens declared in `params`, leaves
+  // the rest intact. HAH's SQL endpoint takes one raw string (no driver-level `?`
+  // parameters), so this interpolates escaped literals instead — see ADR-004.
+  function bindSql(sql, params, values) {
+    return sql.replace(/:(\w+)\b/g, (m, name) => {
+      if (!params.includes(name)) return m;
+      const val = values[name];
+      if (val === undefined || val === null || val === '') return 'NULL';
+      if (Array.isArray(val)) return val.length ? val.map(x => `'${safeSql(x)}'`).join(',') : 'NULL';
+      return `'${safeSql(val)}'`;
+    });
+  }
+  function currentValues() {
+    const values = {};
+    Object.keys(spec.parameters).forEach(name => { values[name] = spec.parameters[name].value; });
+    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') values[i.dataset.param] = i.value; });
+    return values;
+  }
+  // Array of row objects (HAH) → {columns, rows} (this project's renderer contract).
+  function toBlock(rows) {
+    if (!rows.length) return { columns: [], rows: [] };
+    const keys = Object.keys(rows[0]);
+    return { columns: keys.map(k => k.toLowerCase()), rows: rows.map(r => keys.map(k => r[k])) };
+  }
+
+  // ---------- formatting (same as report.html.j2) ----------
   const fmt = (v, f) => {
     if (v === null || v === undefined) return '—';
     if (typeof v !== 'number') return String(v);
@@ -125,7 +174,7 @@
   const axisStyle = { axisLine: { lineStyle: { color: theme.border } }, axisLabel: { color: theme.muted },
                       splitLine: { lineStyle: { color: theme.border } } };
 
-  // ---------- renderers ----------
+  // ---------- renderers (same contract as report.html.j2) ----------
   const R = {
     card(el, v, b) {
       const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
@@ -169,6 +218,39 @@
         progress: { show: true }, detail: { formatter: x => fmt(x, v.format.value), color: theme.foreground },
         axisLabel: { show: false }, data: [{ value: g('value') }] }] });
     },
+    waterfall(el, v, b) {
+      const ci = col(b, 'category'), vi = col(b, 'value');
+      let acc = 0;
+      const base_ = [], up = [], down = [];
+      b.rows.forEach(r => {
+        const val = r[vi] || 0;
+        base_.push(val >= 0 ? acc : acc + val);
+        up.push(val >= 0 ? val : 0); down.push(val < 0 ? -val : 0);
+        acc += val;
+      });
+      chart(el, v, { ...base, xAxis: { type: 'category', data: b.rows.map(r => String(r[ci])), ...axisStyle },
+        yAxis: { type: 'value', ...axisStyle }, series: [
+          { type: 'bar', stack: 'w', itemStyle: { color: 'transparent' }, data: base_, silent: true },
+          { type: 'bar', stack: 'w', name: 'Increase', data: up },
+          { type: 'bar', stack: 'w', name: 'Decrease', data: down, itemStyle: { color: theme.data_colors[3] || '#c0392b' } },
+        ] });
+    },
+    funnel(el, v, b) {
+      const ci = col(b, 'category'), vi = col(b, 'value');
+      chart(el, v, { ...base, series: [{ type: 'funnel',
+        data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi] })),
+        label: { color: theme.foreground, fontSize: 11 } }] });
+    },
+    scatter(el, v, b) {
+      const xi = col(b, 'category'), yi = col(b, 'value');
+      chart(el, v, { ...base, xAxis: { type: 'value', ...axisStyle }, yAxis: { type: 'value', ...axisStyle },
+        series: [{ type: 'scatter', data: b.rows.map(r => [r[xi], r[yi]]) }] });
+    },
+    treemap(el, v, b) {
+      const ci = col(b, 'category'), vi = col(b, 'value');
+      chart(el, v, { ...base, series: [{ type: 'treemap',
+        data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi] })) }] });
+    },
   };
   function cartesian(v, b, type, horizontal, area) {
     const { cats, groups } = series(b);
@@ -188,44 +270,58 @@
     c.setOption(option); charts[v.id] = c;
   }
 
-  // ---------- data ----------
+  // ---------- per-visual load: spinner → fetchSQL → paint → footer/error ----------
   function paint(id, block) {
     const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);
     if (!el) return;
-    if (block.error) { el.innerHTML = `<div class="error">${block.error}</div>`; return; }
     const fn = R[v.kind];
-    if (!fn) { el.innerHTML = `<div class="error">No renderer for ${v.kind}</div>`; return; }
-    if (block.skipped && !['text', 'static'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
-    try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+    if (!fn) { el.innerHTML = `<div class="error-state">No renderer for ${v.kind}</div>`; return; }
+    try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error-state">${e.message}</div>`; }
   }
-  function currentParams() {
-    const q = new URLSearchParams();
-    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') q.set(i.dataset.param, i.value); });
-    return q.toString();
-  }
-  async function load() {
-    if (!window.API_BASE) {
-      const data = JSON.parse(document.getElementById('data').textContent);
-      Object.keys(visualsById).forEach(id => paint(id, data[id] || { columns: [], rows: [], skipped: true }));
-      return;
+  async function loadVisual(v) {
+    const el = document.querySelector(`#v-${CSS.escape(v.id)} .body`);
+    if (!el) return;
+    if (['text', 'static'].includes(v.kind)) { paint(v.id, { columns: [], rows: [] }); return; }
+    if (!v.sql) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
+    el.innerHTML = '<div class="spinner"></div>';
+    try {
+      const sql = bindSql(v.sql, v.params || [], currentValues());
+      const rows = await fetchSQL(sql);
+      paint(v.id, toBlock(rows));
+      const footer = document.createElement('div');
+      footer.className = 'card-footer';
+      footer.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'}`;
+      el.appendChild(footer);
+    } catch (e) {
+      el.innerHTML = `<div class="error-state">⚠ ${e.message}</div>`;
     }
-    const qs = currentParams();
-    await Promise.all(Object.keys(visualsById).map(async id => {
-      const el = document.querySelector(`#v-${CSS.escape(id)} .body`); if (el) el.innerHTML = '<div class="loading">Loading…</div>';
-      try {
-        const r = await fetch(`${window.API_BASE}/reports/${encodeURIComponent(spec.report)}/visuals/${encodeURIComponent(id)}?${qs}`, { credentials: 'include' });
-        paint(id, r.ok ? await r.json() : { error: `HTTP ${r.status}` });
-      } catch (e) { paint(id, { error: e.message }); }
-    }));
   }
-  document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', load));
+  async function loadPage(pageId) {
+    if (loadedPages.has(pageId)) return;
+    loadedPages.add(pageId);
+    await Promise.all(Object.values(visualsById).filter(v => pageOfVisual[v.id] === pageId).map(loadVisual));
+  }
+  async function loadAll() {
+    await Promise.all(spec.pages.map(p => loadPage(p.id)));
+  }
+  function reloadVisible() {
+    loadedPages.clear();
+    const active = document.querySelector('.page:not([hidden])');
+    if (active) loadPage(active.id);
+  }
+
+  document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', reloadVisible));
   document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => {
     document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
     document.querySelectorAll('.page').forEach(p => { p.hidden = p.id !== b.dataset.page; });
     Object.values(charts).forEach(c => c.resize());
+    loadPage(b.dataset.page);
   }));
   window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
-  load();
+
+  // HAH's snapshot-capture pass needs every tab's data present in one shot, not just
+  // whichever page is visible on load — see ADR-004 / pbix2html-fixv1.md #10.
+  if (window.__SNAPSHOT_CAPTURE__) { loadAll(); } else { loadPage(spec.pages[0] && spec.pages[0].id); }
 })();
 </script>
 </body>

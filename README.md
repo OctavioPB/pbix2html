@@ -76,15 +76,18 @@ If you need to generate or review reports but don't want to use the command line
 a local web panel with buttons and forms for the same four steps the technical team uses:
 
 1. Someone technical installs the tool once (see section 4) and leaves you an
-   **`Abrir_Panel.bat`** file on the desktop or in a shared folder.
-2. Double-click `Abrir_Panel.bat`. A black window opens (leave it open, that's the
+   **`Open_Panel.bat`** file on the desktop or in a shared folder.
+2. Double-click `Open_Panel.bat`. A black window opens (leave it open, that's the
    program running) and the browser opens on its own at `http://127.0.0.1:8765`.
 3. There you'll see the list of available reports (`.pbix`). You can upload a new one
    with the corresponding button, or open an existing one to:
    - **Extract** its structure (pages, visuals, measures).
+   - **Map Power BI tables to Teradata** (optional): tell it which real Teradata table/view
+     each Power BI table name corresponds to, once per report.
    - **Generate the metrics template** (`metrics/<Report>.yaml`) — the SQL still has to
-     be written by a technical person, but the template is generated with one click.
-   - **Convert to HTML**: pick the mode (snapshot/live), role, and the report's
+     be written by a technical person, but the template is generated with one click (and
+     pre-filled with the table mapping above, if you did that step).
+   - **Convert to HTML**: pick the mode (snapshot/live/HAH), role, and the report's
      parameters (year, region, etc.) in a form, with plain-language names taken from the yaml.
    - **Validate** against Power BI (requires the technical team to have configured Teradata).
 4. To close the panel, close the black window.
@@ -121,12 +124,13 @@ If you only need what the panel requires (without the test dependencies), `pip i
 ### Commands
 
 ```bash
-pbix2html extract reportes/          # inventory of every .pbix → out/summary.md
-pbix2html scaffold reportes/X.pbix   # metrics/X.yaml with sql: TODO per visual
-pbix2html convert reportes/X.pbix --mode snapshot --params anio=2026 [--role Ventas_Norte]
-pbix2html convert reportes/X.pbix --mode live
+pbix2html extract reports/          # inventory of every .pbix → out/summary.md
+pbix2html scaffold reports/X.pbix   # metrics/X.yaml with sql: TODO per visual
+pbix2html convert reports/X.pbix --mode snapshot --params year=2026 [--role Sales_North]
+pbix2html convert reports/X.pbix --mode live
+pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
 pbix2html validate X
-pbix2html gui                        # local web panel (see section 3); double-click: Abrir_Panel.bat
+pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat
 uvicorn pbix2html.serve:app          # live mode (needs SSO in front; see serve.py)
 ```
 
@@ -152,63 +156,76 @@ all ~50 in a session). Everything below can be done with these CLI commands, or 
 the [panel](#3-control-panel-buildvalidate-reports-without-using-a-terminal) (section 3)
 if you'd rather click through it.
 
-1. **Put the file in place.** Copy the `.pbix` into `reportes/` (e.g. `reportes/Ventas.pbix`).
+1. **Put the file in place.** Copy the `.pbix` into `reports/` (e.g. `reports/Sales.pbix`).
 
 2. **Extract its structure.**
    ```bash
-   pbix2html extract reportes/Ventas.pbix --out out
+   pbix2html extract reports/Sales.pbix --out out
    ```
-   This writes `out/Ventas/layout.json` and `out/Ventas/model.json`, and updates
+   This writes `out/Sales/layout.json` and `out/Sales/model.json`, and updates
    `out/summary.md` with the visual/measure inventory. Skim `layout.json` against the
    report open in Power BI Desktop to sanity-check pages, visuals, and filters (skill
-   `pbix-layout` has the field-by-field breakdown if something looks odd).
+   `pbix-layout` has the field-by-field breakdown if something looks odd — including for
+   PBIR-format `.pbix` files, Power BI Desktop 2024+'s default, which is common enough
+   that `layout.json["format"]` tells you which parser actually ran).
 
-3. **Generate the metrics scaffold.**
+3. **(Optional) Map Power BI tables to Teradata.** Power BI's DAX references logical
+   entity names (`Compute Engine Mnthly`, `ORG_MAP`...) that don't exist as such in
+   Teradata — there's no mapping inside the `.pbix` itself. Do this once per report
+   *before* the next step (panel step 2b, or write `metrics/Sales.table_map.json` by
+   hand as `{"Power BI entity": "schema.teradata_table_or_view"}`) and the scaffold
+   below pre-fills each visual's `sql` with a `FROM` clause instead of a bare `TODO` —
+   still needs columns and filters written by hand.
+
+4. **Generate the metrics scaffold.**
    ```bash
-   pbix2html scaffold reportes/Ventas.pbix
+   pbix2html scaffold reports/Sales.pbix
    ```
-   This creates `metrics/Ventas.yaml` (from `metrics/_template.yaml`) with one entry per
-   visual, `sql: TODO` placeholders, slicers turned into `parameters:`, and RLS roles
-   pulled from the model if any were found. This file is the one you edit by hand from
-   here on; re-running `scaffold` again requires `--overwrite` and **wipes any SQL you've
-   already written**, so only do that on purpose.
+   This creates `metrics/Sales.yaml` (from `metrics/_template.yaml`) with one entry per
+   visual, slicers turned into `parameters:`, and RLS roles pulled from the model if any
+   were found. This file is the one you edit by hand from here on; re-running `scaffold`
+   again requires `--overwrite` and **wipes any SQL you've already written**, so only do
+   that on purpose.
 
-4. **Capture the reference SQL from DBQL.** Open the report in Power BI, interact with
+5. **Capture the reference SQL from DBQL.** Open the report in Power BI, interact with
    each visual, then pull the SQL the gateway actually sent to Teradata (skill
    `teradata-directquery` has the DBQL query). Paste it into each visual's
    `reference_sql` in the yaml — it's both your best starting point and the number
    `validate` will check against.
 
-5. **Write the real `sql` per visual.** Rewrite each DAX measure as Teradata SQL (DAX
+6. **Write the real `sql` per visual.** Rewrite each DAX measure as Teradata SQL (DAX
    itself is never ported — see skill `dax-to-teradata-sql` for the translation patterns
    and the column contract each `kind` expects, documented in skill `html-renderer`).
    Fill in `params`, and for any role in `roles:` set its `proxy_user` (see skill
    `teradata-directquery` for trusted sessions).
 
-6. **Convert it to HTML.**
+7. **Convert it to HTML.**
    ```bash
-   pbix2html convert reportes/Ventas.pbix --mode snapshot --params anio=2026 --role Ventas_Norte
+   pbix2html convert reports/Sales.pbix --mode snapshot --params year=2026 --role Sales_North
    ```
    Drop `--role` only if the report truly has no RLS — otherwise generate one HTML per
    role, never one file with everyone's data. Open the resulting
-   `out/Ventas.Ventas_Norte.html` in a browser and eyeball it next to the original.
+   `out/Sales.Sales_North.html` in a browser and eyeball it next to the original.
    No Teradata yet? Add `--fake-data tests/fixtures/fake_block.json` to render with
    placeholder data instead.
 
-7. **Validate the numbers.**
+8. **Validate the numbers.**
    ```bash
-   pbix2html validate Ventas
+   pbix2html validate Sales
    ```
-   Reads `out/Ventas.validation.md`: every visual should land on `OK`. For each `DIFF`,
+   Reads `out/Sales.validation.md`: every visual should land on `OK`. For each `DIFF`,
    skill `validate-report` has a symptom → likely-cause table. Adjust `sql`, never
    `reference_sql`.
 
-8. **Get the report owner's sign-off**, recording any accepted visual differences
+9. **Get the report owner's sign-off**, recording any accepted visual differences
    (reinterpreted custom visuals, simplified formatting) in that visual's `notes` in the yaml.
 
-9. **Mark it done in `PLAN.md`** (the Phase 3 table) before moving on to the next report.
+10. **Mark it done in `PLAN.md`** (the Phase 3 table) before moving on to the next report.
 
 Need it live instead of/in addition to a snapshot? See `docs/decisions/ADR-001-snapshot-vs-live.md`
-for the tradeoff, then Phase 2 in `PLAN.md` for standing up `serve.py`.
+for the tradeoff, then Phase 2 in `PLAN.md` for standing up `serve.py`. There's also a third
+delivery mode, `--mode hah`, for the teradata-report skill / HTML App Host platform — see
+`docs/decisions/ADR-004-hah-delivery-mode.md` before relying on it, it hasn't been verified
+against a real HAH environment yet.
 
 Architecture detail and data contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

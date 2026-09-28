@@ -3,8 +3,8 @@
 Converts Power BI reports (`.pbix`, DirectQuery to Teradata) into self-contained HTML
 reports, one report at a time:
 
-    pbix2html convert reportes/Ventas.pbix --out out/Ventas.html --mode snapshot
-    pbix2html convert reportes/Ventas.pbix --out out/Ventas.html --mode live
+    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode snapshot
+    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode live
 
 Read `PLAN.md` to know what phase we're in and what's next. Read `docs/ARCHITECTURE.md`
 before touching more than one module.
@@ -13,12 +13,13 @@ before touching more than one module.
 
 | Stage | Module | Input → Output | Status |
 |---|---|---|---|
-| 1. extract | `extract.py` | `.pbix` → `layout.json` + `model.json` | done, with tests |
+| 1. extract | `extract.py` | `.pbix` → `layout.json` + `model.json` | done, with tests; both classic and PBIR format (`layout.json["format"]`) |
 | 2. semantic | `semantic.py` | `model.json` + DAX + DBQL capture → `metrics/<Report>.yaml` | scaffold; the SQL is written by a person (assisted) |
 | 3. query | `query.py` | `metrics yaml` + parameters → data per visual (Teradata) | scaffold |
 | 4. render | `render.py` | `layout.json` + data + theme → `Report.html` | minimally functional |
 | 5. validate | `validate.py` | HTML vs. Power BI reference → diff report | scaffold |
 | live | `serve.py` | FastAPI: runs the yaml on demand with a proxy user | scaffold |
+| hah (ADR-004) | `render.py --mode hah` + `templates/report_hah.html.j2` | alternative to `serve.py`: HTML fetches Teradata data itself via the teradata-report skill / HAH | implemented, **unverified** against a real HAH |
 
 `reference/pbix_extract.py` is the original extraction script; `extract.py` is its
 module version. If they differ, `src/` wins.
@@ -52,7 +53,7 @@ module version. If they differ, `src/` wins.
     pip install -e ".[dev]"            # install
     pytest -q                          # tests (use a synthetic .pbix; no Teradata)
     pbix2html extract <pbix|folder>    # inventory only → out/
-    pbix2html convert <pbix> [--mode snapshot|live] [--role X] [--params k=v]
+    pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v]
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
     uvicorn pbix2html.serve:app --reload   # live mode
@@ -67,7 +68,7 @@ require a connection; if something needs Teradata, mark it `@pytest.mark.teradat
 - Teradata SQL: use `QUALIFY`, `SAMPLE`, `TOP n`; lowercase aliases; parameters
   with `?` (DB-API style from `teradatasql`). Never interpolate strings into SQL.
 - Every non-trivial architecture decision goes into `docs/decisions/ADR-nnn-*.md`.
-- Commits reference the report when applicable: `feat(Ventas): waterfall renderer`.
+- Commits reference the report when applicable: `feat(Sales): waterfall renderer`.
 
 ## What NOT to do
 
@@ -76,8 +77,9 @@ require a connection; if something needs Teradata, mark it `@pytest.mark.teradat
 - Don't embed data from multiple roles in the same HTML.
 - Don't reproduce custom visuals pixel-for-pixel; they're reinterpreted with the
   closest standard renderer and it's documented in the yaml (`notes`).
-- Don't modify `tests/fixtures/make_fake_pbix.py` just to make a test pass; extend it if
-  a new structure is discovered in a real .pbix.
+- Don't modify `tests/fixtures/make_fake_pbix.py` (classic format) or
+  `make_fake_pbir_pbix.py` (PBIR format) just to make a test pass; extend them if a new
+  structure is discovered in a real .pbix.
 
 ## Skills available (`.claude/skills/`)
 

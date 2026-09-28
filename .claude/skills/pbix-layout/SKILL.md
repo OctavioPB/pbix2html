@@ -16,10 +16,35 @@ A `.pbix` is a ZIP. Relevant members:
 | `Connections` | JSON with live connections (when there's no DataModel) | "thin" reports |
 | `Metadata`, `Version`, `Settings`, `SecurityBindings` | various | usually irrelevant |
 
-If `Report/Layout` doesn't exist but there's `definition/pages/...`, it's **PBIR/PBIP**
-format (project) — not yet supported: each visual is its own `visual.json` with
-`position`, `visual.visualType`, `visual.query.queryState`. It needs a separate parser
-(see PLAN.md, risks).
+If `Report/Layout` doesn't exist but there's `Report/definition/report.json`, it's
+**PBIR** format (Enhanced Report Format, Power BI Desktop 2024+ default): supported since
+`extract.py`'s `_extract_layout_pbir` (real .pbix files created in 2024+ are commonly
+PBIR, not classic — expect it more often than not on fresh extracts).
+
+```
+Report/definition/report.json                                  ← presence = PBIR
+Report/definition/pages/pages.json                              → {"pageOrder": [...]}
+Report/definition/pages/<pageId>/page.json                      → displayName, width, height
+Report/definition/pages/<pageId>/visuals/<visualId>/visual.json → one per visual
+  ├─ position{x,y,z,width,height,tabOrder}
+  └─ visual
+     ├─ visualType
+     ├─ query.queryState{role: {projections:[{queryRef, field:{Column|Measure|Aggregation}}]}}
+     ├─ visible (false = hidden — best-effort guess, see below)
+     ├─ objects{}, drillFilterOtherVisuals
+     └─ (on the container) visualContainerObjects.title[0].properties.text.expr.Literal.Value
+```
+
+Theme lives at `Report/StaticResources/SharedResources/BaseThemes/<Name>.json` instead of
+`RegisteredResources`. `layout.json["format"]` is `"pbir"` or `"classic"` so downstream
+code (and you) can tell which parser produced it.
+
+**Still unconfirmed against a real file** (best-effort defaults in `_parse_visual_pbir`/
+`_parse_page_pbir`, marked `# TODO` in `extract.py`): how a visual **group** is
+represented (classic uses `singleVisualGroup`; PBIR's equivalent hasn't been observed
+yet), page/visual **filters**, and the exact **hidden-page** key. If you're looking at a
+real PBIR `.pbix` and hit one of these, that's the structure to capture — see "When you
+find a new structure" below; `tests/fixtures/make_fake_pbir_pbix.py` is the fixture to extend.
 
 ## Layout nesting
 
@@ -62,13 +87,13 @@ Structure of a filter (page or visual):
 
 ```json
 {"name":"f1","type":"Categorical|Advanced|TopN|RelativeDate",
- "expression":{"Column":{"Expression":{"SourceRef":{"Entity":"Calendario"}},"Property":"Anio"}},
- "filter":{"Version":2,"From":[{"Name":"c","Entity":"Calendario"}],
+ "expression":{"Column":{"Expression":{"SourceRef":{"Entity":"Calendar"}},"Property":"Year"}},
+ "filter":{"Version":2,"From":[{"Name":"c","Entity":"Calendar"}],
            "Where":[{"Condition":{"In":{"Expressions":[...],"Values":[[{"Literal":{"Value":"2026L"}}]]}}}]},
  "isHiddenInViewMode":true,"isLockedInViewMode":false}
 ```
 
-`extract.py` stores `target` (`Calendario.Anio`), `type`, and the raw `definition`. Power
+`extract.py` stores `target` (`Calendar.Year`), `type`, and the raw `definition`. Power
 BI literals carry a type suffix: `2026L` (long), `'text'`, `datetime'2026-01-01T00:00:00'`,
 `12.5D`. A slicer's filter appears in the slicer visual's `filters` **and** in every other
 visual's `prototypeQuery`.

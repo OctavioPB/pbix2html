@@ -1,31 +1,31 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Reportes</h1>
-<p class="muted">Elegí un reporte para extraerlo, convertirlo a HTML o validarlo.</p>
+<h1>Reports</h1>
+<p class="muted">Pick a report to extract it, convert it to HTML, or validate it.</p>
 
 <div class="card">
-  {% if reportes %}
+  {% if reports %}
   <table>
-    <tr><th>Reporte</th><th>Plantilla de métricas</th><th>HTML generados</th><th></th></tr>
-    {% for r in reportes %}
+    <tr><th>Report</th><th>Metrics template</th><th>Generated HTML</th><th></th></tr>
+    {% for r in reports %}
     <tr>
       <td>{{ r.name }}</td>
-      <td>{% if r.has_yaml %}<span class="badge si">sí</span>{% else %}<span class="badge no">falta</span>{% endif %}</td>
+      <td>{% if r.has_yaml %}<span class="badge yes">yes</span>{% else %}<span class="badge no">missing</span>{% endif %}</td>
       <td>{{ r.n_html }}</td>
-      <td><a class="btn secundario" href="/reportes/{{ r.name }}">Abrir</a></td>
+      <td><a class="btn secondary" href="/reports/{{ r.name }}">Open</a></td>
     </tr>
     {% endfor %}
   </table>
   {% else %}
-  <p class="muted">Todavía no hay ningún .pbix en la carpeta <code>reportes/</code>. Subí uno abajo.</p>
+  <p class="muted">There's no .pbix in the <code>reports/</code> folder yet. Upload one below.</p>
   {% endif %}
 </div>
 
 <div class="card">
-  <h2>Agregar un reporte nuevo</h2>
-  <form action="/subir" method="post" enctype="multipart/form-data">
-    <input type="file" name="archivo" accept=".pbix" required>
-    <button type="submit">Subir .pbix</button>
+  <h2>Add a new report</h2>
+  <form action="/upload" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".pbix" required>
+    <button type="submit">Upload .pbix</button>
   </form>
 </div>
 {% endblock %}
