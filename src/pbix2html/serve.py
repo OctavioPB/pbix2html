@@ -20,10 +20,20 @@ from .query import TeradataBackend, run_visual
 
 AUTH_HEADER = os.getenv("AUTH_HEADER", "X-Authenticated-User")
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() == "true"
+_CORS_ORIGINS_ENV = os.getenv("CORS_ORIGINS")
 
 app = FastAPI(title="pbix2html live")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-                   allow_credentials=True, allow_methods=["GET"], allow_headers=["*"])
+# Credentialed CORS (cookies) needs a specific Access-Control-Allow-Origin, never "*" —
+# a browser rejects that combination outright. The report's own fetch doesn't send
+# credentials (identity comes from a proxy-injected header, see below), so this only
+# matters if a deployment explicitly sets CORS_ORIGINS to forward an SSO cookie through
+# a reverse proxy; leaving CORS_ORIGINS unset keeps the open "*" default, no credentials.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS_ENV.split(",") if _CORS_ORIGINS_ENV else ["*"],
+    allow_credentials=_CORS_ORIGINS_ENV is not None,
+    allow_methods=["GET"], allow_headers=["*"],
+)
 
 
 @lru_cache(maxsize=64)
@@ -53,7 +63,15 @@ def visual(report: str, visual_id: str, request: Request):
         values = semantic.resolve_params(spec, dict(request.query_params))
     except (KeyError, ValueError) as e:
         raise HTTPException(400, str(e))
-    return run_visual(spec, v, values, _backend(), proxy_user=user, use_cache=True)
+    try:
+        return run_visual(spec, v, values, _backend(), proxy_user=user, use_cache=True)
+    except Exception as e:
+        # An unhandled exception (e.g. a Teradata connection/driver error) produces a
+        # response with no CORS headers at all — the browser rejects it before the
+        # report's JS ever sees the real error, showing "Failed to fetch" instead of
+        # whatever actually went wrong. Raising HTTPException instead keeps CORS headers
+        # on the response so the report can show the real error inline in the visual.
+        raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 
 @app.get("/healthz")

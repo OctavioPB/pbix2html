@@ -137,6 +137,13 @@ uvicorn pbix2html.serve:app          # live mode (needs SSO in front; see serve.
 
 Without Teradata you can test the render with `--fake-data tests/fixtures/fake_block.json`.
 
+> **`--mode live` report shows "Failed to fetch" on every visual?** `serve.py` isn't
+> running (or isn't reachable at the `API_BASE` the report was generated with) — start
+> it with `uvicorn pbix2html.serve:app` and reload the report. If it's already running
+> and you still see this, check `serve.py`'s own terminal for the actual error; a
+> generic "Failed to fetch" with the server up is almost always CORS, not the request
+> itself — see the `CORS_ORIGINS` note in `.env.example`.
+
 ### Structure
 
 ```

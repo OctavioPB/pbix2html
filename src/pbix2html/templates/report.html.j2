@@ -213,7 +213,14 @@
     await Promise.all(Object.keys(visualsById).map(async id => {
       const el = document.querySelector(`#v-${CSS.escape(id)} .body`); if (el) el.innerHTML = '<div class="loading">Loading…</div>';
       try {
-        const r = await fetch(`${window.API_BASE}/reports/${encodeURIComponent(spec.report)}/visuals/${encodeURIComponent(id)}?${qs}`, { credentials: 'include' });
+        // No `credentials: 'include'`: the identity comes from a header the reverse
+        // proxy injects (see serve.py), not a browser cookie. Sending credentials here
+        // forces the browser to require a non-wildcard Access-Control-Allow-Origin —
+        // serve.py's default CORS_ORIGINS is "*", so this would make every fetch fail
+        // with "Failed to fetch" even when serve.py is reachable and working. A
+        // deployment that really does forward an SSO session cookie through the proxy
+        // needs to set CORS_ORIGINS to that exact origin (not "*") and add this back.
+        const r = await fetch(`${window.API_BASE}/reports/${encodeURIComponent(spec.report)}/visuals/${encodeURIComponent(id)}?${qs}`);
         paint(id, r.ok ? await r.json() : { error: `HTTP ${r.status}` });
       } catch (e) { paint(id, { error: e.message }); }
     }));
