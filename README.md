@@ -140,11 +140,70 @@ tests/                          synthetic .pbix + full pipeline with a fake back
 docs/ARCHITECTURE.md, decisions/ ADRs
 ```
 
-### Flow per report
+### Step-by-step: migrate your first report
 
-1. `extract` → review `out/<R>/layout.json` and `model.json`.
-2. Capture the SQL Power BI already generated (DBQL) → `reference_sql` in the yaml.
-3. Write `sql` per visual (skill `dax-to-teradata-sql`).
-4. `convert` → open the HTML → `validate` → owner sign-off → mark it in `PLAN.md`.
+Follow this end to end for **one** report at a time (see `CLAUDE.md` rule 1 — never batch
+all ~50 in a session). Everything below can be done with these CLI commands, or through
+the [panel](#3-control-panel-buildvalidate-reports-without-using-a-terminal) (section 3)
+if you'd rather click through it.
+
+1. **Put the file in place.** Copy the `.pbix` into `reportes/` (e.g. `reportes/Ventas.pbix`).
+
+2. **Extract its structure.**
+   ```bash
+   pbix2html extract reportes/Ventas.pbix --out out
+   ```
+   This writes `out/Ventas/layout.json` and `out/Ventas/model.json`, and updates
+   `out/summary.md` with the visual/measure inventory. Skim `layout.json` against the
+   report open in Power BI Desktop to sanity-check pages, visuals, and filters (skill
+   `pbix-layout` has the field-by-field breakdown if something looks odd).
+
+3. **Generate the metrics scaffold.**
+   ```bash
+   pbix2html scaffold reportes/Ventas.pbix
+   ```
+   This creates `metrics/Ventas.yaml` (from `metrics/_template.yaml`) with one entry per
+   visual, `sql: TODO` placeholders, slicers turned into `parameters:`, and RLS roles
+   pulled from the model if any were found. This file is the one you edit by hand from
+   here on; re-running `scaffold` again requires `--overwrite` and **wipes any SQL you've
+   already written**, so only do that on purpose.
+
+4. **Capture the reference SQL from DBQL.** Open the report in Power BI, interact with
+   each visual, then pull the SQL the gateway actually sent to Teradata (skill
+   `teradata-directquery` has the DBQL query). Paste it into each visual's
+   `reference_sql` in the yaml — it's both your best starting point and the number
+   `validate` will check against.
+
+5. **Write the real `sql` per visual.** Rewrite each DAX measure as Teradata SQL (DAX
+   itself is never ported — see skill `dax-to-teradata-sql` for the translation patterns
+   and the column contract each `kind` expects, documented in skill `html-renderer`).
+   Fill in `params`, and for any role in `roles:` set its `proxy_user` (see skill
+   `teradata-directquery` for trusted sessions).
+
+6. **Convert it to HTML.**
+   ```bash
+   pbix2html convert reportes/Ventas.pbix --mode snapshot --params anio=2026 --role Ventas_Norte
+   ```
+   Drop `--role` only if the report truly has no RLS — otherwise generate one HTML per
+   role, never one file with everyone's data. Open the resulting
+   `out/Ventas.Ventas_Norte.html` in a browser and eyeball it next to the original.
+   No Teradata yet? Add `--fake-data tests/fixtures/fake_block.json` to render with
+   placeholder data instead.
+
+7. **Validate the numbers.**
+   ```bash
+   pbix2html validate Ventas
+   ```
+   Reads `out/Ventas.validation.md`: every visual should land on `OK`. For each `DIFF`,
+   skill `validate-report` has a symptom → likely-cause table. Adjust `sql`, never
+   `reference_sql`.
+
+8. **Get the report owner's sign-off**, recording any accepted visual differences
+   (reinterpreted custom visuals, simplified formatting) in that visual's `notes` in the yaml.
+
+9. **Mark it done in `PLAN.md`** (the Phase 3 table) before moving on to the next report.
+
+Need it live instead of/in addition to a snapshot? See `docs/decisions/ADR-001-snapshot-vs-live.md`
+for the tradeoff, then Phase 2 in `PLAN.md` for standing up `serve.py`.
 
 Architecture detail and data contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
