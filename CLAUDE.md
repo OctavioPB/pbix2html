@@ -60,7 +60,7 @@ module version. If they differ, `src/` wins.
     pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v]
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
-    uvicorn pbix2html.serve:app --reload   # live mode
+    python -m uvicorn pbix2html.serve:app --reload   # live mode (python -m: see README PATH note)
 
 With real Teradata, define `TERADATA_HOST/USER/PASSWORD` in `.env`. Tests never
 require a connection; if something needs Teradata, mark it `@pytest.mark.teradata`.

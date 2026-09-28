@@ -1,7 +1,7 @@
 """
 Live mode: HTTP service that runs the yaml on demand with trusted sessions.
 
-    uvicorn pbix2html.serve:app --reload
+    python -m uvicorn pbix2html.serve:app --reload
 
 The user's identity must come from authentication (a header set by the reverse
 proxy/SSO, or a token validated here). NEVER from a URL parameter.

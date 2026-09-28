@@ -373,7 +373,7 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                 detail.append(
                     f"⚠ Couldn't reach {settings.api_base}/healthz just now. This report will show "
                     f"\"Failed to fetch\" on every visual until that's running — start it with: "
-                    f"uvicorn pbix2html.serve:app (leave that terminal open), then reload the report."
+                    f"python -m uvicorn pbix2html.serve:app (leave that terminal open), then reload the report."
                 )
         mode_label = {"snapshot": "snapshot", "live": "live", "hah": f"HAH ({hah_env})"}.get(mode, mode)
         result = {

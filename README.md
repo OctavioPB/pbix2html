@@ -117,10 +117,11 @@ pytest -q                       # tests, no Teradata needed
 If you only need what the panel requires (without the test dependencies), `pip install
 -e ".[live]"` is enough.
 
-> **`'pbix2html' is not recognized...` (PowerShell/cmd)?** The install was fine, but
-> Python's `Scripts` folder isn't on that terminal's `PATH` (often fixed by just opening a
-> **new** terminal window after installing). Until then, replace `pbix2html` with
-> `python -m pbix2html` in any command below — it works regardless of `PATH`.
+> **`'pbix2html' is not recognized...` (or `'uvicorn'`, PowerShell/cmd)?** The install
+> was fine, but Python's `Scripts` folder isn't on that terminal's `PATH` (often fixed
+> by just opening a **new** terminal window after installing). Until then, run
+> `python -m pbix2html ...` / `python -m uvicorn ...` instead of the bare commands
+> below — `python -m <anything installed>` works regardless of `PATH`.
 
 ### Commands
 
@@ -132,14 +133,15 @@ pbix2html convert reports/X.pbix --mode live
 pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
 pbix2html validate X
 pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat
-uvicorn pbix2html.serve:app          # live mode (needs SSO in front; see serve.py)
+python -m uvicorn pbix2html.serve:app   # live mode (needs SSO in front; see serve.py)
 ```
 
 Without Teradata you can test the render with `--fake-data tests/fixtures/fake_block.json`.
 
 > **`--mode live` report shows "Failed to fetch" on every visual?** `serve.py` isn't
 > running (or isn't reachable at the `API_BASE` the report was generated with) — start
-> it with `uvicorn pbix2html.serve:app` and reload the report. If it's already running
+> it with `python -m uvicorn pbix2html.serve:app` and reload the report (the panel's
+> convert step also checks this for you and says so in the result). If it's already running
 > and you still see this, check `serve.py`'s own terminal for the actual error; a
 > generic "Failed to fetch" with the server up is almost always CORS, not the request
 > itself — see the `CORS_ORIGINS` note in `.env.example`.
