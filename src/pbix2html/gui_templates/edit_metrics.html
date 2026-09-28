@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a class="link" href="/reports/{{ name }}">&larr; {{ name }}</a></p>
+<h1>Edit metrics — {{ name }}</h1>
+<p class="muted">{{ pbix }} · <code>metrics/{{ name }}.yaml</code></p>
+
+{% if result %}
+<div class="banner {{ 'ok' if result.ok else 'err' }}">
+  <strong>{{ result.title }}</strong><br>{{ result.message }}
+  {% if result.detail %}<ul>{% for d in result.detail %}<li>{{ d }}</li>{% endfor %}</ul>{% endif %}
+</div>
+{% endif %}
+
+{% if yaml_error %}
+<div class="banner err"><strong>Couldn't load the current yaml</strong><br>{{ yaml_error }}</div>
+{% elif not raw %}
+<div class="card"><p class="muted">There's no <code>metrics/{{ name }}.yaml</code> yet — generate the
+   template (step 2 on the report page) first.</p></div>
+{% else %}
+<form method="post" action="/reports/{{ name }}/edit">
+
+  <div class="card">
+    <h2>Parameters</h2>
+    <p class="muted">One per slicer, usually — these become the fields on the Convert form.</p>
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Default</th><th>Label</th><th>Multi</th><th>Remove</th></tr>
+      {% for pname, p in (raw.parameters or {}).items() %}
+      <tr>
+        <td>{{ pname }}</td>
+        <td>
+          <select name="param__{{ pname }}__type">
+            {% for t in ["string", "int", "date"] %}
+            <option value="{{ t }}" {{ "selected" if (p.type or "string") == t }}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </td>
+        <td><input type="text" name="param__{{ pname }}__default" value="{{ p.default if p.default is not none else '' }}"></td>
+        <td><input type="text" name="param__{{ pname }}__label" value="{{ p.label or pname }}"></td>
+        <td class="checkbox-row" style="margin:0"><input type="checkbox" name="param__{{ pname }}__multi" {{ "checked" if p.multi }}></td>
+        <td class="checkbox-row" style="margin:0"><input type="checkbox" name="param__{{ pname }}__delete"></td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td><input type="text" name="newparam__name" placeholder="new_param"></td>
+        <td>
+          <select name="newparam__type">
+            <option value="string">string</option><option value="int">int</option><option value="date">date</option>
+          </select>
+        </td>
+        <td><input type="text" name="newparam__default"></td>
+        <td><input type="text" name="newparam__label"></td>
+        <td class="checkbox-row" style="margin:0"><input type="checkbox" name="newparam__multi"></td>
+        <td class="muted">(add)</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Roles</h2>
+    <p class="muted">One per RLS role. <code>proxy_user</code> is the trusted-session user Teradata
+       evaluates row security as (see skill <code>teradata-directquery</code>).</p>
+    <table>
+      <tr><th>Name</th><th>proxy_user</th><th>where (fixed predicate, optional)</th><th>Remove</th></tr>
+      {% for rname, r in (raw.roles or {}).items() %}
+      <tr>
+        <td>{{ rname }}</td>
+        <td><input type="text" name="role__{{ rname }}__proxy_user" value="{{ r.proxy_user or '' }}"></td>
+        <td><input type="text" name="role__{{ rname }}__where" value="{{ r.where or '' }}"></td>
+        <td class="checkbox-row" style="margin:0"><input type="checkbox" name="role__{{ rname }}__delete"></td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td><input type="text" name="newrole__name" placeholder="New_Role"></td>
+        <td><input type="text" name="newrole__proxy_user"></td>
+        <td><input type="text" name="newrole__where"></td>
+        <td class="muted">(add)</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Visuals</h2>
+    <p class="muted">⚠ <code>sql</code>/<code>reference_sql</code> must be a single read-only
+       <code>SELECT</code>/<code>WITH</code> query (same rule as table mapping, step 2b) — no
+       <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>, no DDL, no stacked statements.
+       Leave a field with <code>TODO</code> in it to save it as a work in progress; it just won't
+       have data until the <code>TODO</code> is gone.</p>
+    {% for vid, v in (raw.visuals or {}).items() %}
+    <div style="border-top:1px solid var(--border); padding-top:14px; margin-top:14px;">
+      <div class="paso"><strong>{{ vid }}</strong>
+        <select name="visual__{{ vid }}__kind" style="width:auto">
+          {% for k in kinds %}<option value="{{ k }}" {{ "selected" if (v.kind or "unsupported") == k }}>{{ k }}</option>{% endfor %}
+        </select>
+      </div>
+      {% if v.fields %}
+      <p class="muted" style="margin:4px 0">Fields used (from the .pbix): {{ v.fields | join(" · ") }}</p>
+      {% endif %}
+      <label for="visual__{{ vid }}__title">Title</label>
+      <input type="text" id="visual__{{ vid }}__title" name="visual__{{ vid }}__title" value="{{ v.title or '' }}">
+      <label for="visual__{{ vid }}__sql">sql</label>
+      <textarea id="visual__{{ vid }}__sql" name="visual__{{ vid }}__sql" rows="4">{{ v.sql or '' }}</textarea>
+      <label for="visual__{{ vid }}__params">params (comma-separated, must match <code>:name</code> in the sql)</label>
+      <input type="text" id="visual__{{ vid }}__params" name="visual__{{ vid }}__params" value="{{ (v.params or []) | join(', ') }}">
+      <label for="visual__{{ vid }}__reference_sql">reference_sql (from DBQL — for <code>validate</code> only, optional)</label>
+      <textarea id="visual__{{ vid }}__reference_sql" name="visual__{{ vid }}__reference_sql" rows="3">{{ v.reference_sql or '' }}</textarea>
+      <div class="form-row" style="display:flex; gap:16px;">
+        <div style="flex:1">
+          <label for="visual__{{ vid }}__tolerance_rel">tolerance (rel)</label>
+          <input type="text" id="visual__{{ vid }}__tolerance_rel" name="visual__{{ vid }}__tolerance_rel"
+                 value="{{ (v.tolerance or {}).rel if (v.tolerance or {}).rel is not none else '' }}">
+        </div>
+        <div style="flex:3">
+          <label for="visual__{{ vid }}__notes">notes</label>
+          <input type="text" id="visual__{{ vid }}__notes" name="visual__{{ vid }}__notes" value="{{ v.notes or '' }}">
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <button type="submit">Save metrics.yaml</button>
+</form>
+{% endif %}
+{% endblock %}

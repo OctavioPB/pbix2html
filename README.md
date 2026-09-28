@@ -85,18 +85,27 @@ a local web panel with buttons and forms for the same four steps the technical t
    - **Map Power BI tables to Teradata** (optional): give it a read-only Teradata query
      for each Power BI table name, once per report (single `SELECT`/`WITH` only — no
      `INSERT`/`UPDATE`/`DELETE`, no DDL, checked before it's saved).
-   - **Generate the metrics template** (`metrics/<Report>.yaml`) — the SQL still has to
-     be written by a technical person, but the template is generated with one click (and
-     pre-filled with the table mapping above, if you did that step).
+   - **Generate the metrics template** (`metrics/<Report>.yaml`) — one click creates it
+     (pre-filled with the table mapping above, if you did that step).
+   - **Edit SQL, parameters & roles**: still requires someone who knows Teradata SQL, but
+     it's a form in the browser — a table for parameters, a table for roles, and one card
+     per visual with its `sql` in a text box. Nobody needs to open or hand-edit the yaml
+     file itself; every query is checked to be a single read-only `SELECT`/`WITH` before
+     it's saved, and rejected with the exact reason if it isn't.
    - **Convert to HTML**: pick the mode (snapshot/live/HAH), role, and the report's
      parameters (year, region, etc.) in a form, with plain-language names taken from the yaml.
+     Picking **Live** shows whether the live service is reachable and a **Start live
+     service** / **Stop live service** button right there — no separate terminal command.
    - **Validate** against Power BI (requires the technical team to have configured Teradata).
-4. To close the panel, close the black window.
+4. To close the panel, close the black window (this also stops the live service if you
+   started it from here).
 
 > The panel only runs on your machine (`127.0.0.1`, nobody else can open it from another
 > computer) and doesn't replace *live* mode's security controls (`serve.py`): it's an
 > operating tool for whoever builds the reports, with the same trust level as running the
-> terminal by hand.
+> terminal by hand. Everything above — mapping, SQL, parameters, roles, starting/stopping
+> the live service — is meant to be done from the panel; the only thing done outside it is
+> the very first double-click on `Open_Panel.bat`.
 
 ---
 
@@ -139,20 +148,21 @@ python -m uvicorn pbix2html.serve:app   # live mode (needs SSO in front; see ser
 Without Teradata you can test the render with `--fake-data tests/fixtures/fake_block.json`.
 
 > **`--mode live` report shows "Failed to fetch" on every visual?** `serve.py` isn't
-> running (or isn't reachable at the `API_BASE` the report was generated with) — start
-> it with `python -m uvicorn pbix2html.serve:app`, **from this project's root**, and
-> reload the report (the panel's convert step checks this for you and says so in the
-> result). If it's already running and you still see this, check `serve.py`'s own
-> terminal for the actual error; a generic "Failed to fetch" with the server up is
-> almost always CORS, not the request itself — see the `CORS_ORIGINS` note in
-> `.env.example`.
+> running (or isn't reachable at the `API_BASE` the report was generated with). The
+> panel (section 3) has a **Start live service** button on the convert step that spawns
+> it from the panel's own working directory, which is the easiest way to avoid this —
+> prefer that over running `uvicorn` by hand. If you do start it manually, it must be
+> `python -m uvicorn pbix2html.serve:app`, **from this project's root**. If it's already
+> running and you still see this, check `serve.py`'s own terminal for the actual error;
+> a generic "Failed to fetch" with the server up is almost always CORS, not the request
+> itself — see the `CORS_ORIGINS` note in `.env.example`.
 >
 > **Visual shows `HTTP 404` instead (not "Failed to fetch")?** `serve.py` is reachable
 > but running from the wrong folder — `metrics/`, `reports/`, `out/` are all relative
-> paths, so it has to run from this project's root, the same folder they're in. The
-> 404's own message names the exact path it looked for and where it's actually
-> running from; the panel's live-mode check catches this too, separately from "not
-> reachable at all".
+> paths, so it has to run from this project's root, the same folder they're in. Starting
+> it from the panel's button avoids this entirely (it always uses the panel's own
+> working directory); if it's still happening, the 404's own message names the exact
+> path it looked for and where it's actually running from.
 
 ### Structure
 
@@ -218,7 +228,11 @@ if you'd rather click through it.
    itself is never ported — see skill `dax-to-teradata-sql` for the translation patterns
    and the column contract each `kind` expects, documented in skill `html-renderer`).
    Fill in `params`, and for any role in `roles:` set its `proxy_user` (see skill
-   `teradata-directquery` for trusted sessions).
+   `teradata-directquery` for trusted sessions). Do this from the panel's **Edit SQL,
+   parameters & roles** page (section 3) — it round-trips `metrics/<Report>.yaml` for
+   you and checks every `sql`/`reference_sql` is a single read-only query before saving;
+   hand-editing the yaml directly works too (same file, `yaml.safe_dump` on save just
+   reformats it), but there's no need to.
 
 7. **Convert it to HTML.**
    ```bash

@@ -12,8 +12,12 @@ with the same trust level as running the CLI by hand. Don't expose it outside lo
 """
 from __future__ import annotations
 
+import atexit
 import json
 import re
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -91,6 +95,90 @@ def _live_status(api_base: str, report: str, timeout: float = 1.5) -> str:
         return "unreachable"
 
 
+# ----------------------------------------------------------------------------
+# Live service (serve.py) control — so "start the live service" is a button, not
+# a second terminal window. Only tracks a process THIS panel spawned: if someone
+# started serve.py by hand instead, _live_status() above still reports it as
+# reachable, but there's no PID here to stop it with (see the "not ours" case
+# in report.html) — that's a deliberate limit, not a bug: this panel has no
+# business killing a process it didn't start.
+# ----------------------------------------------------------------------------
+
+_live_proc: subprocess.Popen | None = None
+
+
+def _live_owned_and_running() -> bool:
+    return _live_proc is not None and _live_proc.poll() is None
+
+
+def _start_live_process() -> None:
+    global _live_proc
+    if _live_owned_and_running():
+        return
+    parsed = urllib.parse.urlparse(settings.api_base)
+    host, port = parsed.hostname or "127.0.0.1", parsed.port or 8000
+    # cwd=Path.cwd() (this panel's own working directory) rather than trusting whoever
+    # runs the command — this is exactly what removes the "serve.py running from the
+    # wrong folder" failure mode: it always inherits the same cwd the panel itself has.
+    _live_proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "pbix2html.serve:app", "--host", host, "--port", str(port)],
+        cwd=str(Path.cwd()),
+    )
+
+
+def _stop_live_process() -> None:
+    global _live_proc
+    if _live_proc is None:
+        return
+    _live_proc.terminate()
+    try:
+        _live_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _live_proc.kill()
+    _live_proc = None
+
+
+atexit.register(_stop_live_process)
+
+
+@app.get("/live/status")
+def live_status(name: str):
+    """JSON, polled by report.html's own JS only once the user picks "Live" mode —
+    NOT on every page load: this does a real (short-timeout) network call, and
+    blocking every page render on it made the whole panel feel frozen for anyone not
+    actively using live mode (see the fix in _page(), which no longer calls this)."""
+    return {
+        "status": _live_status(settings.api_base, name),
+        "owned": _live_owned_and_running(),
+        "api_base": settings.api_base,
+    }
+
+
+@app.post("/live/start")
+def start_live(request: Request, name: str = Form(...)):
+    pbix = _find_pbix(name)
+    _start_live_process()
+    time.sleep(1.5)  # give uvicorn a moment to bind before the next status check
+    status = _live_status(settings.api_base, name)
+    if status == "ok":
+        result = {"ok": True, "title": "Live service started", "detail": [],
+                  "message": f"Running at {settings.api_base} (pid {_live_proc.pid if _live_proc else '?'})."}
+    else:
+        result = {"ok": False, "title": "Live service didn't come up", "detail": [],
+                   "message": "Started the process but it's not answering yet — reopen this page in a "
+                              "few seconds, or check for a port conflict (something else already using "
+                              f"{settings.api_base})."}
+    return _page(request, pbix, result)
+
+
+@app.post("/live/stop")
+def stop_live(request: Request, name: str = Form(...)):
+    pbix = _find_pbix(name)
+    _stop_live_process()
+    result = {"ok": True, "title": "Live service stopped", "detail": [], "message": ""}
+    return _page(request, pbix, result)
+
+
 def _find_pbix(name: str) -> Path:
     """Only accepts names that match a real .pbix under reports/: prevents
     someone from editing the URL by hand and trying to read another disk path."""
@@ -131,6 +219,7 @@ def _page(request: Request, pbix: Path, result: dict[str, Any] | None = None) ->
         "roles": _real_roles(spec),
         "has_teradata": settings.has_teradata,
         "demo_available": DEMO_FIXTURE.exists(),
+        "api_base": settings.api_base,   # cheap: a string read, no network call — see /live/status for that
         "result": result,
     }
     return templates.TemplateResponse("report.html", ctx)
@@ -217,6 +306,141 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
         result = {"ok": False, "title": "A template already exists", "message": str(e), "detail": []}
     except Exception as e:
         result = {"ok": False, "title": "Couldn't generate the template", "message": f"{type(e).__name__}: {e}", "detail": []}
+    return _page(request, pbix, result)
+
+
+# ----------------------------------------------------------------------------
+# Step 2c: edit SQL / parameters / roles from the browser — no text editor, no
+# opening metrics/<Report>.yaml by hand. Round-trips through the raw yaml dict
+# (spec.raw) rather than semantic.scaffold(), so it only ever touches the fields
+# this form actually edits and never re-derives anything from the .pbix.
+# ----------------------------------------------------------------------------
+
+_KIND_CHOICES = sorted(set(semantic.KIND_MAP.values()) | {"custom", "unsupported"})
+
+
+def _edit_page(request: Request, name: str, pbix: Path, raw: dict | None = None,
+               result: dict[str, Any] | None = None) -> HTMLResponse:
+    spec, yaml_error = _load_spec(name)
+    return templates.TemplateResponse("edit_metrics.html", {
+        "request": request, "name": name, "pbix": str(pbix),
+        "raw": raw if raw is not None else (spec.raw if spec else {}),
+        "kinds": _KIND_CHOICES,
+        "yaml_error": yaml_error if raw is None else None,
+        "result": result,
+    })
+
+
+@app.get("/reports/{name}/edit", response_class=HTMLResponse)
+def view_edit(request: Request, name: str):
+    pbix = _find_pbix(name)
+    return _edit_page(request, name, pbix)
+
+
+@app.post("/reports/{name}/edit")
+async def save_edit(request: Request, name: str):
+    pbix = _find_pbix(name)
+    spec, yaml_error = _load_spec(name)
+    if spec is None:
+        result = {"ok": False, "title": "Missing the metrics template", "detail": [yaml_error] if yaml_error else [],
+                   "message": "Generate the template first (step 2) before editing it."}
+        return _page(request, pbix, result)
+
+    form = await request.form()
+    raw = dict(spec.raw)
+    errors: list[str] = []
+
+    # --- parameters: type/default/label/multi per existing name, plus one new row ---
+    parameters: dict[str, dict] = {}
+    for pname, p in (raw.get("parameters") or {}).items():
+        if form.get(f"param__{pname}__delete") == "on":
+            continue
+        p = dict(p or {})
+        p["type"] = form.get(f"param__{pname}__type") or p.get("type") or "string"
+        default = form.get(f"param__{pname}__default", "")
+        p["default"] = default if default != "" else None
+        p["label"] = form.get(f"param__{pname}__label") or p.get("label") or pname
+        p["multi"] = form.get(f"param__{pname}__multi") == "on"
+        parameters[pname] = p
+    new_pname = (form.get("newparam__name") or "").strip()
+    if new_pname:
+        default = form.get("newparam__default", "")
+        parameters[new_pname] = {
+            "type": form.get("newparam__type") or "string",
+            "default": default if default != "" else None,
+            "label": form.get("newparam__label") or new_pname,
+            "multi": form.get("newparam__multi") == "on",
+        }
+    raw["parameters"] = parameters
+
+    # --- roles: proxy_user/where per existing name, plus one new row ---
+    roles: dict[str, dict] = {}
+    for rname, r in (raw.get("roles") or {}).items():
+        if form.get(f"role__{rname}__delete") == "on":
+            continue
+        r = dict(r or {})
+        r["proxy_user"] = form.get(f"role__{rname}__proxy_user") or None
+        r["where"] = form.get(f"role__{rname}__where") or None
+        roles[rname] = r
+    new_rname = (form.get("newrole__name") or "").strip()
+    if new_rname:
+        roles[new_rname] = {
+            "proxy_user": form.get("newrole__proxy_user") or None,
+            "where": form.get("newrole__where") or None,
+        }
+    raw["roles"] = roles or {"default": {"proxy_user": None, "where": None}}
+
+    # --- visuals: kind/title/sql/params/reference_sql/tolerance/notes per existing id ---
+    visuals: dict[str, dict] = dict(raw.get("visuals") or {})
+    for vid in list(visuals.keys()):
+        if f"visual__{vid}__kind" not in form:
+            continue  # a visual not rendered by this form (shouldn't happen); leave untouched
+        v = dict(visuals[vid] or {})
+        v["kind"] = form.get(f"visual__{vid}__kind") or v.get("kind") or "unsupported"
+        v["title"] = form.get(f"visual__{vid}__title") or None
+
+        sql_in = (form.get(f"visual__{vid}__sql") or "").strip()
+        if sql_in and "TODO" not in sql_in:
+            try:
+                v["sql"] = semantic.validate_read_only_sql(sql_in)
+            except ValueError as e:
+                errors.append(f"{vid} — sql: {e}")
+                v["sql"] = sql_in
+        else:
+            v["sql"] = sql_in or None
+
+        params_in = form.get(f"visual__{vid}__params", "")
+        v["params"] = [p.strip() for p in params_in.split(",") if p.strip()]
+
+        ref_sql_in = (form.get(f"visual__{vid}__reference_sql") or "").strip()
+        if ref_sql_in:
+            try:
+                v["reference_sql"] = semantic.validate_read_only_sql(ref_sql_in)
+            except ValueError as e:
+                errors.append(f"{vid} — reference_sql: {e}")
+                v["reference_sql"] = ref_sql_in
+        else:
+            v["reference_sql"] = None
+
+        tol_in = form.get(f"visual__{vid}__tolerance_rel", "")
+        try:
+            v["tolerance"] = {"rel": float(tol_in)} if tol_in.strip() else (v.get("tolerance") or {"rel": 1e-6})
+        except ValueError:
+            v["tolerance"] = v.get("tolerance") or {"rel": 1e-6}
+
+        v["notes"] = form.get(f"visual__{vid}__notes") or None
+        visuals[vid] = v
+    raw["visuals"] = visuals
+
+    if errors:
+        result = {"ok": False, "title": "Not saved", "detail": errors,
+                   "message": "Only single, read-only SELECT queries are allowed for sql/reference_sql. "
+                              "Fix the entries below and save again."}
+        return _edit_page(request, name, pbix, raw, result)
+
+    semantic.save_raw(name, raw)
+    result = {"ok": True, "title": "Metrics saved", "detail": [],
+              "message": f"Wrote metrics/{name}.yaml."}
     return _page(request, pbix, result)
 
 

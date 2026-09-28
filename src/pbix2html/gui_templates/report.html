@@ -29,8 +29,9 @@
   <div class="step"><span class="n">2</span><h2>Metrics template (SQL per visual)</h2></div>
   {% if has_yaml %}
     <p class="muted"><code>metrics/{{ name }}.yaml</code> already exists. That's where each visual's
-       SQL lives; it's edited by hand (skill <code>dax-to-teradata-sql</code>) — this screen won't
-       overwrite it unless you explicitly ask it to.</p>
+       SQL lives — edit it below, right here in the panel (skill <code>dax-to-teradata-sql</code>
+       has the DAX → SQL patterns).</p>
+    <a class="btn" href="/reports/{{ name }}/edit">Edit SQL, parameters &amp; roles</a>
     <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml and any SQL already written is lost. Are you sure?');">
       <div class="checkbox-row">
         <input type="checkbox" id="regenerate" name="regenerate">
@@ -60,12 +61,62 @@
   {% if not spec %}
     <p class="muted">Finish step 2 first and write the SQL for each visual in the yaml.</p>
   {% else %}
+  <div id="live-options" hidden style="margin-bottom:12px">
+    <p class="muted" id="live-status-text">Checking…</p>
+    <form method="post" action="/live/start" id="live-start-form" hidden>
+      <input type="hidden" name="name" value="{{ name }}">
+      <button type="submit">Start live service</button>
+    </form>
+    <form method="post" action="/live/stop" id="live-stop-form" hidden>
+      <input type="hidden" name="name" value="{{ name }}">
+      <button type="submit" class="secondary">Stop live service</button>
+    </form>
+  </div>
+  <script>
+  (function () {
+    var checked = false;
+    function checkLiveStatus() {
+      if (checked) return;
+      checked = true;
+      var textEl = document.getElementById('live-status-text');
+      var startForm = document.getElementById('live-start-form');
+      var stopForm = document.getElementById('live-stop-form');
+      fetch('/live/status?name=' + encodeURIComponent({{ name|tojson }}))
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.status === 'ok') {
+            textEl.textContent = '✓ Live service reachable at ' + j.api_base + '.';
+            startForm.hidden = true;
+            stopForm.hidden = !j.owned;
+            if (!j.owned) { textEl.textContent += ' (started outside the panel — nothing to stop from here.)'; }
+          } else if (j.status === 'not_found') {
+            textEl.textContent = '⚠ Something is answering at ' + j.api_base + ' but can\'t see this report ' +
+              '— it is almost certainly running from the wrong folder. Stop it (however it was started) and ' +
+              'use this button instead, so the panel starts it from the right place.';
+            startForm.hidden = false; stopForm.hidden = true;
+          } else {
+            textEl.textContent = 'Not running yet.';
+            startForm.hidden = false; stopForm.hidden = true;
+          }
+        })
+        .catch(function () { textEl.textContent = "Couldn't check — see the browser console."; });
+    }
+    document.querySelectorAll('input[name="mode"]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        var box = document.getElementById('live-options');
+        if (this.value === 'live') { box.hidden = false; checkLiveStatus(); }
+        else { box.hidden = true; }
+      });
+    });
+  })();
+  </script>
+
   <form method="post" action="/reports/{{ name }}/convert">
     <label>Delivery mode</label>
     <div class="radios">
-      <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true"> Snapshot (embedded data)</label>
-      <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true"> Live (needs the service running)</label>
-      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false"> HAH (HTML App Host — see ADR-004, untested against a real HAH)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true;"> Snapshot (embedded data)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true;"> Live (needs the service running)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false;"> HAH (HTML App Host — see ADR-004, untested against a real HAH)</label>
     </div>
     <div id="hah-options" hidden>
       <label for="hah_env">HAH environment</label>

@@ -239,16 +239,32 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
     }
 
 
+YAML_HEADER = ("# Report semantic layer. Edit by hand: this is where the migrated logic lives.\n"
+               "# Column contracts per kind: .claude/skills/html-renderer/SKILL.md\n")
+
+
 def write_scaffold(layout: dict, model: dict, overwrite: bool = False,
                     table_map: dict[str, str] | None = None) -> Path:
     path = yaml_path(layout["report"])
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} already exists; use --overwrite to regenerate (you'll lose the written SQL)")
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = ("# Report semantic layer. Edit by hand: this is where the migrated logic lives.\n"
-              "# Column contracts per kind: .claude/skills/html-renderer/SKILL.md\n")
     path.write_text(
-        header + yaml.safe_dump(scaffold(layout, model, table_map), allow_unicode=True, sort_keys=False, width=110),
+        YAML_HEADER + yaml.safe_dump(scaffold(layout, model, table_map), allow_unicode=True, sort_keys=False, width=110),
+        encoding="utf-8")
+    return path
+
+
+def save_raw(report: str, raw: dict) -> Path:
+    """Writes an already-loaded/edited yaml dict back to metrics/<report>.yaml as-is —
+    unlike write_scaffold(), this never re-derives anything from the .pbix, so it's
+    safe to call after the panel's SQL/parameters/roles editor changes just a few
+    keys. Callers are responsible for validating anything security-sensitive (SQL)
+    before it gets here — see validate_read_only_sql."""
+    path = yaml_path(report)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        YAML_HEADER + yaml.safe_dump(raw, allow_unicode=True, sort_keys=False, width=110),
         encoding="utf-8")
     return path
 
