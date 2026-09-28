@@ -85,13 +85,20 @@ a local web panel with buttons and forms for the same four steps the technical t
    - **Map Power BI tables to Teradata** (optional): give it a read-only Teradata query
      for each Power BI table name, once per report (single `SELECT`/`WITH` only — no
      `INSERT`/`UPDATE`/`DELETE`, no DDL, checked before it's saved).
-   - **Generate the metrics template** (`metrics/<Report>.yaml`) — one click creates it
-     (pre-filled with the table mapping above, if you did that step).
-   - **Edit SQL, parameters & roles**: still requires someone who knows Teradata SQL, but
-     it's a form in the browser — a table for parameters, a table for roles, and one card
-     per visual with its `sql` in a text box. Nobody needs to open or hand-edit the yaml
-     file itself; every query is checked to be a single read-only `SELECT`/`WITH` before
-     it's saved, and rejected with the exact reason if it isn't.
+   - **Generate the metrics template** (`metrics/<Report>.yaml`) — one click creates it.
+     If you did the table-mapping step, most visuals come back with a **working `sql`
+     already drafted**, not a blank `TODO`: measures that are a single SUM/AVERAGE/MIN/
+     MAX/COUNT/COUNTROWS/DISTINCTCOUNT of one column (most real ones, in DirectQuery)
+     are translated automatically, joins included when the tables involved have a
+     documented relationship. Every auto-drafted visual is marked `Auto-drafted` in its
+     notes — still review it and run **Validate** (step 4) before trusting it, same as
+     anything else here. Whatever it can't confidently draft (a calculated/filtered
+     measure, time intelligence, an unclear join) is left as `TODO`, same as before.
+   - **Edit SQL, parameters & roles**: a form in the browser — a table for parameters, a
+     table for roles, and one card per visual with its `sql` in a text box, pre-filled
+     when auto-drafted, blank otherwise. Nobody needs to open or hand-edit the yaml file
+     itself; every query is checked to be a single read-only `SELECT`/`WITH` before it's
+     saved, and rejected with the exact reason if it isn't.
    - **Convert to HTML**: pick the mode (snapshot/live/HAH), role, and the report's
      parameters (year, region, etc.) in a form, with plain-language names taken from the yaml.
      Picking **Live** shows whether the live service is reachable and a **Start live
@@ -224,15 +231,21 @@ if you'd rather click through it.
    `reference_sql` in the yaml — it's both your best starting point and the number
    `validate` will check against.
 
-6. **Write the real `sql` per visual.** Rewrite each DAX measure as Teradata SQL (DAX
-   itself is never ported — see skill `dax-to-teradata-sql` for the translation patterns
-   and the column contract each `kind` expects, documented in skill `html-renderer`).
-   Fill in `params`, and for any role in `roles:` set its `proxy_user` (see skill
-   `teradata-directquery` for trusted sessions). Do this from the panel's **Edit SQL,
-   parameters & roles** page (section 3) — it round-trips `metrics/<Report>.yaml` for
-   you and checks every `sql`/`reference_sql` is a single read-only query before saving;
-   hand-editing the yaml directly works too (same file, `yaml.safe_dump` on save just
-   reformats it), but there's no need to.
+6. **Review/write the real `sql` per visual.** Step 4's scaffold already auto-drafts
+   `sql` for visuals whose measure is a single SUM/AVERAGE/MIN/MAX/COUNT/COUNTROWS/
+   DISTINCTCOUNT (most real ones, in DirectQuery — see `_draft_visual_sql` in
+   `semantic.py`), joins included where `model.json`'s relationships make it
+   unambiguous; those are marked `Auto-drafted` in the visual's `notes` and still need
+   a human review, especially the JOIN (a wrong direction/multiplicity duplicates rows
+   and inflates totals — see skill `validate-report`). Everything else is still rewritten
+   by hand as Teradata SQL (DAX itself is never ported — see skill `dax-to-teradata-sql`
+   for the translation patterns and the column contract each `kind` expects, documented
+   in skill `html-renderer`). Fill in `params`, and for any role in `roles:` set its
+   `proxy_user` (see skill `teradata-directquery` for trusted sessions). Do this from the
+   panel's **Edit SQL, parameters & roles** page (section 3) — it round-trips
+   `metrics/<Report>.yaml` for you and checks every `sql`/`reference_sql` is a single
+   read-only query before saving; hand-editing the yaml directly works too (same file,
+   `yaml.safe_dump` on save just reformats it), but there's no need to.
 
 7. **Convert it to HTML.**
    ```bash

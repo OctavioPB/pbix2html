@@ -78,6 +78,86 @@ def test_sql_stub_skips_unsafe_table_map_entry():
     assert sql == "TODO -- see skill dax-to-teradata-sql; columns per kind"
 
 
+# ----------------------------------------------------------------------------
+# Rule-based SQL auto-draft (scaffold's use of _draft_visual_sql)
+# ----------------------------------------------------------------------------
+
+MODEL = {
+    "measures": [
+        {"TableName": "Sales", "Name": "Net Revenue", "Expression": "SUM(Sales[Amount])"},
+        {"TableName": "Sales", "Name": "Margin %", "Expression": "SUM(Sales[MarginAmount])"},
+        {"TableName": "Sales", "Name": "Unfoldable", "Expression": "CALCULATE([Net Revenue], Region[Name]=\"X\")"},
+    ],
+    "relationships": [
+        {"FromTable": "Sales", "FromColumn": "RegionId", "ToTable": "Region", "ToColumn": "Id"},
+    ],
+}
+TABLE_MAP = {"Sales": "SELECT * FROM sales_fact", "Region": "SELECT * FROM region_dim"}
+
+
+def test_translate_measure_expression_recognizes_simple_aggregates():
+    assert semantic._translate_measure_expression("SUM(Sales[Amount])") == ("SUM", "Sales", "Amount", False)
+    assert semantic._translate_measure_expression("COUNTROWS(Sales)") == ("COUNT", "Sales", None, False)
+    assert semantic._translate_measure_expression("DISTINCTCOUNT(Customers[Id])") == \
+        ("COUNT", "Customers", "Id", True)
+    assert semantic._translate_measure_expression("'Sales Fact'[Amount]") is None  # not a call, no agg
+    assert semantic._translate_measure_expression("CALCULATE(SUM(Sales[Amount]), Region[Name]=\"X\")") is None
+    assert semantic._translate_measure_expression("DIVIDE([A],[B])") is None
+    assert semantic._translate_measure_expression("") is None
+
+
+def test_scaffold_auto_drafts_single_table_card(fake_pbix):
+    L = ex.extract_layout(fake_pbix)
+    sc = semantic.scaffold(L, MODEL, TABLE_MAP)
+    v1 = sc["visuals"]["v1"]
+    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact) AS sales"
+    assert v1["params"] == []
+    assert "Auto-drafted" in v1["notes"]
+
+
+def test_scaffold_auto_drafts_joined_bar_chart_with_slicer_filter(fake_pbix):
+    L = ex.extract_layout(fake_pbix)
+    sc = semantic.scaffold(L, MODEL, TABLE_MAP)
+    v2 = sc["visuals"]["v2"]
+    assert v2["sql"] == (
+        "SELECT region.name AS category, SUM(sales.marginamount) AS value\n"
+        "FROM (SELECT * FROM region_dim) AS region\n"
+        "JOIN (SELECT * FROM sales_fact) AS sales ON region.id = sales.regionid\n"
+        "GROUP BY 1"
+    )
+    assert v2["params"] == []  # the "year" slicer is on Calendar, not Sales/Region — correctly not attached
+    assert "duplicate" in v2["notes"].lower()  # join-fan-out warning (skill validate-report)
+
+
+def test_scaffold_does_not_auto_draft_without_table_map(fake_pbix):
+    L = ex.extract_layout(fake_pbix)
+    sc = semantic.scaffold(L, MODEL)  # no table_map at all
+    assert "TODO" in sc["visuals"]["v1"]["sql"]
+    assert "notes" not in sc["visuals"]["v1"] or "Auto-drafted" not in sc["visuals"]["v1"].get("notes", "")
+
+
+def test_scaffold_falls_back_to_todo_for_unrecognized_dax():
+    layout = {
+        "report": "R", "source": None,
+        "pages": [{"display_name": "P", "filters": [], "visuals": [{
+            "id": "vx", "type": "card", "title": None, "filters": [], "is_group": False, "is_custom": False,
+            "projections": {"Values": ["Sales.Unfoldable"]},
+        }]}],
+    }
+    sc = semantic.scaffold(layout, MODEL, TABLE_MAP)
+    assert "TODO" in sc["visuals"]["vx"]["sql"]
+
+
+def test_draft_visual_sql_bails_when_join_path_is_missing():
+    v = {"projections": {"Category": ["Region.Name"], "Y": ["Sum(Other.Amount)"]}}
+    draft = semantic._draft_visual_sql(
+        v, "bar", {}, {"Region": "SELECT * FROM region_dim", "Other": "SELECT * FROM other_fact"},
+        [],  # no relationships at all
+        {},
+    )
+    assert draft is None
+
+
 def test_snapshot_html(fake_pbix, tmp_path):
     L = ex.extract_layout(fake_pbix)
     spec = semantic.load("Executive_Dashboard")
