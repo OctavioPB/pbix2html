@@ -1,4 +1,5 @@
 """Panel routes, isolated from the real reports/metrics/out via monkeypatched dirs."""
+import json
 import shutil
 
 from fastapi.testclient import TestClient
@@ -21,6 +22,24 @@ def test_table_map_shows_entities_after_extract(tmp_path, monkeypatch, fake_pbix
     c.post(f"/reports/{name}/extract")
     r = c.get(f"/reports/{name}/table-map")
     assert r.status_code == 200 and "Sales" in r.text and "Region" in r.text
+
+
+def test_table_map_entities_are_not_mangled_by_aggregated_fields(tmp_path, monkeypatch, fake_pbix):
+    # Regression: an aggregated field ("Sum(Sales.Amount)", the common shape for a
+    # numeric column dropped into a Values well) used to produce the entity
+    # "Sum(Sales" instead of "Sales" — DAX aggregation syntax fused onto a mangled
+    # table name. Write a layout.json directly: the shared fake_pbix fixture doesn't
+    # happen to use the aggregated form, so this wouldn't be caught via extract().
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    rdir = tmp_path / "out" / name
+    rdir.mkdir(parents=True)
+    layout = {"pages": [{"visuals": [{"fields": ["Sum(Sales.Amount)", "Region.Name"]}]}]}
+    (rdir / "layout.json").write_text(json.dumps(layout), encoding="utf-8")
+
+    r = c.get(f"/reports/{name}/table-map")
+    assert r.status_code == 200
+    assert "Sales" in r.text and "Region" in r.text
+    assert "Sum(Sales" not in r.text and "Sum(" not in r.text
 
 
 def test_table_map_rejects_unsafe_query(tmp_path, monkeypatch, fake_pbix):

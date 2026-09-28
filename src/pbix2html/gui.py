@@ -216,8 +216,11 @@ def _load_table_map(name: str) -> dict[str, str]:
 
 
 def _pbi_entities(name: str) -> list[str]:
-    """Unique Power BI entity names referenced by the report's visuals, taken from the
-    layout already extracted in step 1 (out/<name>/layout.json)."""
+    """Unique Power BI table names referenced by the report's visuals, taken from the
+    layout already extracted in step 1 (out/<name>/layout.json). Uses
+    `semantic.query_ref_parts` to strip any Sum(...)/Avg(...)/... aggregation wrapper
+    before reading the table name — a naive split on the first '.' mangles those
+    (`"Sum(Sales.Amount)"` → `"Sum(Sales"`, not `"Sales"`)."""
     layout_path = OUT_DIR / ex.safe_name(name) / "layout.json"
     if not layout_path.exists():
         return []
@@ -226,8 +229,10 @@ def _pbi_entities(name: str) -> list[str]:
     for page in layout.get("pages", []):
         for v in page.get("visuals", []):
             for ref in v.get("fields") or []:
-                if isinstance(ref, str) and "." in ref:
-                    entities.add(ref.split(".", 1)[0])
+                if isinstance(ref, str):
+                    _, table, _ = semantic.query_ref_parts(ref)
+                    if table:
+                        entities.add(table)
     return sorted(entities)
 
 

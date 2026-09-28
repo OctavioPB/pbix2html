@@ -53,15 +53,28 @@ def test_validate_read_only_sql_does_not_false_positive_on_replace_function():
     assert semantic.validate_read_only_sql("SELECT comment FROM tickets") == "SELECT comment FROM tickets"
 
 
+def test_query_ref_parts_strips_aggregation_wrapper():
+    # A numeric column dropped into a Values well is commonly auto-aggregated by Power
+    # BI ("Sum(Sales.Amount)"), not just a plain "Table.Column" or "Table.Measure" ref.
+    assert semantic.query_ref_parts("Sum(Sales.Amount)") == ("Sum", "Sales", "Amount")
+    assert semantic.query_ref_parts("Sales.Net Revenue") == (None, "Sales", "Net Revenue")
+
+
+def test_entities_used_does_not_mangle_aggregated_fields():
+    # Regression: a naive split on the first '.' without stripping Sum(...)/Avg(...)/...
+    # first turned "Sum(Sales.Amount)" into the entity "Sum(Sales" instead of "Sales" —
+    # DAX aggregation syntax fused onto a truncated table name.
+    v = {"projections": {"Values": ["Sum(Sales.Amount)"], "Category": ["Region.Name"]}}
+    assert semantic._entities_used(v) == ["Sales", "Region"]
+
+
 def test_sql_stub_uses_validated_table_map_as_subquery():
-    fields_doc = ["Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"]
-    sql = semantic._sql_stub(fields_doc, {"Sales": "SELECT * FROM sales_fact"})
+    sql = semantic._sql_stub(["Sales"], {"Sales": "SELECT * FROM sales_fact"})
     assert "FROM (SELECT * FROM sales_fact) AS sales" in sql
 
 
 def test_sql_stub_skips_unsafe_table_map_entry():
-    fields_doc = ["Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"]
-    sql = semantic._sql_stub(fields_doc, {"Sales": "DELETE FROM sales_fact"})
+    sql = semantic._sql_stub(["Sales"], {"Sales": "DELETE FROM sales_fact"})
     assert sql == "TODO -- see skill dax-to-teradata-sql; columns per kind"
 
 

@@ -70,8 +70,15 @@ def yaml_path(report: str) -> Path:
     return METRICS_DIR / f"{report}.yaml"
 
 
-def _query_ref_parts(ref: str) -> tuple[str | None, str, str]:
-    """'Sum(Sales.Amount)' → ('Sum', 'Sales', 'Amount'); 'Sales.Margin' → (None, 'Sales', 'Margin')."""
+def query_ref_parts(ref: str) -> tuple[str | None, str, str]:
+    """'Sum(Sales.Amount)' → ('Sum', 'Sales', 'Amount'); 'Sales.Margin' → (None, 'Sales', 'Margin').
+
+    Strip the Agg(...) wrapper *before* splitting on '.' — a numeric field dropped into
+    a Values well is commonly auto-aggregated by Power BI (Sum/Count/Avg/...), and
+    splitting on the first '.' without stripping that first mangles the table name
+    (e.g. 'Sum(Sales.Amount)'.split(".")[0] == 'Sum(Sales', not 'Sales'). Also used by
+    `gui.py`'s table-map step (panel step 2b) to list the actual Power BI table names.
+    """
     agg = None
     m = _AGG_RE.match(ref)
     if m:
@@ -126,19 +133,32 @@ def _sql_alias(entity: str) -> str:
     return alias or "t"
 
 
-def _sql_stub(fields_doc: list[str], table_map: dict[str, str]) -> str:
+def _entities_used(v: dict) -> list[str]:
+    """Unique Power BI table names a visual's fields reference, in first-seen order.
+    Goes straight to `v["projections"]`'s raw queryRefs (via `query_ref_parts`, which
+    strips any Sum(...)/Avg(...)/... aggregation wrapper first) rather than re-parsing
+    the human-readable `fields_doc` strings scaffold() builds for the yaml — the
+    formatted "role: ref  -- DAX: ..." text is meant to be read by a person, not split
+    on ':'/'.' again to recover the table name."""
+    seen: list[str] = []
+    for refs in (v.get("projections") or {}).values():
+        for ref in refs:
+            _, table, _ = query_ref_parts(ref)
+            if table and table not in seen:
+                seen.append(table)
+    return seen
+
+
+def _sql_stub(entities: list[str], table_map: dict[str, str]) -> str:
     """Best-effort SQL skeleton once the Power BI entities involved are mapped to a
     Teradata source query (panel step 2b); a bare TODO otherwise. Always needs a
     person to fill in real columns/filters — see skill dax-to-teradata-sql."""
     if not table_map:
         return "TODO -- see skill dax-to-teradata-sql; columns per kind"
     sources = []
-    seen = set()
-    for ref in fields_doc:
-        # ref looks like "Values: Calendar.Year  -- DAX: ..."
-        entity = ref.split(": ", 1)[-1].split(".", 1)[0]
+    for entity in entities:
         query = table_map.get(entity)
-        if not query or entity in seen:
+        if not query:
             continue
         try:
             query = validate_read_only_sql(query)
@@ -146,7 +166,6 @@ def _sql_stub(fields_doc: list[str], table_map: dict[str, str]) -> str:
             # A hand-edited table_map.json can carry something the panel wouldn't have
             # accepted; skip it here rather than propagate an unsafe query into the yaml.
             continue
-        seen.add(entity)
         sources.append(f"({query}) AS {_sql_alias(entity)}")
     if not sources:
         return "TODO -- see skill dax-to-teradata-sql; columns per kind"
@@ -180,7 +199,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             kind = KIND_MAP.get(v["type"], "custom" if v.get("is_custom") else "unsupported")
             if kind == "slicer":
                 for ref in v["fields"]:
-                    _, table, col = _query_ref_parts(ref)
+                    _, table, col = query_ref_parts(ref)
                     pname = re.sub(r"\W+", "_", col).lower()
                     parameters[pname] = {"type": "string", "default": None, "from_slicer": ref, "multi": False}
                 continue
@@ -192,11 +211,11 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             fields_doc = []
             for role, refs in v["projections"].items():
                 for ref in refs:
-                    agg, table, col = _query_ref_parts(ref)
+                    agg, table, col = query_ref_parts(ref)
                     dax = measures.get((table, col))
                     fields_doc.append(f"{role}: {ref}" + (f"  -- DAX: {dax}" if dax else ""))
             entry["fields"] = fields_doc
-            entry["sql"] = _sql_stub(fields_doc, table_map)
+            entry["sql"] = _sql_stub(_entities_used(v), table_map)
             entry["params"] = []
             entry["reference_sql"] = None
             entry["tolerance"] = {"rel": 1.0e-6}
