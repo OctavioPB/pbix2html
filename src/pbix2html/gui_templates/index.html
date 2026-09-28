@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Reportes</h1>
+<p class="muted">Elegí un reporte para extraerlo, convertirlo a HTML o validarlo.</p>
+
+<div class="card">
+  {% if reportes %}
+  <table>
+    <tr><th>Reporte</th><th>Plantilla de métricas</th><th>HTML generados</th><th></th></tr>
+    {% for r in reportes %}
+    <tr>
+      <td>{{ r.name }}</td>
+      <td>{% if r.has_yaml %}<span class="badge si">sí</span>{% else %}<span class="badge no">falta</span>{% endif %}</td>
+      <td>{{ r.n_html }}</td>
+      <td><a class="btn secundario" href="/reportes/{{ r.name }}">Abrir</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">Todavía no hay ningún .pbix en la carpeta <code>reportes/</code>. Subí uno abajo.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Agregar un reporte nuevo</h2>
+  <form action="/subir" method="post" enctype="multipart/form-data">
+    <input type="file" name="archivo" accept=".pbix" required>
+    <button type="submit">Subir .pbix</button>
+  </form>
+</div>
+{% endblock %}

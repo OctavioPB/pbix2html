@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest*)", "Bash(python*)", "Bash(pbix2html*)", "Bash(ruff*)",
+      "Bash(pip install*)", "Bash(ls*)", "Bash(cat*)", "Bash(head*)", "Bash(git*)"
+    ],
+    "deny": ["Read(.env)", "Bash(cat .env)"]
+  }
+}

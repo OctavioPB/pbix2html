@@ -1,0 +1,8 @@
+.env
+out/
+cache/
+*.pbix
+__pycache__/
+*.egg-info/
+.pytest_cache/
+!reportes/Dashboard_Ejecutivo.pbix

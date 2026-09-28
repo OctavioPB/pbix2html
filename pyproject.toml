@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pbix2html"
+version = "0.1.0"
+description = "Migración de reportes Power BI (.pbix, DirectQuery Teradata) a HTML"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.0",
+  "pyyaml>=6",
+  "jinja2>=3.1",
+  "python-dotenv>=1.0",
+  "pbixray>=0.11",
+  "teradatasql>=20.0",
+]
+
+[project.optional-dependencies]
+live = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+dev = ["pytest>=8", "ruff>=0.4", "fastapi>=0.110", "httpx>=0.27", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+
+[project.scripts]
+pbix2html = "pbix2html.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pbix2html = ["templates/*.j2", "gui_templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["teradata: requiere conexión real a Teradata"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

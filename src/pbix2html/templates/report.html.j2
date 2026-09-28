@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ spec.report }}</title>
+<script src="{{ echarts_cdn }}"></script>
+<style>
+  :root {
+    --bg: {{ theme.background }};
+    --fg: {{ theme.foreground }};
+    --muted: {{ theme.muted }};
+    --border: {{ theme.border }};
+    --accent: {{ theme.data_colors[0] }};
+    --font: {{ theme.font_family }};
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
+  header { display: flex; align-items: baseline; gap: 1.5rem; padding: .75rem 1.25rem; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  header .meta { color: var(--muted); font-size: .8rem; }
+  nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
+  nav.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .4rem .6rem; cursor: pointer; color: var(--muted); font: inherit; }
+  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .params { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; padding: .5rem 1.25rem; font-size: .85rem; color: var(--muted); }
+  .params label { display: inline-flex; gap: .4rem; align-items: center; }
+  .params input, .params select { font: inherit; padding: .15rem .3rem; }
+  .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
+  .page[hidden] { display: none; }
+  .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; }
+  .visual .title { font-size: .85rem; font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .body { flex: 1; min-height: 0; position: relative; }
+  .chart { position: absolute; inset: 0; }
+  .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
+  .card .value { font-size: clamp(1.2rem, 3.2vw, 2.6rem); font-weight: 600; line-height: 1; }
+  .card .label { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
+  .kpi .target { color: var(--muted); font-size: .8rem; }
+  .multicard { display: grid; grid-template-columns: 1fr auto; gap: .2rem .8rem; padding: .5rem .6rem; font-size: .85rem; align-content: start; }
+  .multicard .v { text-align: right; font-weight: 600; }
+  .tablewrap { overflow: auto; height: 100%; }
+  table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+  th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--bg); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
+  .static { border-style: dashed; opacity: .5; }
+  .error { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
+  .loading { color: var(--muted); font-size: .75rem; padding: .5rem .6rem; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  @media print { nav.tabs, .params { display: none; } .page[hidden] { display: block; page-break-after: always; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ spec.report }}</h1>
+  <span class="meta">{% if mode == "snapshot" %}Datos al {{ generated_at }}{% if role %} · rol {{ role }}{% endif %}{% else %}Datos en vivo{% endif %}</span>
+</header>
+
+{% if spec.pages|length > 1 %}
+<nav class="tabs" role="tablist">
+  {% for p in spec.pages %}<button role="tab" data-page="{{ p.id }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ p.name }}</button>{% endfor %}
+</nav>
+{% endif %}
+
+{% if spec.parameters %}
+<div class="params">
+  {% for name, p in spec.parameters.items() %}
+  <label>{{ p.label }}
+    {% if mode == "live" %}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}">{% else %}<strong>{{ p.value if p.value is not none else '—' }}</strong>{% endif %}
+  </label>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% for p in spec.pages %}
+<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}" {% if not loop.first %}hidden{% endif %}>
+  {% for v in p.visuals %}
+  <div class="visual {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
+       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
+    {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
+    <div class="body"></div>
+  </div>
+  {% endfor %}
+</section>
+{% endfor %}
+
+<script id="spec" type="application/json">{{ spec_json|safe }}</script>
+{% if mode == "snapshot" %}<script id="data" type="application/json">{{ data_json|safe }}</script>
+{% else %}<script>window.API_BASE = {{ api_base|tojson }};</script>{% endif %}
+
+<script>
+(function () {
+  const spec = JSON.parse(document.getElementById('spec').textContent);
+  const theme = spec.theme;
+  const visualsById = {};
+  spec.pages.forEach(p => p.visuals.forEach(v => { visualsById[v.id] = v; }));
+  const charts = {};
+
+  // ---------- formatting ----------
+  const fmt = (v, f) => {
+    if (v === null || v === undefined) return '—';
+    if (typeof v !== 'number') return String(v);
+    if (f && f.includes('%')) return (v * 100).toLocaleString('es-MX', { maximumFractionDigits: 1 }) + '%';
+    if (f && /0\.00/.test(f)) return v.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (Math.abs(v) >= 1e6) return (v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 }) + ' M';
+    if (Math.abs(v) >= 1e4) return (v / 1e3).toLocaleString('es-MX', { maximumFractionDigits: 1 }) + ' k';
+    return v.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+  };
+  const col = (block, name) => block.columns.indexOf(name);
+  const series = (block) => {
+    const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
+    const cats = [], groups = new Map();
+    block.rows.forEach(r => {
+      if (r[vi] === null) return;
+      const c = String(r[ci]); if (!cats.includes(c)) cats.push(c);
+      const s = si >= 0 ? String(r[si]) : 'value';
+      if (!groups.has(s)) groups.set(s, new Map());
+      groups.get(s).set(c, r[vi]);
+    });
+    return { cats, groups };
+  };
+  const base = { color: theme.data_colors, textStyle: { fontFamily: theme.font_family, color: theme.foreground },
+                 grid: { left: 8, right: 12, top: 28, bottom: 8, containLabel: true },
+                 tooltip: { trigger: 'axis', valueFormatter: v => fmt(v) } };
+  const axisStyle = { axisLine: { lineStyle: { color: theme.border } }, axisLabel: { color: theme.muted },
+                      splitLine: { lineStyle: { color: theme.border } } };
+
+  // ---------- renderers ----------
+  const R = {
+    card(el, v, b) {
+      const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
+      el.innerHTML = `<div class="card"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+        (li >= 0 && r[li] ? `<div class="label">${r[li]}</div>` : '') + `</div>`;
+    },
+    kpi(el, v, b) {
+      const r = b.rows[0] || []; const vi = col(b, 'value'), ti = col(b, 'target');
+      const delta = (ti >= 0 && r[ti]) ? (r[vi] - r[ti]) / r[ti] : null;
+      el.innerHTML = `<div class="card kpi"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+        (ti >= 0 ? `<div class="target">Objetivo ${fmt(r[ti], v.format.value)}${delta !== null ? ' · ' + fmt(delta, '%') : ''}</div>` : '') + `</div>`;
+    },
+    multicard(el, v, b) {
+      const li = col(b, 'label'), vi = col(b, 'value');
+      el.innerHTML = '<div class="multicard">' + b.rows.map(r => `<div>${r[li]}</div><div class="v">${fmt(r[vi], v.format.value)}</div>`).join('') + '</div>';
+    },
+    table(el, v, b) {
+      const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
+      el.innerHTML = '<div class="tablewrap"><table><thead><tr>' +
+        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || c}</th>`).join('') + '</tr></thead><tbody>' +
+        b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
+        '</tbody></table></div>';
+    },
+    matrix(el, v, b) { R.table(el, v, b); },
+    text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
+    static(el) { el.innerHTML = ''; },
+    bar(el, v, b) { chart(el, v, cartesian(v, b, 'bar', true)); },
+    column(el, v, b) { chart(el, v, cartesian(v, b, 'bar', false)); },
+    line(el, v, b) { chart(el, v, cartesian(v, b, 'line', false, v.area)); },
+    combo(el, v, b) { chart(el, v, cartesian(v, b, 'combo', false)); },
+    pie(el, v, b) {
+      const ci = col(b, 'category'), vi = col(b, 'value');
+      chart(el, v, { ...base, tooltip: { trigger: 'item', valueFormatter: x => fmt(x) },
+        series: [{ type: 'pie', radius: v.inner_radius ? ['45%', '75%'] : '75%',
+                   data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi] })),
+                   label: { color: theme.foreground, fontSize: 11 } }] });
+    },
+    gauge(el, v, b) {
+      const r = b.rows[0] || []; const g = n => { const i = col(b, n); return i >= 0 ? r[i] : null; };
+      chart(el, v, { ...base, series: [{ type: 'gauge', min: g('min') ?? 0, max: g('max') ?? (g('target') ?? g('value')) * 1.2,
+        progress: { show: true }, detail: { formatter: x => fmt(x, v.format.value), color: theme.foreground },
+        axisLabel: { show: false }, data: [{ value: g('value') }] }] });
+    },
+  };
+  function cartesian(v, b, type, horizontal, area) {
+    const { cats, groups } = series(b);
+    const ser = [...groups.entries()].map(([name, m]) => ({
+      name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
+      data: cats.map(c => m.get(c) ?? null), stack: v.stacked ? 'total' : undefined,
+      areaStyle: area ? {} : undefined, smooth: false,
+    }));
+    const catAxis = { type: 'category', data: cats, ...axisStyle };
+    const valAxis = { type: 'value', ...axisStyle, axisLabel: { color: theme.muted, formatter: x => fmt(x, v.format.value) } };
+    return { ...base, legend: groups.size > 1 ? { top: 0, textStyle: { color: theme.muted } } : undefined,
+             xAxis: horizontal ? valAxis : catAxis, yAxis: horizontal ? { ...catAxis, inverse: true } : valAxis, series: ser };
+  }
+  function chart(el, v, option) {
+    el.innerHTML = '<div class="chart"></div>';
+    const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
+    c.setOption(option); charts[v.id] = c;
+  }
+
+  // ---------- data ----------
+  function paint(id, block) {
+    const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);
+    if (!el) return;
+    if (block.error) { el.innerHTML = `<div class="error">${block.error}</div>`; return; }
+    const fn = R[v.kind];
+    if (!fn) { el.innerHTML = `<div class="error">Sin renderer para ${v.kind}</div>`; return; }
+    if (block.skipped && !['text', 'static'].includes(v.kind)) { el.innerHTML = '<div class="loading">Sin consulta definida</div>'; return; }
+    try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+  }
+  function currentParams() {
+    const q = new URLSearchParams();
+    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') q.set(i.dataset.param, i.value); });
+    return q.toString();
+  }
+  async function load() {
+    if (!window.API_BASE) {
+      const data = JSON.parse(document.getElementById('data').textContent);
+      Object.keys(visualsById).forEach(id => paint(id, data[id] || { columns: [], rows: [], skipped: true }));
+      return;
+    }
+    const qs = currentParams();
+    await Promise.all(Object.keys(visualsById).map(async id => {
+      const el = document.querySelector(`#v-${CSS.escape(id)} .body`); if (el) el.innerHTML = '<div class="loading">Cargando…</div>';
+      try {
+        const r = await fetch(`${window.API_BASE}/reports/${encodeURIComponent(spec.report)}/visuals/${encodeURIComponent(id)}?${qs}`, { credentials: 'include' });
+        paint(id, r.ok ? await r.json() : { error: `HTTP ${r.status}` });
+      } catch (e) { paint(id, { error: e.message }); }
+    }));
+  }
+  document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', load));
+  document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
+    document.querySelectorAll('.page').forEach(p => { p.hidden = p.id !== b.dataset.page; });
+    Object.values(charts).forEach(c => c.resize());
+  }));
+  window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+  load();
+})();
+</script>
+</body>
+</html>
