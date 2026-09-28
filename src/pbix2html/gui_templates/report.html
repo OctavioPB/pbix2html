@@ -101,12 +101,15 @@
         })
         .catch(function () { textEl.textContent = "Couldn't check — see the browser console."; });
     }
-    document.querySelectorAll('input[name="mode"]').forEach(function (r) {
-      r.addEventListener('change', function () {
-        var box = document.getElementById('live-options');
-        if (this.value === 'live') { box.hidden = false; checkLiveStatus(); }
-        else { box.hidden = true; }
-      });
+    // Delegated on document (not the radios directly): this script runs before the
+    // <form> below it exists in the DOM, so attaching listeners to
+    // document.querySelectorAll('input[name="mode"]') here would find nothing —
+    // delegation works regardless of parse order since document always exists.
+    document.addEventListener('change', function (e) {
+      if (!e.target || e.target.name !== 'mode') return;
+      var box = document.getElementById('live-options');
+      if (e.target.value === 'live') { box.hidden = false; checkLiveStatus(); }
+      else { box.hidden = true; }
     });
   })();
   </script>
