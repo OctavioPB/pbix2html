@@ -140,11 +140,19 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 
 > **`--mode live` report shows "Failed to fetch" on every visual?** `serve.py` isn't
 > running (or isn't reachable at the `API_BASE` the report was generated with) — start
-> it with `python -m uvicorn pbix2html.serve:app` and reload the report (the panel's
-> convert step also checks this for you and says so in the result). If it's already running
-> and you still see this, check `serve.py`'s own terminal for the actual error; a
-> generic "Failed to fetch" with the server up is almost always CORS, not the request
-> itself — see the `CORS_ORIGINS` note in `.env.example`.
+> it with `python -m uvicorn pbix2html.serve:app`, **from this project's root**, and
+> reload the report (the panel's convert step checks this for you and says so in the
+> result). If it's already running and you still see this, check `serve.py`'s own
+> terminal for the actual error; a generic "Failed to fetch" with the server up is
+> almost always CORS, not the request itself — see the `CORS_ORIGINS` note in
+> `.env.example`.
+>
+> **Visual shows `HTTP 404` instead (not "Failed to fetch")?** `serve.py` is reachable
+> but running from the wrong folder — `metrics/`, `reports/`, `out/` are all relative
+> paths, so it has to run from this project's root, the same folder they're in. The
+> 404's own message names the exact path it looked for and where it's actually
+> running from; the panel's live-mode check catches this too, separately from "not
+> reachable at all".
 
 ### Structure
 

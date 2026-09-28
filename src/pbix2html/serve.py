@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,7 +70,16 @@ def _spec(report: str) -> semantic.ReportSpec:
     try:
         return semantic.load(report)
     except FileNotFoundError:
-        raise HTTPException(404, f"report {report} has no yaml")
+        # metrics/, reports/, out/ are all relative to serve.py's own working directory
+        # — a very common way to land here is starting uvicorn from somewhere else
+        # entirely. Naming the exact path it looked for (and where it's actually
+        # running from) turns a bare 404 into something fixable from the browser alone.
+        raise HTTPException(
+            404,
+            f"report {report!r} has no yaml at {semantic.yaml_path(report).resolve()}. "
+            f"serve.py is running from {Path.cwd()} — start it from the project root "
+            f"(the folder metrics/ and reports/ are in) instead."
+        )
 
 
 def _backend() -> TeradataBackend:
@@ -100,6 +110,17 @@ def visual(report: str, visual_id: str, request: Request):
         # whatever actually went wrong. Raising HTTPException instead keeps CORS headers
         # on the response so the report can show the real error inline in the visual.
         raise HTTPException(500, f"{type(e).__name__}: {e}")
+
+
+@app.get("/reports/{report}")
+def report_info(report: str):
+    """Confirms serve.py can find and parse this report's yaml — no query runs, no
+    auth required. Meant for a quick "is this actually set up, not just up" check
+    (see gui.py's live-mode convert step) that /healthz alone can't answer: /healthz
+    succeeds regardless of serve.py's working directory, so it can't catch "running,
+    but from the wrong folder" the way an actual /reports/{report}/visuals/... 404 does."""
+    spec = _spec(report)
+    return {"ok": True, "report": spec.report, "visuals": sorted(spec.visuals.keys())}
 
 
 @app.get("/healthz")

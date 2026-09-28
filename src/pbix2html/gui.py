@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -70,14 +71,24 @@ def _pbix_files() -> list[Path]:
     return sorted(REPORTS_DIR.glob("*.pbix"))
 
 
-def _url_reachable(url: str, timeout: float = 1.5) -> bool:
-    """Best-effort, short-timeout GET — used only to warn early that `serve.py` isn't
-    up yet for a `--mode live` report, not as a health check anyone should rely on."""
+def _live_status(api_base: str, report: str, timeout: float = 1.5) -> str:
+    """'ok' | 'unreachable' | 'not_found' — best-effort, used only to warn early on a
+    `--mode live` convert, not as a health check anyone should rely on. `/healthz`
+    alone isn't enough: it succeeds no matter what folder serve.py was started from,
+    so it can't catch "the process is up but can't see this report's yaml" — the most
+    common actual cause, since metrics/reports/out are all relative paths."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return 200 <= r.status < 300
+        with urllib.request.urlopen(f"{api_base}/healthz", timeout=timeout):
+            pass
     except (urllib.error.URLError, OSError, ValueError):
-        return False
+        return "unreachable"
+    try:
+        with urllib.request.urlopen(f"{api_base}/reports/{urllib.parse.quote(report)}", timeout=timeout):
+            return "ok"
+    except urllib.error.HTTPError:
+        return "not_found"
+    except (urllib.error.URLError, OSError, ValueError):
+        return "unreachable"
 
 
 def _find_pbix(name: str) -> Path:
@@ -367,13 +378,22 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                 f"tool before trusting it for production."
             )
         if mode == "live":
-            if _url_reachable(f"{settings.api_base}/healthz"):
-                detail.append(f"Checked {settings.api_base}/healthz just now — reachable.")
+            live_status = _live_status(settings.api_base, name)
+            if live_status == "ok":
+                detail.append(f"Checked {settings.api_base} just now — serve.py can see this report.")
+            elif live_status == "not_found":
+                detail.append(
+                    f"⚠ {settings.api_base} is up, but can't find this report's yaml — it's almost "
+                    f"certainly running from the wrong folder. Stop it and restart from this "
+                    f"project's root (the same folder metrics/ and reports/ are in): "
+                    f"python -m uvicorn pbix2html.serve:app"
+                )
             else:
                 detail.append(
-                    f"⚠ Couldn't reach {settings.api_base}/healthz just now. This report will show "
+                    f"⚠ Couldn't reach {settings.api_base} just now. This report will show "
                     f"\"Failed to fetch\" on every visual until that's running — start it with: "
-                    f"python -m uvicorn pbix2html.serve:app (leave that terminal open), then reload the report."
+                    f"python -m uvicorn pbix2html.serve:app (leave that terminal open, run it from "
+                    f"this project's root), then reload the report."
                 )
         mode_label = {"snapshot": "snapshot", "live": "live", "hah": f"HAH ({hah_env})"}.get(mode, mode)
         result = {
