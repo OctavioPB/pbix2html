@@ -193,9 +193,16 @@
     const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);
     if (!el) return;
     if (block.error) { el.innerHTML = `<div class="error">${block.error}</div>`; return; }
-    const fn = R[v.kind];
-    if (!fn) { el.innerHTML = `<div class="error">No renderer for ${v.kind}</div>`; return; }
+    // Check "no sql written yet" before "no renderer for this kind": an unimplemented
+    // visual type (kind "unsupported"/"custom") is expected and still TODO right out of
+    // scaffold — it should read as "not started" here, not look like a crash.
     if (block.skipped && !['text', 'static'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
+    const fn = R[v.kind];
+    if (!fn) {
+      el.innerHTML = `<div class="loading">Visual type "${v.kind}" isn't supported yet — pick a `
+        + `different kind in the metrics yaml, or see out/summary.md.</div>`;
+      return;
+    }
     try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
   }
   function currentParams() {

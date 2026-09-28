@@ -1,5 +1,7 @@
 """Full pipeline without Teradata: extract → yaml → FakeBackend → render → HTML."""
 import json
+from pathlib import Path
+
 from pbix2html import extract as ex, semantic
 from pbix2html.query import FakeBackend, bind, run_report
 from pbix2html.render import render_html, build_spec
@@ -172,6 +174,22 @@ def test_snapshot_html(fake_pbix, tmp_path):
     assert "#0F2B46" in html                                                        # pbix theme
     assert '"kind": "column"' in html                                              # custom reinterpreted
     (tmp_path / "r.html").write_text(html)
+
+
+def test_unsupported_kind_renders_a_friendly_placeholder_not_a_raw_error():
+    # Regression: every visual whose Power BI type has no renderer (kind "unsupported"
+    # — see build_spec) used to always try `R[v.kind]` first and fail with a raw
+    # "No renderer for X" that looked like a crash, even for a freshly-scaffolded
+    # visual that still had `sql: TODO` and was never queried. Confirmed against a
+    # real browser render (see conversation) that: a TODO'd one now reads "No query
+    # defined" like any other kind, and one with real sql gets an actionable message
+    # instead of a raw error. This only checks the template source doesn't regress
+    # back to the old wording — the JS itself isn't executed here.
+    templates_dir = Path(__file__).resolve().parents[1] / "src/pbix2html/templates"
+    for name in ("report.html.j2", "report_hah.html.j2"):
+        src = (templates_dir / name).read_text(encoding="utf-8")
+        assert "No renderer for" not in src
+        assert "isn't supported yet" in src
 
 
 def test_live_html_has_api_base(fake_pbix):

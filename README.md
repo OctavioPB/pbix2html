@@ -170,6 +170,15 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > it from the panel's button avoids this entirely (it always uses the panel's own
 > working directory); if it's still happening, the 404's own message names the exact
 > path it looked for and where it's actually running from.
+>
+> **Visual shows `HTTP 401` instead?** This is expected, not a bug, when there's no
+> reverse proxy in front of `serve.py` injecting the `AUTH_HEADER` (`X-Authenticated-User`
+> by default) after SSO — which is exactly the case when previewing on your own machine.
+> `serve.py` refuses to run any query without it on purpose (see rule 4 in `CLAUDE.md`):
+> that header is what ties a query to a real person so Teradata's row-level security
+> applies correctly, so it's never optional in a real deployment. For local preview only,
+> set `REQUIRE_AUTH=false` in `.env` (see the note in `.env.example`) and restart
+> `serve.py` — never do this anywhere the report is reachable by anyone but you.
 
 ### Structure
 

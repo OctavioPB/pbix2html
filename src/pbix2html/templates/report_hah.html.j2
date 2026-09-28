@@ -275,7 +275,11 @@
     const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);
     if (!el) return;
     const fn = R[v.kind];
-    if (!fn) { el.innerHTML = `<div class="error-state">No renderer for ${v.kind}</div>`; return; }
+    if (!fn) {
+      el.innerHTML = `<div class="loading">Visual type "${v.kind}" isn't supported yet — pick a `
+        + `different kind in the metrics yaml, or see out/summary.md.</div>`;
+      return;
+    }
     try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error-state">${e.message}</div>`; }
   }
   async function loadVisual(v) {
