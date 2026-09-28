@@ -41,6 +41,10 @@ module version. If they differ, `src/` wins.
      Teradata applies row-level security. See skill `teradata-directquery`.
    - Model RLS rules (`model.json → rls`) are documented in the report's yaml;
      their replication in Teradata is tracked in `PLAN.md`.
+   - The panel's table-map step (`metrics/<Report>.table_map.json`) only accepts a
+     single read-only `SELECT`/`WITH` query per Power BI table — enforced by
+     `semantic.validate_read_only_sql` on save. It's a guardrail against a careless
+     paste, not a security boundary.
 5. **The HTML inherits the .pbix theme** (`layout.json → theme`). Don't introduce a
    custom palette; colors come from `dataColors`, background, and fonts from the theme.
 6. **Data contracts per visual type** live in the `html-renderer` skill. SQL in the

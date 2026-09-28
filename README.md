@@ -82,8 +82,9 @@ a local web panel with buttons and forms for the same four steps the technical t
 3. There you'll see the list of available reports (`.pbix`). You can upload a new one
    with the corresponding button, or open an existing one to:
    - **Extract** its structure (pages, visuals, measures).
-   - **Map Power BI tables to Teradata** (optional): tell it which real Teradata table/view
-     each Power BI table name corresponds to, once per report.
+   - **Map Power BI tables to Teradata** (optional): give it a read-only Teradata query
+     for each Power BI table name, once per report (single `SELECT`/`WITH` only — no
+     `INSERT`/`UPDATE`/`DELETE`, no DDL, checked before it's saved).
    - **Generate the metrics template** (`metrics/<Report>.yaml`) — the SQL still has to
      be written by a technical person, but the template is generated with one click (and
      pre-filled with the table mapping above, if you did that step).
@@ -173,9 +174,12 @@ if you'd rather click through it.
    entity names (`Compute Engine Mnthly`, `ORG_MAP`...) that don't exist as such in
    Teradata — there's no mapping inside the `.pbix` itself. Do this once per report
    *before* the next step (panel step 2b, or write `metrics/Sales.table_map.json` by
-   hand as `{"Power BI entity": "schema.teradata_table_or_view"}`) and the scaffold
-   below pre-fills each visual's `sql` with a `FROM` clause instead of a bare `TODO` —
-   still needs columns and filters written by hand.
+   hand as `{"Power BI entity": "<a read-only SELECT query>"}`) and the scaffold below
+   pre-fills each visual's `sql` with a `FROM (<query>) AS ...` clause instead of a bare
+   `TODO` — still needs columns and filters written by hand. Only a single
+   `SELECT`/`WITH` statement is accepted (see `semantic.validate_read_only_sql`); this
+   is a guardrail against a careless paste, not a security boundary — whoever enters a
+   query here already has whatever access that query would use once it runs.
 
 4. **Generate the metrics scaffold.**
    ```bash

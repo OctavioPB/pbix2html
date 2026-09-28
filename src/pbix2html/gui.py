@@ -198,7 +198,7 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
 
 
 # ----------------------------------------------------------------------------
-# Step 2b: Power BI table → Teradata table/view mapping
+# Step 2b: Power BI table → Teradata source query
 # ----------------------------------------------------------------------------
 
 def _table_map_path(name: str) -> Path:
@@ -231,27 +231,49 @@ def _pbi_entities(name: str) -> list[str]:
     return sorted(entities)
 
 
+def _table_map_page(request: Request, name: str, pbix: Path, result: dict[str, Any] | None = None,
+                     pending: dict[str, str] | None = None) -> HTMLResponse:
+    return templates.TemplateResponse("table_map.html", {
+        "request": request, "name": name, "pbix": str(pbix),
+        "entities": _pbi_entities(name),
+        "mapping": pending if pending is not None else _load_table_map(name),
+        "result": result,
+    })
+
+
 @app.get("/reports/{name}/table-map", response_class=HTMLResponse)
 def view_table_map(request: Request, name: str):
     pbix = _find_pbix(name)
-    entities = _pbi_entities(name)
-    return templates.TemplateResponse("table_map.html", {
-        "request": request, "name": name, "pbix": str(pbix),
-        "entities": entities, "mapping": _load_table_map(name),
-    })
+    return _table_map_page(request, name, pbix)
 
 
 @app.post("/reports/{name}/table-map")
 async def save_table_map(request: Request, name: str):
     pbix = _find_pbix(name)
     form = await request.form()
-    mapping = {}
+    submitted = {}
     for key, val in form.items():
         if key.startswith("td__") and str(val).strip():
-            mapping[key[len("td__"):]] = str(val).strip()
-    _table_map_path(name).write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+            submitted[key[len("td__"):]] = str(val).strip()
+
+    validated: dict[str, str] = {}
+    errors: list[str] = []
+    for entity, query in submitted.items():
+        try:
+            validated[entity] = semantic.validate_read_only_sql(query)
+        except ValueError as e:
+            errors.append(f"{entity}: {e}")
+
+    if errors:
+        result = {"ok": False, "title": "Mapping not saved", "detail": errors,
+                   "message": "Only single, read-only SELECT queries are allowed. Fix the entries below and save again."}
+        return _table_map_page(request, name, pbix, result, pending=submitted)
+
+    path = _table_map_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(validated, ensure_ascii=False, indent=2), encoding="utf-8")
     result = {"ok": True, "title": "Mapping saved",
-              "message": f"{len(mapping)} Power BI table(s) mapped to Teradata.", "detail": []}
+              "message": f"{len(validated)} Power BI table(s) mapped to a Teradata query.", "detail": []}
     return _page(request, pbix, result)
 
 

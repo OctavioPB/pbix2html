@@ -30,6 +30,41 @@ def test_scaffold_from_layout(fake_pbix):
     assert "v3" not in sc["visuals"]                  # slicers aren't visuals with data
 
 
+def test_validate_read_only_sql_accepts_select_and_with():
+    assert semantic.validate_read_only_sql("SELECT * FROM t") == "SELECT * FROM t"
+    assert semantic.validate_read_only_sql("  select 1  ;  ") == "select 1"
+    assert semantic.validate_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x").startswith("WITH")
+
+
+def test_validate_read_only_sql_rejects_non_select():
+    for bad in ["", "   ", "DELETE FROM t", "DROP TABLE t", "INSERT INTO t VALUES (1)",
+                "UPDATE t SET a=1", "CREATE TABLE t (a INT)", "GRANT SELECT ON t TO u",
+                "SELECT * FROM t; DROP TABLE t", "SELECT * FROM t -- ; DROP TABLE t\n; DROP TABLE t"]:
+        try:
+            semantic.validate_read_only_sql(bad)
+            raise AssertionError(f"should have rejected: {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_validate_read_only_sql_does_not_false_positive_on_replace_function():
+    # OREPLACE/REPLACE(...) is a normal read-only Teradata string function, not DDL.
+    assert "OREPLACE" in semantic.validate_read_only_sql("SELECT OREPLACE(name, 'a', 'b') FROM t")
+    assert semantic.validate_read_only_sql("SELECT comment FROM tickets") == "SELECT comment FROM tickets"
+
+
+def test_sql_stub_uses_validated_table_map_as_subquery():
+    fields_doc = ["Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"]
+    sql = semantic._sql_stub(fields_doc, {"Sales": "SELECT * FROM sales_fact"})
+    assert "FROM (SELECT * FROM sales_fact) AS sales" in sql
+
+
+def test_sql_stub_skips_unsafe_table_map_entry():
+    fields_doc = ["Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"]
+    sql = semantic._sql_stub(fields_doc, {"Sales": "DELETE FROM sales_fact"})
+    assert sql == "TODO -- see skill dax-to-teradata-sql; columns per kind"
+
+
 def test_snapshot_html(fake_pbix, tmp_path):
     L = ex.extract_layout(fake_pbix)
     spec = semantic.load("Executive_Dashboard")

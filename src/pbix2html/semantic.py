@@ -80,25 +80,80 @@ def _query_ref_parts(ref: str) -> tuple[str | None, str, str]:
     return agg, table, col
 
 
+# Read-only guardrail for table-map queries (panel step 2b / metrics/<Report>.table_map.json).
+# This is NOT a SQL parser and isn't a security boundary against someone who already has
+# Teradata access — see validate_read_only_sql's docstring. It's a guardrail against an
+# accidental/careless paste ending up wired into a generated report's SQL.
+_SQL_SINGLE_STATEMENT_FORBIDDEN = (
+    "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE",
+    "GRANT", "REVOKE", "EXEC", "EXECUTE", "CALL", "COMMIT", "ROLLBACK", "SET", "INTO",
+)
+_SQL_FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_SQL_SINGLE_STATEMENT_FORBIDDEN) + r")\b", re.IGNORECASE)
+_SQL_LEADING_RE = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+_SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_SQL_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def validate_read_only_sql(sql: str) -> str:
+    """Rejects anything but a single read-only SELECT/WITH query.
+
+    This is a guardrail, not a SQL parser or a security boundary: it can't catch a
+    read-only-looking call to a UDF/stored function with side effects, and anyone who
+    already has real Teradata credentials can run whatever they want directly — this
+    only stops a careless/accidental paste (a stray DELETE, a second stacked statement)
+    from getting wired into a generated report through the panel's table-map step.
+    Returns the query with any single trailing ';' stripped (ready to use as a
+    subquery); raises ValueError with a human-readable reason otherwise.
+    """
+    raw = (sql or "").strip()
+    if not raw:
+        raise ValueError("empty query")
+    if raw.endswith(";"):
+        raw = raw[:-1].strip()
+    if ";" in raw:
+        raise ValueError("only a single SELECT statement is allowed (found a second ';')")
+    uncommented = _SQL_BLOCK_COMMENT_RE.sub(" ", _SQL_LINE_COMMENT_RE.sub(" ", raw)).strip()
+    if not _SQL_LEADING_RE.match(uncommented):
+        raise ValueError("must start with SELECT (or WITH ... SELECT)")
+    m = _SQL_FORBIDDEN_RE.search(uncommented)
+    if m:
+        raise ValueError(f"'{m.group(1).upper()}' isn't allowed here — read-only queries only")
+    return raw
+
+
+def _sql_alias(entity: str) -> str:
+    alias = re.sub(r"\W+", "_", entity).strip("_").lower()
+    return alias or "t"
+
+
 def _sql_stub(fields_doc: list[str], table_map: dict[str, str]) -> str:
-    """Best-effort SQL skeleton once the Power BI entities involved are mapped to
-    Teradata tables/views (panel step 2b); a bare TODO otherwise. Always needs a
+    """Best-effort SQL skeleton once the Power BI entities involved are mapped to a
+    Teradata source query (panel step 2b); a bare TODO otherwise. Always needs a
     person to fill in real columns/filters — see skill dax-to-teradata-sql."""
     if not table_map:
         return "TODO -- see skill dax-to-teradata-sql; columns per kind"
-    td_tables = []
+    sources = []
+    seen = set()
     for ref in fields_doc:
         # ref looks like "Values: Calendar.Year  -- DAX: ..."
         entity = ref.split(": ", 1)[-1].split(".", 1)[0]
-        td = table_map.get(entity)
-        if td and td not in td_tables:
-            td_tables.append(td)
-    if not td_tables:
+        query = table_map.get(entity)
+        if not query or entity in seen:
+            continue
+        try:
+            query = validate_read_only_sql(query)
+        except ValueError:
+            # A hand-edited table_map.json can carry something the panel wouldn't have
+            # accepted; skip it here rather than propagate an unsafe query into the yaml.
+            continue
+        seen.add(entity)
+        sources.append(f"({query}) AS {_sql_alias(entity)}")
+    if not sources:
         return "TODO -- see skill dax-to-teradata-sql; columns per kind"
     return (
         f"LOCKING ROW FOR ACCESS\n"
         f"SELECT -- TODO: columns per kind (see skill html-renderer)\n"
-        f"FROM {', '.join(td_tables)}\n"
+        f"FROM {', '.join(sources)}\n"
         f"WHERE -- TODO: filters / parameters (:param)"
     )
 
@@ -106,9 +161,10 @@ def _sql_stub(fields_doc: list[str], table_map: dict[str, str]) -> str:
 def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict:
     """Builds the initial yaml dict. Does not write to disk.
 
-    `table_map` (Power BI entity name → Teradata schema.table_or_view, see the panel's
-    step 2b / `metrics/<Report>.table_map.json`) is optional: when given, it's used to
-    pre-fill a best-effort `sql` stub per visual instead of a bare `TODO`.
+    `table_map` (Power BI entity name → a read-only Teradata SELECT query, see
+    `validate_read_only_sql`, the panel's step 2b, and `metrics/<Report>.table_map.json`)
+    is optional: when given, it's used to pre-fill a best-effort `sql` stub per visual
+    (as a `FROM (<query>) AS <alias>` subquery) instead of a bare `TODO`.
     """
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
