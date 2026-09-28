@@ -113,6 +113,11 @@ pytest -q                       # tests, no Teradata needed
 If you only need what the panel requires (without the test dependencies), `pip install
 -e ".[live]"` is enough.
 
+> **`'pbix2html' is not recognized...` (PowerShell/cmd)?** The install was fine, but
+> Python's `Scripts` folder isn't on that terminal's `PATH` (often fixed by just opening a
+> **new** terminal window after installing). Until then, replace `pbix2html` with
+> `python -m pbix2html` in any command below — it works regardless of `PATH`.
+
 ### Commands
 
 ```bash
