@@ -36,6 +36,34 @@ app.add_middleware(
 )
 
 
+class _AllowPrivateNetworkAccess:
+    """Chrome's Local Network Access (née Private Network Access) is a *separate*
+    check from CORS: a page fetching a loopback/private address gets an extra
+    preflight requiring this header, which Starlette's CORSMiddleware doesn't know
+    about — no combination of CORS settings above adds it. Best-effort only: newer
+    Chrome versions reportedly gate this behind an interactive permission prompt
+    instead and may ignore the header entirely; if a live report still fails after
+    this, check the browser console for the exact message (not just "Failed to
+    fetch") and whether Chrome is showing a local-network permission prompt for it.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                message["headers"].append((b"access-control-allow-private-network", b"true"))
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(_AllowPrivateNetworkAccess)
+
+
 @lru_cache(maxsize=64)
 def _spec(report: str) -> semantic.ReportSpec:
     try:

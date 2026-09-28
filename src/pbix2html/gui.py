@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 from threading import Timer
@@ -66,6 +68,16 @@ def _pbix_files() -> list[Path]:
     if not REPORTS_DIR.exists():
         return []
     return sorted(REPORTS_DIR.glob("*.pbix"))
+
+
+def _url_reachable(url: str, timeout: float = 1.5) -> bool:
+    """Best-effort, short-timeout GET — used only to warn early that `serve.py` isn't
+    up yet for a `--mode live` report, not as a health check anyone should rely on."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
 
 
 def _find_pbix(name: str) -> Path:
@@ -354,6 +366,15 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                 f"yet (see ADR-004). Upload it with the teradata-report skill's create_report "
                 f"tool before trusting it for production."
             )
+        if mode == "live":
+            if _url_reachable(f"{settings.api_base}/healthz"):
+                detail.append(f"Checked {settings.api_base}/healthz just now — reachable.")
+            else:
+                detail.append(
+                    f"⚠ Couldn't reach {settings.api_base}/healthz just now. This report will show "
+                    f"\"Failed to fetch\" on every visual until that's running — start it with: "
+                    f"uvicorn pbix2html.serve:app (leave that terminal open), then reload the report."
+                )
         mode_label = {"snapshot": "snapshot", "live": "live", "hah": f"HAH ({hah_env})"}.get(mode, mode)
         result = {
             "ok": True, "title": "HTML generated", "detail": detail,
