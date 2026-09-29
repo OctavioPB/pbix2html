@@ -37,7 +37,8 @@ def test_calendar_column_translations(dax, teradata):
 @pytest.mark.parametrize("dax", [
     'Calendar[Other]',                        # not the calendar's date column
     'DATEDIFF(Calendar[Date], TODAY(), DAY)',   # not a supported function
-    'Calendar[Date] / 7',                     # division: integer vs real semantics differ
+    'Calendar[Date] / (',                     # malformed
+    'RETURN 1',                               # RETURN without VAR
     'FORMAT(Calendar[Date], "MMMM d")',       # format token outside the supported set
     'YEAR(Calendar[Date]',                    # malformed
 ])
@@ -115,3 +116,30 @@ def test_a_slicer_only_flows_from_the_one_side_unless_the_relationship_is_bidire
     assert semantic._filter_edges(RELS) == [("Calendar", "Date", "Sales", "log_dt")]
     both = [{**RELS[0], "CrossFilteringBehavior": "BothDirections"}]
     assert ("Sales", "log_dt", "Calendar", "Date") in semantic._filter_edges(both)
+
+
+@pytest.mark.parametrize("dax, teradata", [
+    ("MONTH(Calendar[Date]) / 3", "CAST(EXTRACT(MONTH FROM calendar_date) AS DECIMAL(18,6)) / 3"),   # exact, not integer
+    ('"Y" & YEAR(Calendar[Date]) & "Q" & CEILING(MONTH(Calendar[Date]) / 3, 1)',
+     "'Y' || CAST(EXTRACT(YEAR FROM calendar_date) AS VARCHAR(50)) || 'Q' || "
+     "CAST(CEIL((CAST(EXTRACT(MONTH FROM calendar_date) AS DECIMAL(18,6)) / 3)) AS VARCHAR(50))"),
+    ('CONCATENATE(FORMAT(Calendar[Date], "MM"), CONCATENATE(" - ", FORMAT(Calendar[Date], "MMMM")))',
+     "CAST(TO_CHAR(calendar_date, 'MM') AS VARCHAR(50)) || "
+     "CAST((' - ' || CAST(TRIM(TO_CHAR(calendar_date, 'Month')) AS VARCHAR(50))) AS VARCHAR(50))"),
+    ("ENDOFMONTH(Calendar[Date])", "ADD_MONTHS((calendar_date - EXTRACT(DAY FROM calendar_date) + 1), 1) - 1"),
+    ("STARTOFMONTH(Calendar[Date])", "calendar_date - EXTRACT(DAY FROM calendar_date) + 1"),
+    ("Calendar[Date] - 335", "calendar_date - 335"),
+    ("var m = MONTH(TODAY()) return IF(MONTH(Calendar[Date]) == m, \"now\", \"no\")",
+     "CASE WHEN (EXTRACT(MONTH FROM calendar_date) = (EXTRACT(MONTH FROM CURRENT_DATE))) THEN 'now' ELSE 'no' END"),
+])
+def test_calendar_extended_grammar(dax, teradata):
+    assert semantic._calendar_expr_sql(dax, "Date", "calendar_date") == teradata
+
+
+def test_calendar_columns_can_refer_to_each_other_and_cycles_are_refused():
+    sib = {"eom": "ENDOFMONTH(Calendar[Date])", "label": 'FORMAT(Calendar[eom], "MMM YYYY")',
+           "a": "Calendar[b]", "b": "Calendar[a]"}
+    sql = semantic._calendar_expr_sql(sib["label"], "Date", "calendar_date", sib)
+    assert "ADD_MONTHS((calendar_date - EXTRACT(DAY FROM calendar_date) + 1), 1) - 1" in sql and "'Mon'" in sql
+    assert semantic._calendar_expr_sql(sib["a"], "Date", "calendar_date", sib) is None      # a -> b -> a
+    assert semantic._calendar_expr_sql("Calendar[nope]", "Date", "calendar_date", sib) is None

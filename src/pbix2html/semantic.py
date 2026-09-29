@@ -40,8 +40,9 @@ KIND_MAP: dict[str, str] = {
     "slicer": "slicer", "advancedSlicerVisual": "slicer", "listSlicer": "slicer",
     "textbox": "text", "image": "static", "shape": "static", "basicShape": "static",
     "actionButton": "static", "gauge": "gauge",
+    "dynamicTooltip": "tooltip",     # custom visual: an info icon whose text comes from a table
 }
-NO_DATA_KINDS = {"slicer", "text", "static"}
+NO_DATA_KINDS = {"slicer", "text", "static", "tooltip"}
 
 _AGG_RE = re.compile(r"^(Sum|Count|CountNonNull|Min|Max|Avg|Average|DistinctCount)\((.+)\)$")
 
@@ -210,6 +211,52 @@ _SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
+def _sql_scan(sql: str) -> tuple[str, list[int]]:
+    """`(code, positions)`: `sql` with everything that is not code blanked out — 'string
+    literals' (with their '' escape), "quoted identifiers", `-- line` and `/* block */` comments —
+    and, for every character kept, its index in the original. One left-to-right scan, so a `--`
+    inside a literal is not taken for a comment and an apostrophe inside a comment does not open
+    a literal: what remains is what the database would actually parse as statements and
+    keywords. An unterminated literal or comment swallows the rest, as it would there."""
+    out: list[str] = []
+    pos: list[int] = []
+    i, n = 0, len(sql)
+
+    def emit(text: str, at: int) -> None:
+        out.append(text)
+        pos.extend([at] * len(text))
+
+    while i < n:
+        ch = sql[i]
+        if ch in "'\"":
+            j = i + 1
+            while j < n:
+                if sql[j] == ch:
+                    if j + 1 < n and sql[j + 1] == ch:       # doubled quote: an escaped quote
+                        j += 2
+                        continue
+                    break
+                j += 1
+            emit(ch * 2, i)
+            i = j + 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            emit(" ", i)
+            i = n if j == -1 else j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            emit(" ", i)
+            i = n if j == -1 else j + 2
+        else:
+            emit(ch, i)
+            i += 1
+    return "".join(out), pos
+
+
+def _sql_code_only(sql: str) -> str:
+    return _sql_scan(sql)[0]
+
+
 def validate_read_only_sql(sql: str) -> str:
     """Rejects anything but a single read-only SELECT/WITH query.
 
@@ -218,23 +265,26 @@ def validate_read_only_sql(sql: str) -> str:
     already has real Teradata credentials can run whatever they want directly — this
     only stops a careless/accidental paste (a stray DELETE, a second stacked statement)
     from getting wired into a generated report through the panel's table-map step.
+    Statements and keywords are looked for only in the code (see `_sql_code_only`), so a
+    ';' or the word SET inside a text value is data, not a second statement.
     Returns the query with any single trailing ';' stripped (ready to use as a
     subquery); raises ValueError with a human-readable reason otherwise.
     """
     raw = (sql or "").strip()
     if not raw:
         raise ValueError("empty query")
-    if raw.endswith(";"):
-        raw = raw[:-1].strip()
-    if ";" in raw:
+    code, pos = _sql_scan(raw)
+    stripped = code.rstrip()
+    if stripped.endswith(";"):                   # a single trailing ';' is dropped, from the text too
+        at = pos[len(stripped) - 1]
+        raw = (raw[:at] + raw[at + 1:]).strip()
+        code = stripped[:-1]
+    code = code.strip()
+    if ";" in code:
         raise ValueError("only a single SELECT statement is allowed (found a second ';')")
-    uncommented = _SQL_BLOCK_COMMENT_RE.sub(" ", _SQL_LINE_COMMENT_RE.sub(" ", raw)).strip()
-    if not _SQL_LEADING_RE.match(uncommented):
+    if not _SQL_LEADING_RE.match(code):
         raise ValueError("must start with SELECT/SEL (or WITH ... SELECT)")
-    # Words inside 'string literals' are data (a status called 'SET'), not statements. Comments
-    # were stripped first on purpose: an apostrophe in a comment ("don't") must not be able to
-    # open a fake literal that swallows real code after it.
-    m = _SQL_FORBIDDEN_RE.search(_SQL_STRING_LITERAL_RE.sub("''", uncommented))
+    m = _SQL_FORBIDDEN_RE.search(code)
     if m:
         raise ValueError(f"'{m.group(1).upper()}' isn't allowed here — read-only queries only")
     return raw
@@ -374,12 +424,11 @@ _M_TABLE_TYPE_RE = re.compile(r"type\s+table\s*\[(.*?)\]", re.DOTALL)
 _INLINE_MAX_ROWS = 500
 
 
-def _inline_table_sql(expression: str) -> str | None:
-    """A table typed in by hand ("Enter Data": `Table.FromRows(Json.Document(Binary.Decompress(
-    Binary.FromText("<base64>", ...), Compression.Deflate)), type table [a = _t, b = _t])`) holds
-    its rows inside the M itself. They are decoded and rebuilt as a `SELECT ... UNION ALL SELECT
-    ...` so the table needs no Teradata source. None for anything else (too many rows, a ragged
-    row, an unrecognised column list)."""
+def _inline_table_data(expression: str) -> tuple[list[str], list[bool], list[list]] | None:
+    """Decodes an "Enter Data" table (rows embedded in the M: `Table.FromRows(Json.Document(
+    Binary.Decompress(Binary.FromText("<base64>", ...), Compression.Deflate)), type table [a = _t,
+    ...])`) into (column names, numeric flags, rows). None for anything else (too many rows, a
+    ragged row, an unrecognised column list)."""
     m = _M_FROMROWS_RE.search(expression or "")
     if not m:
         return None
@@ -396,6 +445,16 @@ def _inline_table_sql(expression: str) -> str | None:
         return None
     names = [c.strip().removeprefix('#"').removesuffix('"') for c, _ in cols]
     numeric = [bool(re.search(r"number|Int64|Currency|Decimal|Double", t)) for _, t in cols]
+    return names, numeric, rows
+
+
+def _inline_table_sql(expression: str) -> str | None:
+    """The rows of an "Enter Data" table (`_inline_table_data`) rebuilt as `SELECT ... UNION ALL
+    SELECT ...`, so the table needs no Teradata source."""
+    data = _inline_table_data(expression)
+    if data is None:
+        return None
+    names, numeric, rows = data
 
     def lit(value: Any, is_num: bool) -> str:
         if value is None:
@@ -404,7 +463,7 @@ def _inline_table_sql(expression: str) -> str | None:
             return repr(value)
         return "'" + str(value).replace("'", "''") + "'"
 
-    widths = [max((len(str(r[i])) for r in rows if r[i] is not None), default=1) for i in range(len(cols))]
+    widths = [max((len(str(r[i])) for r in rows if r[i] is not None), default=1) for i in range(len(names))]
     arms = []
     for n, row in enumerate(rows):
         parts = []
@@ -508,6 +567,8 @@ def detect_table_map_from_power_query(model: dict) -> dict[str, str]:
 # recognised; anything else keeps the table unmapped rather than guessed.
 # ----------------------------------------------------------------------------
 
+# Power BI's automatic date/time helper tables: noise, never a real calendar or a real table
+_AUTO_DATE_TABLE_RE = re.compile(r"^(LocalDateTable|DateTableTemplate)_")
 DATE_KEY_COLUMNS = ("log_dt",)     # the fact-table date column a calendar joins to (owner-confirmed)
 _DAX_CALENDAR_RE = re.compile(r"^\s*CALENDAR\s*\(", re.IGNORECASE)
 _DAX_COL_REF = r"(?:'[^']+'|\w+)?\[([^\]]+)\]"
@@ -566,16 +627,21 @@ class _CalendarUnsupported(Exception):
 
 _CAL_TOKEN_RE = re.compile(
     r"""\s*(?:(?P<str>"(?:[^"]|"")*")|(?P<num>\d+(?:\.\d+)?)|(?P<ref>(?:'[^']+'|\w+)?\[[^\]]+\])"""
-    r"""|(?P<op>&&|\|\||<>|<=|>=|[=<>+\-*(),])|(?P<name>[A-Za-z_]\w*))""")
+    r"""|(?P<op>&&|\|\||<>|<=|>=|==|[=<>+\-*/&(),])|(?P<name>[A-Za-z_]\w*))""")
+_SQL_STRING_RE = re.compile(r"^'(?:[^']|'')*'$")
 
 
-def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
+def _calendar_expr_sql(expr: str, date_col: str, date_expr: str,
+                       siblings: dict[str, str] | None = None, _stack: tuple = ()) -> str | None:
     """One DAX calculated column of a calendar table → a Teradata expression, or None.
 
-    Recognised: FORMAT(date, "fmt"), YEAR/MONTH/DAY(date or TODAY()), TODAY()/NOW(), VALUE(x),
-    IF(cond, a[, b]), string/number literals, comparisons, && / ||, + - *, parentheses. The
-    only column allowed is the calendar's own date. Everything else (a division, a lookup, any
-    other function) is refused, and that column is simply left out."""
+    Recognised: FORMAT(date, "fmt"), YEAR/MONTH/DAY, TODAY()/NOW(), VALUE, IF, CONCATENATE and
+    `&` (operands cast to text), ENDOFMONTH/STARTOFMONTH/EOMONTH, CEILING(x, 1), `VAR ... RETURN`,
+    literals, comparisons (`=` and `==`), && / ||, + - * / (division is exact: DAX divides as
+    decimals, SQL integers would truncate), parentheses, and references to the calendar's own
+    date column or to its *other calculated columns* (inlined; cycles refused). Everything else
+    is refused and that column is left out."""
+    siblings = siblings or {}
     text = re.sub(r"\s+", " ", expr or "").strip()
     tokens: list[tuple[str, str]] = []
     pos = 0
@@ -589,6 +655,7 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
             tokens.append((kind, m.group(kind)))
     tokens.append(("end", ""))
     i = 0
+    env: dict[str, str] = {}
 
     def peek() -> tuple[str, str]:
         return tokens[i]
@@ -596,10 +663,13 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
     def take(value: str | None = None) -> tuple[str, str]:
         nonlocal i
         tok = tokens[i]
-        if value is not None and tok[1] != value:
+        if value is not None and tok[1].lower() != value.lower():
             raise _CalendarUnsupported(f"expected {value}")
         i += 1
         return tok
+
+    def is_kw(word: str) -> bool:
+        return peek()[0] == "name" and peek()[1].lower() == word
 
     def binary(parse_next, ops: dict[str, str]) -> str:
         left = parse_next()
@@ -608,6 +678,9 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
             left = f"({left} {op} {parse_next()})"
         return left
 
+    def text_of(sql: str) -> str:
+        return sql if _SQL_STRING_RE.match(sql) else f"CAST({sql} AS VARCHAR(50))"
+
     def parse_or() -> str:
         return binary(parse_and, {"||": "OR"})
 
@@ -615,17 +688,29 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
         return binary(parse_cmp, {"&&": "AND"})
 
     def parse_cmp() -> str:
-        left = parse_add()
-        if peek()[0] == "op" and peek()[1] in ("=", "<>", "<", ">", "<=", ">="):
+        left = parse_concat()
+        if peek()[0] == "op" and peek()[1] in ("=", "==", "<>", "<", ">", "<=", ">="):
             op = take()[1]
-            return f"({left} {op} {parse_add()})"
+            return f"({left} {'=' if op == '==' else op} {parse_concat()})"
         return left
+
+    def parse_concat() -> str:
+        parts = [parse_add()]
+        while peek() == ("op", "&"):
+            take()
+            parts.append(parse_add())
+        return parts[0] if len(parts) == 1 else "(" + " || ".join(text_of(p) for p in parts) + ")"
 
     def parse_add() -> str:
         return binary(parse_mul, {"+": "+", "-": "-"})
 
     def parse_mul() -> str:
-        return binary(parse_primary, {"*": "*"})
+        left = parse_primary()
+        while peek()[0] == "op" and peek()[1] in ("*", "/"):
+            op = take()[1]
+            right = parse_primary()
+            left = f"({left} * {right})" if op == "*" else f"(CAST({left} AS DECIMAL(18,6)) / {right})"
+        return left
 
     def args() -> list[str]:
         take("(")
@@ -636,6 +721,9 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
         take(")")
         return out
 
+    def month_start(d: str) -> str:
+        return f"({d} - EXTRACT(DAY FROM {d}) + 1)"
+
     def parse_primary() -> str:
         kind, value = take()
         if kind == "num":
@@ -643,10 +731,16 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
         if kind == "str":
             return "'" + value[1:-1].replace('""', '"').replace("'", "''") + "'"
         if kind == "ref":
-            col = re.search(r"\[([^\]]+)\]", value).group(1)
-            if col.strip().lower() != date_col.lower():
+            col = re.search(r"\[([^\]]+)\]", value).group(1).strip()
+            if col.lower() == date_col.lower():
+                return date_expr
+            key = next((k for k in siblings if k.lower() == col.lower()), None)
+            if key is None or key in _stack:
                 raise _CalendarUnsupported(col)
-            return date_expr
+            inner = _calendar_expr_sql(siblings[key], date_col, date_expr, siblings, _stack + (key,))
+            if inner is None:
+                raise _CalendarUnsupported(col)
+            return f"({inner})"
         if kind == "op" and value == "(":
             inner = parse_or()
             take(")")
@@ -654,6 +748,10 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
         if kind != "name":
             raise _CalendarUnsupported(value)
         fn = value.upper()
+        if peek()[1] != "(":                       # a VAR
+            if value.lower() in env:
+                return f"({env[value.lower()]})"
+            raise _CalendarUnsupported(value)
         if fn in ("TODAY", "NOW"):
             take("(")
             take(")")
@@ -664,38 +762,61 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
         if fn == "VALUE":
             (a,) = args()
             return a if re.fullmatch(r"[\d.]+", a) else f"CAST({a} AS INTEGER)"
+        if fn == "CONCATENATE":
+            a = args()
+            if len(a) != 2:
+                raise _CalendarUnsupported(fn)
+            return f"({text_of(a[0])} || {text_of(a[1])})"
+        if fn in ("ENDOFMONTH", "EOMONTH"):
+            a = args()
+            if fn == "EOMONTH" and (len(a) != 2 or a[1] != "0"):
+                raise _CalendarUnsupported(fn)
+            return f"(ADD_MONTHS({month_start(a[0])}, 1) - 1)"
+        if fn == "STARTOFMONTH":
+            (a,) = args()
+            return month_start(a)
+        if fn == "CEILING":
+            a = args()
+            if len(a) != 2 or a[1] != "1":
+                raise _CalendarUnsupported(fn)
+            return f"CEIL({a[0]})"
         if fn == "FORMAT":
-            a = args_raw_format()
-            return a
+            take("(")
+            target = parse_or()
+            take(",")
+            kind2, fmt = take()
+            if kind2 != "str":
+                raise _CalendarUnsupported(fn)
+            take(")")
+            sql = _dax_format_sql(fmt[1:-1], target)
+            if sql is None:
+                raise _CalendarUnsupported(fn)
+            return sql
         if fn == "IF":
             a = args()
             if len(a) not in (2, 3):
-                raise _CalendarUnsupported("IF")
+                raise _CalendarUnsupported(fn)
             return f"CASE WHEN {a[0]} THEN {a[1]}" + (f" ELSE {a[2]}" if len(a) == 3 else "") + " END"
         raise _CalendarUnsupported(fn)
 
-    def args_raw_format() -> str:
-        # FORMAT(date, "literal format"): the format is translated, never evaluated
-        take("(")
-        target = parse_or()
-        take(",")
-        kind, value = take()
-        if kind != "str":
-            raise _CalendarUnsupported("FORMAT")
-        take(")")
-        sql = _dax_format_sql(value[1:-1], target)
-        if sql is None:
-            raise _CalendarUnsupported("FORMAT")
-        return sql
-
     try:
+        while is_kw("var"):                        # VAR name = expr ... RETURN expr
+            take()
+            name = take()
+            take("=")
+            if name[0] != "name":
+                raise _CalendarUnsupported("VAR")
+            env[name[1].lower()] = parse_or()
+        if env:
+            if not is_kw("return"):
+                raise _CalendarUnsupported("RETURN")
+            take()
         sql = parse_or()
         if peek()[0] != "end":
             return None
     except (_CalendarUnsupported, ValueError):
         return None
-    return sql[1:-1] if sql.startswith("(") and sql.endswith(")") and sql.count("(") == sql.count(")") \
-        and _balanced_outer(sql) else sql
+    return sql[1:-1] if sql.startswith("(") and sql.endswith(")") and _balanced_outer(sql) else sql
 
 
 def _balanced_outer(sql: str) -> bool:
@@ -709,8 +830,9 @@ def _balanced_outer(sql: str) -> bool:
     return True
 
 
-def _calendar_column_sql(expr: str, date_col: str, date_expr: str) -> str | None:
-    return _calendar_expr_sql(expr, date_col, date_expr)
+def _calendar_column_sql(expr: str, date_col: str, date_expr: str,
+                         siblings: dict[str, str] | None = None) -> str | None:
+    return _calendar_expr_sql(expr, date_col, date_expr, siblings)
 
 
 def detect_calendar_tables(model: dict) -> dict[str, dict]:
@@ -724,7 +846,7 @@ def detect_calendar_tables(model: dict) -> dict[str, dict]:
     for t in model.get("calculated_tables") or []:
         table, expr = (t or {}).get("TableName"), ((t or {}).get("Expression") or "")
         m = _DAX_CALENDAR_RE.match(expr)
-        if not table or not m:
+        if not table or not m or _AUTO_DATE_TABLE_RE.match(table):
             continue
         args = _m_split_args(expr[m.end():])       # top-level comma split, string-aware
         if len(args) != 2:
@@ -736,8 +858,9 @@ def detect_calendar_tables(model: dict) -> dict[str, dict]:
         alias = "calendar_date"
         select = [f'{alias} AS {_sql_col(date_col)}']
         unsupported: list[str] = []
+        sibling_exprs = {c["ColumnName"]: c.get("Expression") or "" for c in columns.get(table, []) if c.get("ColumnName")}
         for c in columns.get(table, []):
-            sql = _calendar_column_sql(c.get("Expression"), date_col, alias)
+            sql = _calendar_column_sql(c.get("Expression"), date_col, alias, sibling_exprs)
             if sql:
                 select.append(f"{sql} AS {_sql_col(c['ColumnName'])}")
             else:
@@ -969,10 +1092,10 @@ _DAX_TOKEN_RE = re.compile(r"""
   | (?P<comment>//[^\n]*|/\*.*?\*/)
   | (?P<number>\d+(?:\.\d+)?)
   | (?P<string>"(?:[^"]|"")*")
-  | (?P<qtable>'(?:[^']|'')*'(?=\s*\[))
+  | (?P<qtable>'(?:[^']|'')*')
   | (?P<bracket>\[[^\]]*\])
   | (?P<ident>[A-Za-z_][\w.]*)
-  | (?P<op><=|>=|<>|[-+*/=<>&])
+  | (?P<op><=|>=|<>|==|&&|\|\||[-+*/=<>&])
   | (?P<punct>[(),])
 """, re.VERBOSE | re.DOTALL)
 
@@ -991,7 +1114,7 @@ _REF_AGG_TO_SQL: dict[str, tuple[str, bool]] = {
     "min": ("MIN", False), "max": ("MAX", False), "avg": ("AVG", False),
     "average": ("AVG", False), "distinctcount": ("COUNT", True),
 }
-_DAX_COMPARISONS = {"=": "=", "<>": "<>", ">": ">", "<": "<", ">=": ">=", "<=": "<="}
+_DAX_COMPARISONS = {"=": "=", "==": "=", "<>": "<>", ">": ">", "<": "<", ">=": ">=", "<=": "<="}
 
 
 class _DaxUnsupported(Exception):
@@ -1114,6 +1237,8 @@ class _DaxTranslator:
                 self._take()
                 table = text[1:-1].replace("''", "'") if kind == "qtable" else text
                 column = nxt[1][1:-1].strip()
+                if (table, column) in self.measures:   # Table[Measure]: a measure, qualified by its home table
+                    return self._measure_reference(column, filters)
                 self.tables.add(table)
                 self._bare_column = f"{table}[{column}]"
                 return f"{_sql_alias(table)}.{_sql_col(column)}"
@@ -1178,6 +1303,10 @@ class _DaxTranslator:
             alt = args[2] if len(args) == 3 else "NULL"
             return (f"(CASE WHEN ({args[1]}) = 0 OR ({args[1]}) IS NULL THEN {alt} "
                     f"ELSE ({args[0]}) / CAST(({args[1]}) AS DECIMAL(18,6)) END)")
+        if name in ("TODAY", "NOW"):
+            self._expect("(")
+            self._expect(")")
+            return "CURRENT_DATE"
         if name == "CALCULATE":
             return self._calculate(filters)
         if name in ("ABS", "ROUND", "COALESCE"):
@@ -1204,7 +1333,9 @@ class _DaxTranslator:
         extra: list[str] = []
         while (tok := self._peek()) and tok[1] == ",":
             self._take()
-            extra.append(self._filter_predicate())
+            predicate = self._filter_argument()
+            if predicate:
+                extra.append(predicate)
         self._expect(")")
         end = self.pos
         self.pos = start
@@ -1225,14 +1356,57 @@ class _DaxTranslator:
                 return
             self._take()
 
-    def _filter_predicate(self) -> str:
+    def _table_name(self) -> str:
         kind, text = self._take()
         if kind == "qtable":
-            table = text[1:-1].replace("''", "'")
-        elif kind == "ident":
-            table = text
-        else:
+            return text[1:-1].replace("''", "'")
+        if kind == "ident":
+            return text
+        raise _DaxUnsupported(f"expected a table, got {text!r}")
+
+    def _filter_argument(self) -> str | None:
+        """One CALCULATE filter: `FILTER(Table, condition)`, a bare condition, or a bare table
+        (which filters nothing). Conditions are column-vs-literal comparisons combined with
+        && / ||; anything that depends on another aggregate or the report's selection raises."""
+        tok, nxt = self._peek(), (self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None)
+        if tok and tok[0] == "ident" and tok[1].upper() == "FILTER" and nxt and nxt[1] == "(":
+            self._take()
+            self._expect("(")
+            table = self._table_name()
+            self._expect(",")
+            condition = self._boolean(table)
+            self._expect(")")
+            return condition
+        if tok and tok[0] in ("ident", "qtable") and (nxt is None or nxt[1] in (",", ")")):
+            self._take()                        # 'Table' as an argument: all its rows, no filter
+            return None
+        return self._boolean(None)
+
+    def _boolean(self, table: str | None) -> str:
+        left = self._boolean_and(table)
+        while (tok := self._peek()) and tok[1] == "||":
+            self._take()
+            left = f"({left} OR {self._boolean_and(table)})"
+        return left
+
+    def _boolean_and(self, table: str | None) -> str:
+        left = self._comparison(table)
+        while (tok := self._peek()) and tok[1] == "&&":
+            self._take()
+            left = f"({left} AND {self._comparison(table)})"
+        return left
+
+    def _comparison(self, table: str | None) -> str:
+        tok = self._peek()
+        if tok and tok[1] == "(":
+            self._take()
+            inner = self._boolean(table)
+            self._expect(")")
+            return f"({inner})"
+        kind, text = self._take()
+        if kind not in ("qtable", "ident"):
             raise _DaxUnsupported(f"filter must compare a column, got {text!r}")
+        col_table = text[1:-1].replace("''", "'") if kind == "qtable" else text
         nxt = self._peek()
         if not nxt or nxt[0] != "bracket":
             raise _DaxUnsupported(f"filter on {text!r} isn't a column comparison")
@@ -1241,9 +1415,23 @@ class _DaxTranslator:
         op = self._take()[1]
         if op not in _DAX_COMPARISONS:
             raise _DaxUnsupported(f"filter operator {op!r} isn't supported")
-        value = self._primary([])
-        self.tables.add(table)
-        return f"{_sql_alias(table)}.{_sql_col(column)} {_DAX_COMPARISONS[op]} {value}"
+        value = self._filter_value()
+        self.tables.add(col_table)
+        return f"{_sql_alias(col_table)}.{_sql_col(column)} {_DAX_COMPARISONS[op]} {value}"
+
+    def _filter_value(self) -> str:
+        kind, text = self._take()
+        if kind == "number":
+            return text
+        if kind == "op" and text == "-":
+            return "-" + self._filter_value()
+        if kind == "string":
+            return "'" + text[1:-1].replace('""', '"').replace("'", "''") + "'"
+        if kind == "ident" and text.upper() in ("TODAY", "NOW"):
+            self._expect("(")
+            self._expect(")")
+            return "CURRENT_DATE"
+        raise _DaxUnsupported(f"filter compares against {text!r}, not a literal")
 
 
 def translate_dax(dax: str, measures: dict[tuple[str, str], str]) -> _Sql | None:
@@ -1616,12 +1804,14 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
     """How well the model + visuals map to SQL: model facts worth a person's attention, and for
     every data visual the reason it was (or wasn't) drafted. Read-only: writes nothing."""
     table_map = table_map or {}
-    tables = [t for t in (model.get("tables") or []) if isinstance(t, str)]
+    tables = [t for t in (model.get("tables") or [])
+              if isinstance(t, str) and not _AUTO_DATE_TABLE_RE.match(t)]
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
     rels = model.get("relationships") if isinstance(model.get("relationships"), list) else []
     params = _slicer_parameters(layout, model)
-    calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []}
+    calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []
+                   if not _AUTO_DATE_TABLE_RE.match(t.get("TableName") or "")}
     visuals: dict[str, list[str]] = {}
     n_data = 0
     for page in layout["pages"]:
@@ -1646,7 +1836,8 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             "unmapped": sorted(t for t in tables if t not in table_map and t not in calc_tables),
             "calculated_tables": {t: re.sub(r"\s+", " ", e).strip()[:120] for t, e in calc_tables.items()},
             "calculated_columns": [f"{c.get('TableName')}.{c.get('ColumnName')}"
-                                   for c in model.get("calculated_columns") or []],
+                                   for c in model.get("calculated_columns") or []
+                                   if not _AUTO_DATE_TABLE_RE.match(c.get("TableName") or "")],
             "relationships": len(rels),
             "many_to_many": [f"{e[0]} → {e[2]}" for r in rels if r.get("Cardinality") == "M:M"
                              and (e := _rel_ends(r))],
@@ -1739,6 +1930,12 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             if kind == "slicer":
                 continue
             entry: dict[str, Any] = {"kind": kind, "page": page["display_name"], "title": v.get("title")}
+            if kind == "tooltip":
+                tip = v.get("tooltip") or {}
+                entry["title"] = tip.get("header")
+                entry["text"] = tip.get("text")
+                entry["notes"] = (f"Custom visual '{v.get('custom_type') or v['type']}' reinterpreted as an info "
+                                  "icon; header and text are the ones set in the report.")
             if kind in NO_DATA_KINDS:
                 visuals[v["id"]] = entry
                 continue

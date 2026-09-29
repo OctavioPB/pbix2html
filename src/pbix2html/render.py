@@ -298,7 +298,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "title": (vs.title if vs and vs.title else v.get("title")),
                 "left": round(100 * (v["x"] or 0) / W, 3), "top": round(100 * (v["y"] or 0) / H, 3),
                 "w": round(100 * (v["width"] or 0) / W, 3), "h": round(100 * (v["height"] or 0) / H, 3),
-                "z": v.get("z") or 0,
+                "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {},
                 "stacked": "stacked" in v["type"].lower(), "area": "area" in v["type"].lower(),
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
@@ -320,6 +320,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             }
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses
+            if kind == "tooltip":       # native tooltip: the header, then the text (the icon has no title)
+                entry["title"] = None
+                entry["tooltip"] = "\n".join(x for x in (vs.title if vs else None, r.get("text")) if x) or None
             if slicer:
                 entry["slicer"] = slicer
             if include_sql:

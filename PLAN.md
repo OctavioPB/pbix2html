@@ -114,6 +114,18 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - [ ] PBIR bookmarks and hidden visuals/groups: this file had none, so still unverified.
 - [ ] Mapping report in the panel (only the CLI writes it).
 
+## Findings from a third real report, composite model (2026-09-29)
+
+- **Composite model** (Import + DirectQuery): 36 tables recovered from Power Query (`Value.NativeQuery`,
+  `Teradata.Database(..., [Query=...])`, "Enter Data" → `UNION ALL`), plus a calculated `CALENDAR()` table
+  with 14 calculated columns (FORMAT/EOMONTH/VAR-RETURN/sibling references) translated to `sys_calendar.calendar`.
+- pbixray drops relationships touching calculated tables (SystemFlags=2) → `_all_relationships` reads them itself.
+- Custom visuals mapped: HierarchySlicer→slicer, dynamicTooltip→tooltip. Doubled quotes in text literals are unescaped.
+- CSS `z-index` must be an integer (`3000.0` is silently dropped, which hid slicers behind panels).
+- Mapping: 54 data visuals, 44 drafted. Still manual: selection-dependent measures (`MIN(level)` over a
+  slicer, `VAR` + `min(Calendar[Date])`), one table not connected to any fact (`not_connected`), 24 of 38 measures.
+- Not yet verified: 100%-stacked charts in the renderer, MobileState (ignored), storage-mode info in the mapping report.
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`

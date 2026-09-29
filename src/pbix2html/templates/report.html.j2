@@ -55,6 +55,7 @@
   .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
   .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
   .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
+  .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.3rem; height: 1.3rem; margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 .8rem serif; color: var(--accent, #666); cursor: help; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
   .error { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
@@ -210,6 +211,12 @@
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
     slicer(el, v) { slicerRefreshers.push(slicerWidget(el, v, slicerHost)); },
+    tooltip(el, v) {          // an info icon: the definition is its (native) tooltip
+      const i = document.createElement('span');
+      i.className = 'info-icon'; i.textContent = 'i'; i.tabIndex = 0; i.setAttribute('role', 'img');
+      if (v.tooltip) { i.title = v.tooltip; i.setAttribute('aria-label', v.tooltip); }
+      el.replaceChildren(i);
+    },
     static(el, v) {
       // An `image` visual has its picture embedded as a data: URI; a shape or button
       // instead carries a label (extract.py's visual_text). Either way the point is not
@@ -282,7 +289,7 @@
     // Check "no sql written yet" before "no renderer for this kind": an unimplemented
     // visual type (kind "unsupported"/"custom") is expected and still TODO right out of
     // scaffold — it should read as "not started" here, not look like a crash.
-    if (block.skipped && !['text', 'static', 'slicer'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
+    if (block.skipped && !['text', 'static', 'slicer', 'tooltip'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
     const fn = R[v.kind];
     if (!fn) {
       el.innerHTML = `<div class="loading">Visual type "${v.kind}" isn't supported yet — pick a `

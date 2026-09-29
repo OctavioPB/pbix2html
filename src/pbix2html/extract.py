@@ -69,6 +69,8 @@ def literal_to_text(expr: Any) -> str | None:
         return None
     lit = expr.get("Literal", {}).get("Value")
     if isinstance(lit, str):
+        if len(lit) >= 2 and lit[0] == "'" and lit[-1] == "'":
+            return lit[1:-1].replace("''", "'")          # '' is an escaped quote inside a text literal
         return lit.strip("'\"")
     return None
 
@@ -555,6 +557,7 @@ STANDARD_VISUALS = {
     "azureMap", "textbox", "image", "shape", "actionButton", "basicShape", "decompositionTreeVisual",
     "keyDriversVisual", "qnaVisual", "scriptVisual", "pythonVisual", "cardVisual",
     "advancedSlicerVisual", "listSlicer", "textFilter", "esriVisual", "smartNarrative", "rdlVisual",
+    "dynamicTooltip",      # reinterpreted (see _CUSTOM_ALIASES)
 }
 
 
@@ -664,7 +667,7 @@ def _parse_visual(vc: dict) -> dict:
         return visual
 
     sv = sv or {}
-    vtype = sv.get("visualType", "unknown")
+    vtype, custom_type = normalize_visual_type(sv.get("visualType", "unknown"))
     projections = sv.get("projections") or {}
     # A projections role can come back as null (empty field well) instead of omitted.
     fields = sorted({p.get("queryRef") for role in projections.values() if isinstance(role, list)
@@ -679,6 +682,7 @@ def _parse_visual(vc: dict) -> dict:
 
     visual.update({
         "type": vtype,
+        **({"custom_type": custom_type} if custom_type else {}),
         "is_group": False,
         "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
         "title": title,
@@ -697,6 +701,7 @@ def _parse_visual(vc: dict) -> dict:
         "action": _visual_link(vco),
         "sort": _proto_sort(sv),
         **({"button": parse_button(sv)} if vtype == "actionButton" else {}),
+        **({"tooltip": parse_tooltip(sv.get("objects") or {})} if vtype == "dynamicTooltip" else {}),
         **({"slicer": parse_slicer(sv.get("objects") or {}, list(dict.fromkeys(
             qmap.get(p.get("queryRef"), p.get("queryRef")) for refs in projections.values()
             if isinstance(refs, list) for p in refs if isinstance(p, dict) and p.get("queryRef"))),
@@ -751,6 +756,18 @@ def _visual_link(vco: dict) -> dict | None:
 
 
 _SLICER_TYPES = {"slicer", "advancedSlicerVisual", "listSlicer"}
+# Custom visuals with a standard meaning here, matched by the type's prefix (the rest is a
+# publisher hash): a hierarchy slicer is a slicer; a "dynamic tooltip" is an info icon.
+_CUSTOM_ALIASES = (("HierarchySlicer", "slicer"), ("dynamicTooltip", "dynamicTooltip"))
+
+
+def normalize_visual_type(vtype: str) -> tuple[str, str | None]:
+    """(type, custom_type): a custom visual we know how to reinterpret gets its standard type and
+    keeps the original id in `custom_type`; anything else comes back unchanged."""
+    for prefix, standard in _CUSTOM_ALIASES:
+        if vtype.startswith(prefix):
+            return standard, vtype
+    return vtype, None
 _SLICER_MODES = {"dropdown": "dropdown", "basic": "list", "between": "between", "before": "before",
                  "after": "after", "relative": "relative", "tile": "tile"}
 
@@ -808,7 +825,8 @@ def _filter_selection(filt: Any) -> dict:
                 name = ref(e)
                 if name:
                     values.setdefault(name, []).extend(
-                        v for v in (lit(r[k]) for r in rows if isinstance(r, list) and len(r) > k) if v is not None)
+                        v for v in (lit(r[k]) for r in rows if isinstance(r, list) and len(r) > k)
+                        if v is not None and v != "Select All")     # custom hierarchy slicers' "no filter"
         elif "Between" in cond:
             name = ref(cond["Between"].get("Expression"))
             if name:
@@ -824,6 +842,7 @@ def _filter_selection(filt: Any) -> dict:
     for w in filt.get("Where") or []:
         walk((w or {}).get("Condition"))
     out: dict[str, Any] = {}
+    values = {k: v for k, v in values.items() if v}
     if values:
         out["values"] = values
     if ranges:
@@ -862,6 +881,25 @@ def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = Non
         "initial": _filter_selection(flt),
         "style": style,
     }
+
+
+def parse_tooltip(objects: dict) -> dict | None:
+    """The `dynamicTooltip` custom visual keeps its content as literals in `objects.tooltip`:
+    {"header": ..., "text": ...}. None when there is nothing to show."""
+    for e in (objects or {}).get("tooltip") or []:
+        props = (e or {}).get("properties") or {}
+        out = {k: _pbi_literal(literal_to_text_raw(props.get(k)))
+               for k in ("header", "text") if props.get(k)}
+        out = {k: v for k, v in out.items() if isinstance(v, str) and v.strip()}
+        if out:
+            return out
+    return None
+
+
+def literal_to_text_raw(prop: Any) -> str | None:
+    """The raw literal text of a property (`{"expr": {"Literal": {"Value": "'x'"}}}` → `'x'`)."""
+    val = (((prop or {}).get("expr") or {}).get("Literal") or {}).get("Value") if isinstance(prop, dict) else None
+    return val if isinstance(val, str) else None
 
 
 def parse_bookmarks(root_config: dict) -> list[dict]:
@@ -1138,7 +1176,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             }
         vis = vdata.get("visual") or {}
         qs = ((vis.get("query") or {}).get("queryState")) or {}
-        vtype = vis.get("visualType", "unknown")
+        vtype, custom_type = normalize_visual_type(vis.get("visualType", "unknown"))
         fields = _pbir_fields(qs)
         projections: dict[str, list] = {}
         for f in fields:
@@ -1151,6 +1189,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "width": pos.get("width", 0), "height": pos.get("height", 0),
             "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
             "type": vtype, "is_group": False,   # a real group container returns above instead
+            **({"custom_type": custom_type} if custom_type else {}),
             "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
             "title": _pbir_texts(vco, vis).get("title"),
             "hidden": bool(vdata.get("isHidden")) or vis.get("visible") is False,
@@ -1166,6 +1205,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "action": _visual_link(vco),
             "sort": _pbir_sort(vis),
             **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
+            **({"tooltip": parse_tooltip(vis.get("objects") or {})} if vtype == "dynamicTooltip" else {}),
             **({"slicer": parse_slicer(vis.get("objects") or {},
                                        list(dict.fromkeys(f["queryRef"] for f in fields if f["queryRef"])),
                                        vis.get("syncGroup"))}
@@ -1277,6 +1317,49 @@ def df_records(df) -> list[dict]:
         return []
 
 
+_AUTO_DATE_TABLE_RE = re.compile(r"^(LocalDateTable|DateTableTemplate)_")
+
+
+def _all_relationships(m) -> list[dict]:
+    """The model's relationships, including those with a calculated table.
+
+    `pbixray.relationships` filters `SystemFlags = 0` on both ends, and a calculated table
+    (a DAX `CALENDAR(...)`, the usual date table) has SystemFlags 2, so every relationship
+    `fact.date → Calendar.Date` is silently dropped, and with it the only thing that lets a
+    date slicer filter the facts. Also, a calculated table's columns have no ExplicitName
+    (only InferredName). The same query is re-run without that filter, through pbixray's own
+    metadata database; the relationships of Power BI's automatic date/time helper tables
+    (`LocalDateTable_*`, `DateTableTemplate_*`) are left out as noise. Falls back to
+    pbixray's list if its internals aren't what this expects."""
+    try:
+        src = m._metadata.source
+        db = src._db
+        c = src._rel_col
+        sql = f"""
+        SELECT ft.Name AS FromTableName, COALESCE(fc.ExplicitName, fc.InferredName) AS FromColumnName,
+               tt.Name AS ToTableName, COALESCE(tc.ExplicitName, tc.InferredName) AS ToColumnName,
+               rel.IsActive,
+               CASE WHEN rel.{c("FromCardinality")} = 2 THEN 'M' ELSE '1' END || ':' ||
+               CASE WHEN rel.{c("ToCardinality")} = 2 THEN 'M' ELSE '1' END AS Cardinality,
+               CASE WHEN rel.CrossFilteringBehavior = 1 THEN 'Single'
+                    WHEN rel.CrossFilteringBehavior = 2 THEN 'Both'
+                    ELSE CAST(rel.CrossFilteringBehavior AS TEXT) END AS CrossFilteringBehavior
+        FROM Relationship rel
+            LEFT JOIN [Table] ft ON rel.{c("FromTableID")} = ft.id
+            LEFT JOIN [Column] fc ON rel.{c("FromColumnID")} = fc.id
+            LEFT JOIN [Table] tt ON rel.{c("ToTableID")} = tt.id
+            LEFT JOIN [Column] tc ON rel.{c("ToColumnID")} = tc.id
+        """
+        rows = df_records(db.query(sql))
+        rows = [r for r in rows if r.get("FromTableName") and r.get("ToTableName")
+                and r.get("FromColumnName") and r.get("ToColumnName")
+                and not _AUTO_DATE_TABLE_RE.match(r["FromTableName"])
+                and not _AUTO_DATE_TABLE_RE.match(r["ToTableName"])]
+        return rows or df_records(m.relationships)
+    except Exception:
+        return df_records(m.relationships)
+
+
 def extract_model(pbix: Path) -> dict:
     try:
         from pbixray import PBIXRay
@@ -1301,7 +1384,7 @@ def extract_model(pbix: Path) -> dict:
     grab("measures", lambda: df_records(m.dax_measures))
     grab("calculated_columns", lambda: df_records(m.dax_columns))
     grab("calculated_tables", lambda: df_records(m.dax_tables))
-    grab("relationships", lambda: df_records(m.relationships))
+    grab("relationships", lambda: _all_relationships(m))
     grab("rls", lambda: df_records(m.rls))
     grab("role_memberships", lambda: df_records(m.tmschema_role_memberships))
     grab("partitions", lambda: df_records(m.tmschema_partitions))   # Mode: 0=Import, 1=DirectQuery...

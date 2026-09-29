@@ -47,3 +47,27 @@ def test_validator_ignores_keywords_inside_string_literals_only():
                 "SELECT 1 /* it's */ ; DELETE FROM t"):
         with pytest.raises(ValueError):
             semantic.validate_read_only_sql(sql)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 'a--b'; DROP TABLE x",                        # a '--' inside a literal is not a comment
+    "SELECT 1 FROM t WHERE a = 'x' -- it's\n; DELETE FROM t",   # an apostrophe in a comment opens nothing
+    "SELECT 1; SELECT 2",
+    "SELECT 'a' /* ' */ ; UPDATE t SET a = 1",
+    "SELECT x FROM t WHERE a = 1 UNION SELECT y INTO z",   # keyword in code
+])
+def test_validator_sees_only_real_code(sql):
+    with pytest.raises(ValueError):
+        semantic.validate_read_only_sql(sql)
+
+
+@pytest.mark.parametrize("sql, expected", [
+    ("SELECT 'needs; a semicolon', 'and DELETE and SET and INTO'", None),
+    ("SELECT 1 FROM t;", "SELECT 1 FROM t"),                                # trailing ';' dropped
+    ("SELECT 1 FROM t; -- done; really", "SELECT 1 FROM t -- done; really"),   # ...the real one, not the comment's
+    ('SELECT "odd;name" FROM t', None),                                      # quoted identifier
+    ("SEL a FROM t -- don't\nWHERE b = 'it''s; fine'", None),
+])
+def test_validator_accepts_semicolons_and_keywords_in_data_and_comments(sql, expected):
+    out = semantic.validate_read_only_sql(sql)
+    assert out == (sql if expected is None else expected)

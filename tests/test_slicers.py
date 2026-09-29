@@ -145,3 +145,36 @@ def test_snapshot_html_draws_the_widget_embeds_options_and_keeps_it_out_of_the_t
     spec_json = html.split('id="spec" type="application/json">')[1].split("</script>")[0]
     assert '"slicer": {"mode"' in spec_json
     assert "<label>year" not in html                       # the widget edits it: no duplicate in the top bar
+
+
+def test_custom_visuals_get_a_standard_meaning():
+    assert ex.normalize_visual_type("HierarchySlicer1458836712039") == ("slicer", "HierarchySlicer1458836712039")
+    assert ex.normalize_visual_type("dynamicTooltip1859AB39DB23051788ADF752BCB90749")[0] == "dynamicTooltip"
+    assert ex.normalize_visual_type("Tachometer1474636471549") == ("Tachometer1474636471549", None)
+    assert ex.normalize_visual_type("barChart") == ("barChart", None)
+
+
+def test_dynamic_tooltip_content_is_read_from_its_literals():
+    lit = lambda v: {"expr": {"Literal": {"Value": v}}}   # noqa: E731
+    objs = {"tooltip": [{"properties": {"header": lit("'New Hires'"), "text": lit("'It''s the count.'")}}]}
+    assert ex.parse_tooltip(objs) == {"header": "New Hires", "text": "It's the count."}
+    assert ex.parse_tooltip({}) is None and ex.parse_tooltip({"tooltip": [{"properties": {}}]}) is None
+
+
+def test_select_all_sentinel_of_custom_hierarchy_slicers_is_no_selection():
+    flt = {"From": [{"Name": "h", "Entity": "H"}], "Where": [
+        {"Condition": {"In": {"Expressions": [_col("", "lvl", "h")], "Values": [[_lit("'Select All'")]]}}}]}
+    assert ex._filter_selection(flt) == {}
+    flt["Where"][0]["Condition"]["In"]["Values"].append([_lit("'Smith'")])
+    assert ex._filter_selection(flt) == {"values": {"H.lvl": ["Smith"]}}
+
+
+def test_text_literals_unescape_doubled_quotes_and_z_index_is_an_integer(fake_pbix):
+    assert ex.literal_to_text({"Literal": {"Value": "'Today''s Headcount'"}}) == "Today's Headcount"
+    assert ex.literal_to_text({"Literal": {"Value": "10D"}}) == "10D"
+    from pbix2html.render import render_html
+
+    layout = ex.extract_layout(fake_pbix)
+    layout["pages"][0]["visuals"][0]["z"] = 3000.0
+    html = render_html(layout, semantic.load("Executive_Dashboard"), {"year": 2025}, {}, mode="snapshot")
+    assert "z-index:3000" in html and "3000.0" not in html
