@@ -297,7 +297,8 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > path it looked for and where it's actually running from.
 >
 > **Visual shows `HTTP 500` with a message?** The service is running and found the yaml, and the
-> failure happened when running the query; the message in the visual is the real error.
+> failure happened when running the query; the message in the visual is the real error, and the full
+> traceback is printed in the terminal where `serve.py` runs.
 > `A hostname or IP address must be specified for the host connection parameter` (Teradata driver
 > error 179) means `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` aren't set in `.env`
 > (`serve.py` reads `.env` from the project, not from where you started it): live mode has no

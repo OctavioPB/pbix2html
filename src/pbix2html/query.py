@@ -11,8 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -69,9 +70,20 @@ class Backend(Protocol):
 
 @dataclass
 class TeradataBackend:
-    """One connection per instance. Close with `close()`."""
+    """A small pool of Teradata sessions, one query at a time per session.
+
+    `serve.py` runs each request in a worker thread and the report fires every visual at once, so a
+    single shared connection meant concurrent requests interleaved on one session: their
+    `SET QUERY_BAND` (the identity Teradata applies row-level security as) overwrote each other, so a
+    query could run as another user's proxy, and the driver serialises or rejects overlapping requests.
+    Now a request checks a session out, sets its identity, runs, clears the identity and returns it.
+    Any error discards that session (its identity or state can't be trusted), and the next request opens
+    a fresh one, so a dropped connection heals instead of failing every later request. Close with `close()`."""
     proxy_user: str | None = None
-    _con: Any = None
+    max_connections: int = 4
+    _idle: list = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _slots: threading.Semaphore | None = None
 
     def _connect(self):
         import teradatasql  # late import: tests don't need it
@@ -80,27 +92,61 @@ class TeradataBackend:
                       encryptdata="true")
         if settings.teradata_database:
             kwargs["database"] = settings.teradata_database
-        self._con = teradatasql.connect(**kwargs)
-        return self._con
+        return teradatasql.connect(**kwargs)
+
+    def _checkout(self):
+        with self._lock:
+            if self._slots is None:
+                self._slots = threading.Semaphore(self.max_connections)
+            slots = self._slots
+        slots.acquire()
+        try:
+            with self._lock:
+                if self._idle:
+                    return self._idle.pop()
+            return self._connect()
+        except BaseException:
+            slots.release()
+            raise
+
+    def _checkin(self, con, healthy: bool) -> None:
+        if healthy:
+            with self._lock:
+                self._idle.append(con)
+        else:
+            try:
+                con.close()
+            except Exception:
+                pass
+        self._slots.release()
 
     def execute(self, sql: str, values: list[Any], proxy_user: str | None = None) -> DataBlock:
-        con = self._con or self._connect()
         proxy = proxy_user or self.proxy_user
-        with con.cursor() as cur:
-            if proxy:
-                # Trusted session: Teradata evaluates secure views/RLS as `proxy`.
-                cur.execute(f"SET QUERY_BAND = 'PROXYUSER={_safe_ident(proxy)};APPNAME=pbix2html;' FOR SESSION;")
-            cur.execute(sql, values)
-            columns = [d[0].lower() for d in cur.description]
-            rows = [[_jsonable(c) for c in r] for r in cur.fetchall()]
-            if proxy:
-                cur.execute("SET QUERY_BAND = NONE FOR SESSION;")
-        return {"columns": columns, "rows": rows}
+        con = self._checkout()
+        healthy = False
+        try:
+            with con.cursor() as cur:
+                if proxy:
+                    # Trusted session: Teradata evaluates secure views/RLS as `proxy`.
+                    cur.execute(f"SET QUERY_BAND = 'PROXYUSER={_safe_ident(proxy)};APPNAME=pbix2html;' FOR SESSION;")
+                cur.execute(sql, values)
+                columns = [d[0].lower() for d in cur.description]
+                rows = [[_jsonable(c) for c in r] for r in cur.fetchall()]
+                if proxy:
+                    cur.execute("SET QUERY_BAND = NONE FOR SESSION;")
+            healthy = True
+            return {"columns": columns, "rows": rows}
+        finally:
+            self._checkin(con, healthy)
 
     def close(self) -> None:
-        if self._con:
-            self._con.close()
-            self._con = None
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for con in idle:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 @dataclass
