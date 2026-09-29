@@ -165,3 +165,57 @@ def test_per_group_sql_parses_as_teradata():
         sql, params = chart("Start", category=cat)
         bound, _ = bind(sql, params, {"months": ["x"]})
         sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
+
+
+# ---- one measure over several fact tables (IF across two facts) -----------------------------
+
+MF_MEASURES = {
+    ("A", "Ending"): "var d = max('Cal'[Date])\nRETURN IF(MONTH(d) == MONTH(TODAY()), SUM(A[n]), "
+                     "CALCULATE(SUM(B[n]), FILTER(B, MONTH(B[dt]) == MONTH(d))))",
+}
+MF_MAP = {"A": "SELECT k, dt, n FROM db.a", "B": "SELECT k, dt, n FROM db.b",
+          "Dim": "SELECT k, name FROM db.dim",
+          "Cal": 'SELECT calendar_date AS "Date", calendar_date AS month_end FROM sys_calendar.calendar'}
+MF_RELS = [{"FromTableName": t, "FromColumnName": "k", "ToTableName": "Dim", "ToColumnName": "k",
+            "IsActive": 1, "Cardinality": "M:1"} for t in ("A", "B")] + [
+    {"FromTableName": t, "FromColumnName": "dt", "ToTableName": "Cal", "ToColumnName": "Date",
+     "IsActive": 1, "Cardinality": "M:1"} for t in ("A", "B")]
+MF_PARAMS = {"dim_name": {"from_slicer": "Dim.name", "multi": True},
+             "months": {"from_slicer": "Cal.month_end", "multi": True}}
+
+
+def mf(kind, categories=()):
+    v = {"projections": {"Category": list(categories), "Y": ["A.Ending"]}}
+    return S._draft_visual_sql(v, kind, MF_MEASURES, MF_MAP, MF_RELS, MF_PARAMS)
+
+
+def test_measure_over_two_fact_tables_is_split_into_one_derived_table_per_table():
+    sql, params = mf("card")
+    assert sql.startswith("SELECT (CASE WHEN EXTRACT(MONTH FROM ctx1.v) = EXTRACT(MONTH FROM CURRENT_DATE) "
+                          "THEN arm1.a0 ELSE arm2.a1 END) AS value")
+    assert "CROSS JOIN" in sql and sql.count("SUM(") == 2
+    arm1 = sql.split(") AS arm1", 1)[0]
+    assert "db.b" not in arm1 and "db.a" in arm1            # each arm reads only its own fact
+    assert {"months"} <= set(params)
+
+
+def test_grouped_multi_fact_joins_the_arms_on_the_category_and_drops_blank_groups():
+    sql, _ = mf("column", ["Dim.name"])
+    assert sql.startswith("SELECT DISTINCT dim.name AS category")
+    assert "LEFT JOIN (SELECT dim.name AS k1, SUM(a.n) AS a0" in sql
+    assert "GROUP BY 1\n) AS arm1 ON (arm1.k1 = dim.name OR (arm1.k1 IS NULL AND dim.name IS NULL))" in sql
+    assert "IS NOT NULL" in sql.rsplit("WHERE", 1)[1]
+    assert "\nFROM (SELECT k, name FROM db.dim" in sql          # the main FROM is the category table
+
+
+def test_multi_fact_sql_parses_as_teradata():
+    sqlglot = pytest.importorskip("sqlglot")
+    for kind, cats in (("card", []), ("column", ["Dim.name"]), ("column", ["Cal.month_end"])):
+        sql, params = mf(kind, cats)
+        bound, _ = bind(sql, params, {"dim_name": ["x"], "months": []})
+        sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
+
+
+def test_multi_fact_with_two_values_or_a_table_visual_stays_manual():
+    v = {"projections": {"Values": ["A.Ending"]}}
+    assert S._draft_visual_sql(v, "table", MF_MEASURES, MF_MAP, MF_RELS, MF_PARAMS) is None

@@ -1129,6 +1129,7 @@ class _Sql:
     tables: set[str] = field(default_factory=set)
     selmins: set[tuple[str, str]] = field(default_factory=set)   # see _SELMIN_RE
     ctxs: set[tuple[str, str, str]] = field(default_factory=set)  # (MIN|MAX, table, column), see _CTX_RE
+    aggs: list[tuple[str, str]] = field(default_factory=list)      # split mode: (table, aggregate SQL)
 
 
 def _dax_tokenize(text: str) -> list[tuple[str, str]]:
@@ -1161,8 +1162,10 @@ class _DaxTranslator:
     raises _DaxUnsupported and the caller leaves a TODO. A wrong number that looks right
     is far worse than an honest blank."""
 
-    def __init__(self, measures: dict[tuple[str, str], str]):
+    def __init__(self, measures: dict[tuple[str, str], str], split: bool = False):
         self.measures = measures
+        self.split = split      # emit `{AGG:n}` per aggregate (see `_emit`) instead of inline SQL
+        self.aggs: list[tuple[str, str]] = []
         self.tables: set[str] = set()
         self._resolving: set[str] = set()
         self.tokens: list[tuple[str, str]] = []
@@ -1184,7 +1187,7 @@ class _DaxTranslator:
             raise _DaxUnsupported(f"{self._bare_column} isn't aggregated")
         # a VAR that is never used must not drag its table into the query
         ctxs = {c for c in self.ctxs if f"{{CTX:{c[0]}|{c[1]}|{c[2]}}}" in node}
-        return _Sql(node, set(self.tables), set(self.selmins), ctxs)
+        return _Sql(node, set(self.tables), set(self.selmins), ctxs, list(self.aggs))
 
     # -- token helpers -------------------------------------------------------
     def _peek(self) -> tuple[str, str] | None:
@@ -1370,12 +1373,24 @@ class _DaxTranslator:
         if column is None:
             if not table_only:
                 raise _DaxUnsupported(f"{func} needs a column")
-            return (f"SUM(CASE WHEN {' AND '.join(filters)} THEN 1 ELSE 0 END)"
-                    if filters else "COUNT(*)")
+            return self._emit(table, f"SUM(CASE WHEN {' AND '.join(filters)} THEN 1 ELSE 0 END)"
+                              if filters else "COUNT(*)")
         target = f"{_sql_alias(table)}.{_sql_col(column)}"
         if filters:
             target = f"CASE WHEN {' AND '.join(filters)} THEN {target} END"
-        return f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
+        return self._emit(table, f"{sql_func}({'DISTINCT ' if distinct else ''}{target})")
+
+    def _emit(self, table: str, agg: str) -> str:
+        """In split mode each aggregate becomes a marker and is recorded with its table, so a
+        measure over several fact tables can be computed one table at a time (`multi_fact`).
+        An aggregate whose filters read another table can't be moved to that table's own query."""
+        if not self.split:
+            return agg
+        for t in self.tables:
+            if t != table and re.search(rf"\b{re.escape(_sql_alias(t))}\.", agg):
+                raise _DaxUnsupported(f"an aggregate over {table} filters on {t}")
+        self.aggs.append((table, agg))
+        return f"{{AGG:{len(self.aggs) - 1}}}"
 
     def _function(self, name: str, filters: list[str]) -> str:
         if name in _DAX_AGGREGATES:
@@ -1540,13 +1555,13 @@ class _DaxTranslator:
         return f"{left} {_DAX_COMPARISONS[op]} {self._scalar()}"
 
 
-def translate_dax(dax: str, measures: dict[tuple[str, str], str]) -> _Sql | None:
+def translate_dax(dax: str, measures: dict[tuple[str, str], str], split: bool = False) -> _Sql | None:
     """A DAX measure → one SQL aggregate expression, or None when it isn't confidently
     translatable. See _DaxTranslator for exactly what's covered."""
     if not dax or not dax.strip():
         return None
     try:
-        return _DaxTranslator(measures).translate(dax.strip())
+        return _DaxTranslator(measures, split).translate(dax.strip())
     except (_DaxUnsupported, RecursionError):
         return None
 
@@ -1562,6 +1577,7 @@ class _Field:
     key: tuple[str, str] = ("", "")  # (table, column/measure): what a sort definition points at
     selmins: set[tuple[str, str]] = field(default_factory=set)   # tables whose selection this measure reads
     ctxs: set[tuple[str, str, str]] = field(default_factory=set)  # MIN/MAX of a column over the selection
+    aggs: list[tuple[str, str]] = field(default_factory=list)     # per-table aggregates of a multi-fact measure
 
 
 def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
@@ -1583,8 +1599,12 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) ->
         translated = translate_dax(measure_dax, measures)
         if translated is None:
             return None
+        if len(translated.tables) > 1:      # several fact tables: also keep the per-table split
+            parts = translate_dax(measure_dax, measures, split=True)
+            if parts is not None:
+                translated = parts
         return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col),
-                      set(translated.selmins), set(translated.ctxs))
+                      set(translated.selmins), set(translated.ctxs), list(translated.aggs))
     return _Field(role, False, col, _sql_col(col),
                   f"{_sql_alias(table)}.{_sql_col(col)}", {table}, (table, col))
 
@@ -1879,6 +1899,98 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
     return where_parts, params_used
 
 
+def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, sort: list[dict] | None, *,
+               expand_fn, table_map: dict[str, str], relationships: list[dict],
+               parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
+    """One measure that aggregates several fact tables (`IF(cond, SUM(A[x]), CALCULATE(SUM(B[x]), ...))`).
+
+    Power BI evaluates each aggregate on its own table for the current group; one SELECT over a join
+    of both tables would multiply rows. So every fact table gets its own derived table (its aggregates
+    per category, over that table joined only to the category tables), and the measure's expression is
+    evaluated over those, on a query whose FROM is just the category tables. A group whose measure
+    is blank is dropped, as in Power BI. Single value, cards and charts only; anything with a
+    selection-level marker (`selmins`) is left manual, since that join needs the fact table."""
+    if len(values) != 1 or not values[0].aggs or values[0].selmins:
+        return None
+    f = values[0]
+    is_chart = kind in _CHART_KINDS
+    if is_chart:
+        if not 1 <= len(categories) <= 2 or (kind == "pie" and len(categories) != 1):
+            return None
+    elif kind not in ("card", "gauge", "kpi") or categories:
+        return None
+    cat_tables = list(dict.fromkeys(t for c in categories for t in c.tables))
+    used: list[str] = []
+    by_table: dict[str, list[tuple[int, str]]] = {}
+    for n, (t, text) in enumerate(f.aggs):
+        by_table.setdefault(t, []).append((n, text))
+
+    def present(marker_set, text: str, fmt) -> set:
+        return {m for m in marker_set if fmt(m) in text}
+
+    def null_safe(alias: str) -> str:
+        return " AND ".join(f"({alias}.k{i} = {c.expr} OR ({alias}.k{i} IS NULL AND {c.expr} IS NULL))"
+                            for i, c in enumerate(categories, start=1))
+
+    derived: list[tuple[str, str]] = []            # (alias, sql)
+    agg_ref: dict[int, str] = {}
+    for i, (table, items) in enumerate(by_table.items(), start=1):
+        built = _draft_from_clause(list(dict.fromkeys(cat_tables + [table])), table_map, relationships)
+        if built is None:
+            return None
+        srcs, als = built
+        where, ps = _draft_where(parameters, als, table_map, relationships)
+        used += [p for p in ps if p not in used]
+        pfs = [_Field("Y", True, f.label, f.out_name, text, {table}, f.key, set(),
+                      present(f.ctxs, text, lambda c: f"{{CTX:{c[0]}|{c[1]}|{c[2]}}}"))
+               for _, text in items]
+        done = expand_fn(pfs, srcs, als, where, categories)
+        if done is None:
+            return None
+        srcs, ps, extra = done
+        used += [p for p in ps if p not in used]
+        cols = [f"{c.expr} AS k{j}" for j, c in enumerate(categories, start=1)]
+        cols += [f"{pf.expr} AS a{n}" for (n, _), pf in zip(items, pfs)]
+        sql = "SELECT " + ", ".join(cols) + "\nFROM " + "\n".join(srcs)
+        if where:
+            sql += "\nWHERE " + " AND ".join(where)
+        if categories:
+            sql += "\nGROUP BY " + ", ".join([str(j) for j in range(1, len(categories) + 1)] + extra)
+        derived.append((f"arm{i}", sql))
+        for n, _ in items:
+            agg_ref[n] = f"arm{i}.a{n}"
+
+    if categories:
+        built = _draft_from_clause(cat_tables, table_map, relationships)
+        if built is None:
+            return None
+        msrcs, mals = built
+        mwhere, ps = _draft_where(parameters, mals, table_map, relationships)
+        used += [p for p in ps if p not in used]
+        msrcs = msrcs + [f"LEFT JOIN {_subquery(sql, a)} ON {null_safe(a)}" for a, sql in derived]
+    else:
+        mals, mwhere = {}, []
+        msrcs = [_subquery(derived[0][1], derived[0][0])] + [f"CROSS JOIN {_subquery(sql, a)}"
+                                                             for a, sql in derived[1:]]
+    outer = _Field("Y", True, f.label, f.out_name, re.sub(r"\{AGG:(\d+)\}", lambda m: agg_ref[int(m.group(1))], f.expr),
+                   set(), f.key, set(), set(f.ctxs))
+    done = expand_fn([outer], msrcs, mals, mwhere, categories)
+    if done is None:
+        return None
+    msrcs, ps, _extra = done
+    used += [p for p in ps if p not in used]
+    if not categories:
+        return f"SELECT {outer.expr} AS value\nFROM " + "\n".join(msrcs), used
+    names = ["category", "series"]
+    cols = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)] + [f"{outer.expr} AS value"]
+    pos = {c.key: i for i, c in enumerate(categories, start=1)}
+    pos.setdefault(f.key, len(categories) + 1)
+    where = mwhere + [f"({outer.expr}) IS NOT NULL"]
+    sql = ("SELECT DISTINCT " + ", ".join(cols) + "\nFROM " + "\n".join(msrcs)
+           + "\nWHERE " + " AND ".join(where))
+    return sql + _order_by(sort, pos), used
+
+
 def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
                        relationships: list[dict], parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
     """Auto-draft one visual's SQL, or None to leave it a TODO.
@@ -1908,13 +2020,6 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
 
     values = [f for f in fields if f.is_value]
     categories = [f for f in fields if not f.is_value]
-    tables_needed = list(dict.fromkeys(t for f in fields for t in f.tables))
-    built = _draft_from_clause(tables_needed, table_map, relationships)
-    if built is None:
-        return None
-    sources, aliases = built
-    where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
-
     def expand(fs: list[_Field], srcs: list[str], als: dict[str, str], arm_where: list[str] | None = None,
                cats: list[_Field] | None = None) -> tuple[list[str], list[str], list[str]] | None:
         """Resolve selection-dependent markers (`_expand_selmins`, `_expand_ctxs`) in `fs`' expressions
@@ -1944,7 +2049,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
 
     if len(value_tables(values)) > 1 and not (kind in _CHART_KINDS and len(values) > 1
                                               and all(len(f.tables) == 1 for f in values)):
+        return multi_fact(values, categories, kind, sort, expand_fn=expand,
+                          table_map=table_map, relationships=relationships, parameters=parameters)
+
+    tables_needed = list(dict.fromkeys(t for f in fields for t in f.tables))
+    built = _draft_from_clause(tables_needed, table_map, relationships)
+    if built is None:
         return None
+    sources, aliases = built
+    where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
 
     # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
     single_extra: list[str] = []
@@ -2068,13 +2181,15 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
         return sorted(set(reasons))
     if not fields:
         return ["shape"]
+    if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters):
+        return ["ok"]
     tables = list(dict.fromkeys(t for f in fields for t in f.tables))
     missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins} | {c[1] for f in fields for c in f.ctxs})] if t not in table_map]
     if missing:
         return [f"no_source:{t}" for t in missing]
     if len(tables) > 1 and _find_join_path(tables, relationships) is None:
         return ["not_connected:" + "+".join(sorted(tables))]
-    return ["ok"] if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters) else ["shape"]
+    return ["shape"]
 
 
 def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict:

@@ -128,5 +128,15 @@ grouped by every category, joined back null-safe; a category that doesn't filter
 calendar) → one value for the whole selection, as in DAX. The joined value is also added to `GROUP BY`
 (unique per group, so no rows change) so an `IF` condition outside an aggregate is legal. Fields in a
 chart's `Tooltips` role are not drafted (they were becoming extra series).
-`Headcount Ending`-style measures (IF over two different fact tables) still stop at the multi-fact guard.
 The generated SQL repeats the visual's WHERE inside the derived table (bind params appear twice).
+
+## One measure over several fact tables (`IF(cond, SUM(A[x]), CALCULATE(SUM(B[x]), ...))`)
+
+Drafted by `multi_fact` for a single-value card/kpi/gauge or a chart with 1–2 categories. The translator
+re-runs in *split* mode (`{AGG:n}` per aggregate, each tied to its table); every fact table gets its own
+derived table (its aggregates per category, over that table joined only to the category tables and the
+slicers reaching it), and the expression is evaluated on a query whose FROM is just the category tables
+(`SELECT DISTINCT`, groups whose value is blank dropped, as Power BI does). A card is the arms CROSS JOINed.
+Left manual: an aggregate that filters on another table, a `Promotions-Slicer`-style marker mixed in,
+table/matrix visuals, several such values in one visual. Every fact table must relate to every category table.
+Note the category domain is the category table's rows (after slicers on it), not "values that have facts".
