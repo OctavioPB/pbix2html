@@ -9,6 +9,7 @@ proxy/SSO, or a token validated here). NEVER from a URL parameter.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import semantic
 from .query import TeradataBackend, run_slicer_options, run_visual
 
+log = logging.getLogger("pbix2html.serve")
 AUTH_HEADER = os.getenv("AUTH_HEADER", "X-Authenticated-User")
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() == "true"
 _CORS_ORIGINS_ENV = os.getenv("CORS_ORIGINS")
@@ -157,6 +159,7 @@ def visual(report: str, visual_id: str, request: Request):
         # report's JS ever sees the real error, showing "Failed to fetch" instead of
         # whatever actually went wrong. Raising HTTPException instead keeps CORS headers
         # on the response so the report can show the real error inline in the visual.
+        log.exception("visual %s of %s failed", visual_id, report)      # full traceback in serve's terminal
         raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 
