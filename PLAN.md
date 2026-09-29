@@ -34,8 +34,8 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
 `Teradata.Database(host, [Query="..."])` and `SEL`. **Still open** (design work, in priority order):
 
 - [ ] **Bookmarks and action buttons** — designed in `docs/decisions/ADR-005`. Phase 1 (a
-      hidden group hides its descendants) is done and removed the stacked views; phase 2
-      (bookmarks + buttons as a client-side state machine) is next. Open question to confirm
+      hidden group hides its descendants) and 2a (page-navigation buttons + reachable hidden
+      pages) are done; 2b (bookmarks as a client-side state machine) is next. Open question to confirm
       in Desktop: the visible page's buttons reference bookmarks bound to another page.
 - [ ] Slicers reference an entity (`Table.models`) that isn't in `model.json["tables"]`
       (only its hidden `H$Table` hierarchy partitions are); warn on unresolved entities.
@@ -44,7 +44,10 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
 - [ ] `storage_modes` are raw codes (`0` Import, `1` DirectQuery, `2` Dual): show names.
 - [ ] Rendered HTML loads ECharts from a CDN, not fully self-contained; blocked networks
       need `ECHARTS_CDN` pointed at an internal copy (or an inline option).
-- [ ] Hidden pages are a mix of tooltip pages and stale duplicates; a report-level note.
+- [x] Hidden `HST ...` pages are the *historical* twin of each monthly page, reached through a
+      "Current Month / Historic Data" button pair (owner-confirmed). Now rendered when a
+      visible page links to them (ADR-005 phase 2a). Tooltip pages stay out. Open: the twin
+      pages duplicate every visual in the yaml; consider a `period` parameter (own ADR).
 - [ ] PBIR keys (`isHidden`, `filterConfig`, `parentGroupName`, group-relative positions)
       still unconfirmed: this sample was classic. Group children in PBIR are probably
       relative too; `absolutize_group_children` is only applied to classic.

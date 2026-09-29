@@ -508,6 +508,7 @@ def _parse_visual(vc: dict) -> dict:
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": container_style(vco),
         "texts": texts,
+        "action": _visual_link(vco),
     })
     return visual
 
@@ -533,6 +534,27 @@ def absolutize_group_children(visuals: list[dict]) -> None:
 
     for v in visuals:
         shift(v)
+
+
+def _visual_link(vco: dict) -> dict | None:
+    """What clicking a visual/button does, from `vcObjects.visualLink`:
+    {"type": "page", "page": <section name>, "enabled"} for PageNavigation, or
+    {"type": "bookmark", "bookmark": <bookmark name>, "enabled"}. Other link types
+    (WebUrl, Back, drill-through) are not modelled yet."""
+    for link in (vco or {}).get("visualLink") or []:
+        props = (link or {}).get("properties") or {}
+
+        def lit(key: str) -> str | None:
+            text = literal_to_text(((props.get(key) or {}).get("expr")) or {})
+            return text.strip("'") if isinstance(text, str) else None
+
+        kind = lit("type")
+        enabled = lit("show") != "false"
+        if kind == "PageNavigation":
+            return {"type": "page", "page": lit("navigationSection"), "enabled": enabled}
+        if kind == "Bookmark":
+            return {"type": "bookmark", "bookmark": lit("bookmark"), "enabled": enabled}
+    return None
 
 
 def parse_page(section: dict) -> dict:

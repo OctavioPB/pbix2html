@@ -1,6 +1,6 @@
 # ADR-005 — Bookmarks and action buttons
 
-**Status:** proposed (phase 1 implemented). **Date:** 2026-09-29.
+**Status:** proposed (phases 1 and 2a implemented). **Date:** 2026-09-29.
 
 ## Context
 
@@ -27,10 +27,17 @@ How the pattern is actually stored (verified against that file, classic format):
   `bookmark` = bookmark *name* (id), or `'PageNavigation'` + `navigationSection` = page id.
   `show=false` means the link is disabled.
 - **Bookmarks are bound to a page.** All 7 bookmarks in the sample describe the hidden
-  legacy page, and the visible page's buttons reference those same bookmark ids; the group
-  ids inside the bookmarks don't exist on the visible page. In Power BI this is very likely a
-  no-op (a copy-pasted page whose buttons still point at the old page's bookmarks) — **to be
-  confirmed in Desktop**; the HTML must not invent behavior the original doesn't have.
+  `HST Spend View` page, and the visible `Spend View` page's buttons reference those same
+  bookmark ids; the group ids inside the bookmarks don't exist on the visible page. In Power
+  BI this is probably a no-op (**still unconfirmed in Desktop**); the HTML must not invent
+  behavior the original doesn't have.
+- **Page pairs are a data-source switch, not duplicates** (owner's explanation): `Spend View`
+  is fed by the monthly source, its `HST ...` twin by the historical one, and a
+  "Current Month / Historic Data" pair of `PageNavigation` buttons swaps between them, so
+  the user perceives a filter. The `HST` pages are *hidden* and reachable only through
+  those buttons. (An earlier note in PLAN.md called them stale duplicates; that was wrong.)
+  The `HST` twin's own "Historic Data" button has a dangling `navigationSection` (probably
+  itself), and tooltip pages (`Tooltip-*`, `DEP-Tooltip*`) are hidden and linked by nobody.
 
 ## Decision
 
@@ -40,7 +47,14 @@ Three phases, each independently useful and shippable.
 A group's `isHidden` is extracted (`hidden` on the group) and `render._hidden_with_descendants`
 drops every visual with a hidden ancestor. No JS. Fixes the stacked-views rendering.
 
-### Phase 2 — bookmarks and buttons as a client-side state machine
+### Phase 2a — page navigation (done)
+`layout.json` visuals get `action` (`_visual_link`). `build_spec` renders every hidden page
+reachable (transitively) from a visible page's enabled `PageNavigation` button, flagged
+`nav_only` (no tab, excluded from print); a button whose target isn't rendered stays inert.
+Both templates (`report`, `report_hah`) share one `showPage()`; `hah` lazy-loads the page's
+data when it is shown. Verified in a browser on the real report (both directions).
+
+### Phase 2b — bookmarks and buttons as a client-side state machine
 1. **Extract** into `layout.json`:
    - `bookmarks: [{id, name, page, active_section, groups: {groupId: hidden}, targets: [visualIds],
      apply_only_to_targets, suppress_data, suppress_active_section}]`.
@@ -69,7 +83,7 @@ Custom-visual bookmark behavior, `Back` buttons, `WebUrl` links (a plain `<a tar
 is trivial, add when seen), drill-through buttons.
 
 ## Consequences
-- Phase 1 alone removed the overlap on the sample report; Phase 2 makes the switching work.
+- Phase 1 removed the overlap on the sample report and 2a made the monthly/historical switch work; 2b makes the view switchers work.
 - Parsing is tied to the classic `Layout`; PBIR stores bookmarks in
   `Report/definition/bookmarks/*.bookmark.json` — **unverified**, so phase 2 ships for
   classic first and PBIR is added once a real PBIR sample exists.
@@ -84,3 +98,9 @@ is trivial, add when seen), drill-through buttons.
 ## Tests
 Synthetic fixtures only (structure, not content): groups with `isHidden`, a bookmark with
 `visualContainerGroups`, a page-navigation button, and the unresolvable-button case.
+
+## Follow-up (data model)
+Because each `HST` page is the same layout over a different source, the two pages duplicate
+every visual in the yaml. Once the source difference is understood, a `period: current|historic`
+parameter (or a per-page `source` override) could let one set of SQL serve both; deliberately
+not done here — it changes how the yaml is written, so it needs its own ADR after the pilot.

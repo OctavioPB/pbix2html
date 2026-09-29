@@ -472,3 +472,39 @@ def test_hidden_group_hides_its_descendants():
         {"id": "c", "hidden": True, "parent_group": None},      # own flag
     ]
     assert _hidden_with_descendants(vs) == {"g1", "g2", "a", "c"}
+
+
+def test_visual_link_parsing():
+    from pbix2html.extract import _visual_link
+
+    def link(**props):
+        return {"visualLink": [{"properties": {
+            k: {"expr": {"Literal": {"Value": v}}} for k, v in props.items()}}]}
+
+    assert _visual_link(link(type="'PageNavigation'", navigationSection="'p2'", show="true")) == \
+        {"type": "page", "page": "p2", "enabled": True}
+    assert _visual_link(link(type="'Bookmark'", bookmark="'b1'", show="false")) == \
+        {"type": "bookmark", "bookmark": "b1", "enabled": False}
+    assert _visual_link(link(type="'WebUrl'")) is None and _visual_link({}) is None
+
+
+def test_hidden_page_reachable_by_a_button_is_rendered_and_wired(fake_pbix):
+    """A visible page's button targets a hidden page ("Historic Data" view): that page is
+    rendered without a tab and the button navigates; unlinked hidden pages stay out."""
+    L = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    base = L["pages"][0]
+    hist = {**base, "name": "histId", "display_name": "HST", "hidden": True,
+            "visuals": [{**base["visuals"][0], "id": "h1", "action": {"type": "page", "page": base["name"], "enabled": True}}]}
+    tooltip = {**base, "name": "tipId", "display_name": "Tip", "hidden": True, "visuals": []}
+    button = {**base["visuals"][0], "id": "btn", "type": "actionButton",
+              "action": {"type": "page", "page": "histId", "enabled": True}}
+    dead = {**base["visuals"][0], "id": "dead", "type": "actionButton",
+            "action": {"type": "page", "page": "missing", "enabled": True}}
+    L2 = {**L, "pages": [{**base, "visuals": base["visuals"] + [button, dead]}, hist, tooltip]}
+    html = render_html(L2, spec, {"year": 2025}, None, mode="live")
+    assert 'id="page-1"' in html and 'class="page navonly"' in html   # reachable hidden page
+    assert 'id="page-2"' not in html                                   # tooltip-style page: not linked
+    assert 'data-nav="page-1"' in html and 'data-nav="page-0"' in html  # button + way back
+    assert html.count("data-nav=") == 2                                # dangling target stays inert
+    assert html.count('role="tab"') == 0                                # one visible page: no tab bar

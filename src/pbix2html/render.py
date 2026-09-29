@@ -83,6 +83,15 @@ def _hidden_with_descendants(visuals: list[dict]) -> set:
     return out
 
 
+def _page_action(action: dict | None, by_name: dict, rendered: set) -> dict | None:
+    """A page-navigation button that lands on a page we render; anything else (a
+    bookmark, a disabled link, a target that doesn't exist) is left inert."""
+    if not action or action.get("type") != "page" or not action.get("enabled"):
+        return None
+    j = by_name.get(action.get("page"))
+    return {"type": "page", "target": f"page-{j}"} if j in rendered else None
+
+
 def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_hidden: bool = False,
                include_sql: bool = False) -> dict:
     """Structure consumed by the template/JS: pages → visuals with position in % and kind.
@@ -92,8 +101,23 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     run the query itself.
     """
     pages = []
-    for i, p in enumerate(layout["pages"]):
-        if p.get("hidden") and not include_hidden:
+    all_pages = layout["pages"]
+    # Hidden pages that a visible page's button navigates to (transitively) are part of
+    # the report, e.g. a "Historic Data" view behind a toggle button. Tooltip pages and
+    # other hidden pages nobody links to stay out.
+    shown = {i for i, p in enumerate(all_pages) if not p.get("hidden") or include_hidden}
+    by_name = {p.get("name"): i for i, p in enumerate(all_pages) if p.get("name")}
+    nav_only: set[int] = set()
+    queue = list(shown)
+    while queue:
+        for v in all_pages[queue.pop()]["visuals"]:
+            a = v.get("action") or {}
+            j = by_name.get(a.get("page")) if a.get("type") == "page" and a.get("enabled") else None
+            if j is not None and j not in shown and j not in nav_only:
+                nav_only.add(j)
+                queue.append(j)
+    for i, p in enumerate(all_pages):
+        if i not in shown and i not in nav_only:
             continue
         W, H = float(p.get("width") or 1280), float(p.get("height") or 720)
         visuals = []
@@ -117,6 +141,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
                 "image": v.get("image_data_uri"),
+                "action": _page_action(v.get("action"), by_name, shown | nav_only),
                 # subtitle / button label / axis + legend titles, as the report sets
                 # them (see extract.py's visual_text). Absent keys mean "not set" —
                 # the renderer shows nothing rather than inventing a label.
@@ -132,7 +157,12 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "background": p.get("background"),
                       "background_image": _background_image_css(p.get("background_image")),
+                      "nav_only": i in nav_only,
                       "visuals": visuals})
+    # the page that is on screen first: the first one that has a tab
+    for pg in pages:
+        pg["initial"] = False
+    next((pg for pg in pages if not pg["nav_only"]), pages[0] if pages else {}).update(initial=True)
     parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
                   for name, p in spec.parameters.items()}
     return {"report": spec.report, "theme": resolve_theme(layout.get("theme")), "pages": pages, "parameters": parameters}
