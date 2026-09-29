@@ -89,7 +89,7 @@
 {% for p in spec.pages %}
 <section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.action %} data-nav="{{ v.action.target }}" role="button" tabindex="0"{% endif %}
+  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.action %} data-nav="{{ v.action.target }}" role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     <div class="body"></div>

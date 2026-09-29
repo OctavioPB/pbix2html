@@ -83,7 +83,7 @@
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.action %} data-nav="{{ v.action.target }}" role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.action %} data-nav="{{ v.action.target }}" role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               ; background: {{ v.style.background or 'transparent' }}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">

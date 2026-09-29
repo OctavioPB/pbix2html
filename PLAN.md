@@ -37,6 +37,11 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
       hidden group hides its descendants) and 2a (page-navigation buttons + reachable hidden
       pages) are done; 2b (bookmarks as a client-side state machine) is next. Open question to confirm
       in Desktop: the visible page's buttons reference bookmarks bound to another page.
+- [x] `ThemeDataColor` was resolved wrongly (or not at all): `ColorId 0/1` are the theme
+      background/foreground and `dataColors` start at id 2; `Percent` is a linear tint toward
+      white (>0) or black (<0). Verified on a real button fill (#FF5F02 @ 0.6 = #FFBF9A). Fills of
+      shapes/buttons are now read; colours resolve after the theme is known. Open: button
+      *text* colour and per-state (hover/pressed/selected) formatting are still not read.
 - [ ] Slicers reference an entity (`Table.models`) that isn't in `model.json["tables"]`
       (only its hidden `H$Table` hierarchy partitions are); warn on unresolved entities.
 - [ ] Two tables are inline data (`Table.FromRows(...)`, no Teradata source): embed or ask.

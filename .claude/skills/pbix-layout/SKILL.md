@@ -135,3 +135,15 @@ an hour's work with one, and it would make table-map auto-detection work on thin
 1. Isolate the `config` fragment that fails.
 2. Reproduce it in `tests/fixtures/make_fake_pbix.py` (add a visual/case).
 3. Adjust `extract.py` and add the assertion in `tests/test_extract.py`.
+
+
+## Theme colour references (`ThemeDataColor`)
+
+`{"ThemeDataColor": {"ColorId": n, "Percent": p}}` indexes a palette that is **not** just
+`dataColors`: `0` = theme `background`, `1` = theme `foreground`, `n >= 2` = `dataColors[n-2]`.
+`Percent` tints linearly toward white when positive and black when negative (0.6 of #FF5F02 is
+#FFBF9A, verified on a real report). `extract.literal_color` returns a `theme:<id>:<pct>`
+marker while parsing (the theme is read later) and `resolve_theme_markers` turns it into hex
+once `layout["theme"]` is known; references it can't resolve are dropped, never guessed.
+Shapes and buttons colour themselves with `objects.fill` (default-state `fillColor`), not
+with the container's `vcObjects.background`.

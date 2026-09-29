@@ -139,25 +139,82 @@ _IMAGE_MIME = {
 }
 
 
+def theme_palette(theme: dict | None) -> list[str] | None:
+    """The palette `ThemeDataColor.ColorId` indexes into: 0 = background, 1 = foreground,
+    then the theme's `dataColors` from index 2 (verified against a real report: a fill of
+    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). None
+    when the report's theme JSON isn't available, in which case theme references are dropped
+    rather than guessed."""
+    cj = (theme or {}).get("custom_json") or {}
+    colors = cj.get("dataColors")
+    if not colors:
+        return None
+    return [cj.get("background") or "#FFFFFF", cj.get("foreground") or "#000000", *colors]
+
+
+def _tint(hex_color: str, percent: float) -> str:
+    """Power BI's Percent: >0 lightens toward white, <0 darkens toward black (linear mix)."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6 or not percent:
+        return "#" + h.upper() if len(h) == 6 else hex_color
+    target = 255 if percent > 0 else 0
+    f = min(abs(float(percent)), 1.0)
+    rgb = [round(int(h[k:k + 2], 16) + (target - int(h[k:k + 2], 16)) * f) for k in (0, 2, 4)]
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+_THEME_MARKER_RE = re.compile(r"^theme:(\d+):(-?[\d.]+)$")
+
+
 def literal_color(expr: Any, theme_colors: list[str] | None = None) -> str | None:
     """A Power BI colour expression → '#RRGGBB'.
 
     Two shapes appear in Layout: a literal (`{"Literal": {"Value": "'#FFFFFF'"}}`) and a
     reference into the theme palette (`{"ThemeDataColor": {"ColorId": 0, "Percent": 0}}`).
-    The palette reference is resolved against the report's own `dataColors` when they're
-    known. `Percent` (Power BI's lighter/darker shades of a palette entry) is ignored —
-    returning the base colour is much closer to the original than returning nothing."""
+    With the palette known (`theme_colors`, see `theme_palette`) the reference is resolved
+    to a hex colour; without it — parsing happens before the theme is read — it comes back
+    as a `theme:<id>:<percent>` marker that `resolve_theme_markers` resolves afterwards."""
     if not isinstance(expr, dict):
         return None
     literal = literal_to_text(expr)
     if literal and literal.startswith("#"):
         return literal
     theme_ref = expr.get("ThemeDataColor")
-    if isinstance(theme_ref, dict) and theme_colors:
-        idx = theme_ref.get("ColorId")
-        if isinstance(idx, int) and 0 <= idx < len(theme_colors):
-            return theme_colors[idx]
+    if isinstance(theme_ref, dict):
+        idx, pct = theme_ref.get("ColorId"), theme_ref.get("Percent") or 0
+        if isinstance(idx, int) and isinstance(pct, (int, float)):
+            if not theme_colors:
+                return f"theme:{idx}:{pct}"
+            if 0 <= idx < len(theme_colors):
+                return _tint(theme_colors[idx], pct)
     return None
+
+
+def resolve_theme_markers(layout: dict) -> None:
+    """Replaces `theme:<id>:<pct>` markers (page background, visual background/border/fill)
+    with real colours now that the theme is known; unresolvable ones are removed."""
+    palette = theme_palette(layout.get("theme"))
+
+    def fix(holder: dict, key: str, keep_key: bool = False) -> None:
+        val = holder.get(key)
+        m = _THEME_MARKER_RE.match(val) if isinstance(val, str) else None
+        if not m:
+            return
+        idx, pct = int(m.group(1)), float(m.group(2))
+        if palette and 0 <= idx < len(palette):
+            holder[key] = _tint(palette[idx], pct)
+        elif keep_key:
+            holder[key] = None
+        else:
+            holder.pop(key, None)
+
+    for page in layout.get("pages", []):
+        fix(page, "background", keep_key=True)
+        for v in page.get("visuals", []):
+            style = v.get("style")
+            if isinstance(style, dict):
+                fix(style, "background")
+                fix(style, "border_color")
 
 
 def _object_color(objects: dict, name: str, prop: str = "color",
@@ -270,6 +327,41 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     if border_colour:
         style["border_color"] = border_colour
         style.setdefault("border", True)
+    return style
+
+
+def _fill_color(objects: dict) -> str | None:
+    """Fill of a shape / button (`objects.fill`): the default-state `fillColor` when the
+    fill is shown and not fully transparent. Same colour forms as `literal_color`."""
+    entries = (objects or {}).get("fill") or []
+    shown = True
+    for e in entries:
+        if not (e or {}).get("selector"):
+            flag = literal_to_text((((e.get("properties") or {}).get("show") or {}).get("expr")) or {})
+            if flag == "false":
+                shown = False
+    if not shown:
+        return None
+    for e in entries:
+        sel = (e or {}).get("selector") or {}
+        props = (e or {}).get("properties") or {}
+        if sel.get("id") != "default" or "fillColor" not in props:
+            continue
+        transp = literal_to_text(((props.get("transparency") or {}).get("expr")) or {})
+        try:
+            if transp is not None and float(str(transp).rstrip("DdLl")) >= 100:
+                return None
+        except ValueError:
+            pass
+        solid = ((props["fillColor"] or {}).get("solid") or {}).get("color") or {}
+        return literal_color(solid.get("expr"))
+    return None
+
+
+def _style_with_fill(style: dict, objects: dict) -> dict:
+    """A shape/button's own fill is its background unless the container sets one."""
+    if "background" not in style and (fill := _fill_color(objects)):
+        style["background"] = fill
     return style
 
 
@@ -506,7 +598,7 @@ def _parse_visual(vc: dict) -> dict:
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
-        "style": container_style(vco),
+        "style": _style_with_fill(container_style(vco), sv.get("objects") or {}),
         "texts": texts,
         "action": _visual_link(vco),
     })
@@ -638,6 +730,7 @@ def extract_layout(pbix: Path) -> dict:
             "pages": [parse_page(s) for s in layout.get("sections", [])],
             "format": "classic",
         }
+        resolve_theme_markers(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
 
@@ -809,6 +902,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
         "format": "pbir",
     }
+    resolve_theme_markers(result)
     embed_image_resources(z, result)
     return result
 

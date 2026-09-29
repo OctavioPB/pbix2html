@@ -39,6 +39,14 @@ How the pattern is actually stored (verified against that file, classic format):
   The `HST` twin's own "Historic Data" button has a dangling `navigationSection` (probably
   itself), and tooltip pages (`Tooltip-*`, `DEP-Tooltip*`) are hidden and linked by nobody.
 
+- **"Active" buttons are a per-report design convention, not a Power BI feature** (owner):
+  in this report a navigation button with a destination is drawn white and the one for the
+  current page/view is orange and does nothing (`navigationSection = ''`, i.e. itself). Nothing
+  in the file marks the "active" state; it is only the button's own fill. The renderer must
+  therefore *not* compute an active state: it reproduces each button's stored fill and leaves
+  a target-less button inert, which yields the same result here and stays correct for reports
+  that use a different convention.
+
 ## Decision
 
 Three phases, each independently useful and shippable.

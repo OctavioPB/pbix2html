@@ -230,3 +230,50 @@ def test_group_children_positions_become_absolute():
     absolutize_group_children(vs)
     pos = {v["id"]: (v["x"], v["y"]) for v in vs}
     assert pos == {"g1": (100, 200), "g2": (110, 220), "a": (111, 222), "b": (5, 5), "c": (7, 7)}
+
+
+def test_theme_colour_ids_and_tints():
+    from pbix2html.extract import _tint, literal_color, theme_palette
+
+    theme = {"custom_json": {"background": "#FFFFFF", "foreground": "#00233C",
+                             "dataColors": ["#FF5F02", "#00233C", "#3053F4"]}}
+    pal = theme_palette(theme)
+    ref = lambda i, p=0: {"ThemeDataColor": {"ColorId": i, "Percent": p}}   # noqa: E731
+    assert literal_color(ref(0), pal) == "#FFFFFF"                 # 0 = background
+    assert literal_color(ref(1), pal) == "#00233C"                 # 1 = foreground
+    assert literal_color(ref(2), pal) == "#FF5F02"                 # 2 = dataColors[0]
+    assert literal_color(ref(2, 0.6), pal) == "#FFBF9A"            # value seen in a real report
+    assert _tint("#FFFFFF", -0.5) == "#808080"                      # negative = darker
+    assert literal_color(ref(2, 0.6)) == "theme:2:0.6"              # palette unknown yet: marker
+    assert theme_palette({}) is None
+
+
+def test_shape_fill_uses_theme_colour_end_to_end(tmp_path):
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    def fill(color_id, pct):
+        return {"fill": [
+            {"properties": {"show": {"expr": {"Literal": {"Value": "true"}}}}},
+            {"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": {"expr": {
+                "ThemeDataColor": {"ColorId": color_id, "Percent": pct}}}}}}}]}
+
+    def vc(name, objects):
+        cfg = {"name": name, "layouts": [{"position": {"x": 0, "y": 0, "width": 10, "height": 10}}],
+               "singleVisual": {"visualType": "actionButton", "objects": objects}}
+        return {"config": json.dumps(cfg), "x": 0, "y": 0, "width": 10, "height": 10}
+
+    layout = {
+        "config": json.dumps({"themeCollection": {"customTheme": {"name": "T.json"}}}),
+        "sections": [{"name": "s", "displayName": "S", "visualContainers": [
+            vc("active", fill(2, 0.6)), vc("idle", fill(0, 0))]}]}
+    pbix = tmp_path / "F.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/StaticResources/RegisteredResources/T.json", json.dumps(
+            {"background": "#FFFFFF", "foreground": "#00233C", "dataColors": ["#FF5F02", "#00233C"]}))
+    v = {x["id"]: x for x in extract_layout(pbix)["pages"][0]["visuals"]}
+    assert v["active"]["style"]["background"] == "#FFBF9A"
+    assert v["idle"]["style"]["background"] == "#FFFFFF"
