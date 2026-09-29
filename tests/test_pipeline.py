@@ -461,17 +461,21 @@ def test_table_map_detects_connector_query_option():
     assert "C" not in got and "D" not in got
 
 
-def test_hidden_group_hides_its_descendants():
-    from pbix2html.render import _hidden_with_descendants
+def test_group_chain_lists_ancestors_nearest_first():
+    from pbix2html.render import _group_chain
 
     vs = [
-        {"id": "g1", "hidden": True, "is_group": True, "parent_group": None},
-        {"id": "g2", "hidden": False, "is_group": True, "parent_group": "g1"},
-        {"id": "a", "hidden": False, "parent_group": "g2"},     # under hidden g1 via g2
-        {"id": "b", "hidden": False, "parent_group": None},
-        {"id": "c", "hidden": True, "parent_group": None},      # own flag
+        {"id": "g1", "is_group": True, "parent_group": None},
+        {"id": "g2", "is_group": True, "parent_group": "g1"},
+        {"id": "a", "parent_group": "g2"},
+        {"id": "b", "parent_group": None},
+        {"id": "loop1", "is_group": True, "parent_group": "loop2"},
+        {"id": "loop2", "is_group": True, "parent_group": "loop1"},
     ]
-    assert _hidden_with_descendants(vs) == {"g1", "g2", "a", "c"}
+    by_id = {v["id"]: v for v in vs}
+    assert _group_chain(by_id["a"], by_id) == ["g2", "g1"]
+    assert _group_chain(by_id["b"], by_id) == []
+    assert len(_group_chain(by_id["loop1"], by_id)) <= 2               # a cycle terminates
 
 
 def test_visual_link_parsing():
@@ -508,3 +512,56 @@ def test_hidden_page_reachable_by_a_button_is_rendered_and_wired(fake_pbix):
     assert 'data-nav="page-1"' in html and 'data-nav="page-0"' in html  # button + way back
     assert html.count("data-nav=") == 2                                # dangling target stays inert
     assert html.count('role="tab"') == 0                                # one visible page: no tab bar
+
+
+def _bm_pages():
+    def g(i, title, hidden=False):
+        return {"id": i, "is_group": True, "title": title, "hidden": hidden, "parent_group": None}
+    hist = {"name": "H", "display_name": "HST", "visuals": [g("h_org", "Org"), g("h_l1", "Lvl 1"), g("h_mod", "Model")]}
+    cur = {"name": "C", "display_name": "Cur", "visuals": [g("c_org", "Org"), g("c_l1", "Lvl 1", True), g("c_mod", "Model")]}
+    bm = {"id": "b1", "name": "By Lvl 1", "page": "H",
+          "groups": {"h_org": True, "h_l1": False, "h_mod": True},
+          "targets": ["h_org", "h_l1"], "apply_only_to_targets": True}
+    return hist, cur, {"b1": bm}
+
+
+def test_bookmark_action_targets_and_direct_ids():
+    from pbix2html.render import _bookmark_action
+
+    hist, cur, bms = _bm_pages()
+    warns: list[str] = []
+    act = {"type": "bookmark", "bookmark": "b1", "enabled": True}
+    got = _bookmark_action(act, bms, hist, [hist, cur], warns)
+    # only the targeted groups change (h_mod is not a target), ids used as they are
+    assert got == {"type": "bookmark", "set": {"h_org": True, "h_l1": False}} and warns == []
+
+
+def test_bookmark_action_remaps_a_cloned_page_by_group_name_and_warns():
+    from pbix2html.render import _bookmark_action
+
+    hist, cur, bms = _bm_pages()
+    warns: list[str] = []
+    got = _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, cur, [hist, cur], warns)
+    assert got == {"type": "bookmark", "set": {"c_org": True, "c_l1": False}}
+    assert len(warns) == 1 and "applied by group name" in warns[0]
+    # ambiguous name on the clone -> that group is not mapped; nothing mappable -> inert
+    cur["visuals"].append({"id": "c_org2", "is_group": True, "title": "Org", "parent_group": None})
+    got = _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, cur, [hist, cur], [])
+    assert got == {"type": "bookmark", "set": {"c_l1": False}}
+    other = {"name": "X", "display_name": "X", "visuals": [{"id": "z", "is_group": True, "title": "Other"}]}
+    assert _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, other, [hist, other], []) is None
+    assert _bookmark_action({"type": "bookmark", "bookmark": "nope", "enabled": True}, bms, cur, [hist, cur], []) is None
+    assert _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": False}, bms, cur, [hist, cur], []) is None
+
+
+def test_parse_bookmarks_reads_group_state_and_targets():
+    from pbix2html.extract import parse_bookmarks
+
+    cfg = {"bookmarks": [{"name": "b1", "displayName": "By Org", "options": {
+        "targetVisualNames": ["g1"], "applyOnlyToTargetVisuals": True},
+        "explorationState": {"activeSection": "s1", "sections": {"s1": {"visualContainerGroups": {
+            "g1": {"isHidden": False}, "g2": {"isHidden": True}}}}}}]}
+    assert parse_bookmarks(cfg) == [{"id": "b1", "name": "By Org", "page": "s1",
+                                     "groups": {"g1": False, "g2": True}, "targets": ["g1"],
+                                     "apply_only_to_targets": True}]
+    assert parse_bookmarks({}) == []

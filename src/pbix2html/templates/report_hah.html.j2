@@ -52,6 +52,7 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
+  .visual[hidden] { display: none; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
   .error-state { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
@@ -87,9 +88,9 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
+<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.action %} data-nav="{{ v.action.target }}" role="button" tabindex="0"{% endif %}
+  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     <div class="body"></div>
@@ -333,6 +334,24 @@
   document.querySelectorAll('[data-nav]').forEach(b => {
     b.addEventListener('click', () => showPage(b.dataset.nav));
     b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPage(b.dataset.nav); } });
+  });
+  // Bookmark buttons: each page keeps the set of hidden groups; a visual is shown unless one
+  // of its ancestor groups is in that set (ADR-005).
+  const hiddenGroups = new Map();
+  document.querySelectorAll('.page').forEach(pg => hiddenGroups.set(pg.id, new Set(JSON.parse(pg.dataset.hiddenGroups || '[]'))));
+  function applyGroups(page) {
+    const hs = hiddenGroups.get(page.id);
+    page.querySelectorAll('[data-groups]').forEach(el => { el.hidden = el.dataset.groups.split(' ').some(g => hs.has(g)); });
+    Object.values(charts).forEach(c => c.resize());
+  }
+  document.querySelectorAll('[data-set]').forEach(b => {
+    const activate = () => {
+      const page = b.closest('.page'), hs = hiddenGroups.get(page.id);
+      Object.entries(JSON.parse(b.dataset.set)).forEach(([g, hidden]) => hidden ? hs.add(g) : hs.delete(g));
+      applyGroups(page);
+    };
+    b.addEventListener('click', activate);
+    b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
   });
   window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
 

@@ -649,6 +649,39 @@ def _visual_link(vco: dict) -> dict | None:
     return None
 
 
+def parse_bookmarks(root_config: dict) -> list[dict]:
+    """Classic `config.bookmarks[]` → [{id, name, page, groups, targets, apply_only_to_targets}].
+
+    A bookmark is a saved page state. What matters for view switchers is
+    `explorationState.sections[<page>].visualContainerGroups` = {groupId: {isHidden}}: which
+    groups are visible. `options.targetVisualNames` (group *and* visual ids) plus
+    `applyOnlyToTargetVisuals` limit which groups the bookmark is allowed to change, which is
+    how one page hosts independent switchers. Filter/slicer state (`suppressData`) is not
+    modelled (ADR-005, phase 3). See ADR-005."""
+    out: list[dict] = []
+
+    def visit(items: Any) -> None:
+        for b in items if isinstance(items, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("children"):
+                visit(b["children"])
+            es = b.get("explorationState") or {}
+            sections = es.get("sections") or {}
+            sid = es.get("activeSection") if es.get("activeSection") in sections else next(iter(sections), None)
+            sec = sections.get(sid) or {}
+            groups = {gid: bool((st or {}).get("isHidden"))
+                      for gid, st in (sec.get("visualContainerGroups") or {}).items()}
+            opts = b.get("options") or {}
+            if b.get("name"):
+                out.append({"id": b["name"], "name": b.get("displayName"), "page": sid, "groups": groups,
+                            "targets": list(opts.get("targetVisualNames") or []),
+                            "apply_only_to_targets": bool(opts.get("applyOnlyToTargetVisuals"))})
+
+    visit((root_config or {}).get("bookmarks"))
+    return out
+
+
 def parse_page(section: dict) -> dict:
     cfg = loads_maybe(section.get("config", "{}")) or {}
     objects = cfg.get("objects") or {}
@@ -729,6 +762,7 @@ def extract_layout(pbix: Path) -> dict:
                 [c for c in custom_packages if c] + _zip_custom_visuals(names))),
             "pages": [parse_page(s) for s in layout.get("sections", [])],
             "format": "classic",
+            "bookmarks": parse_bookmarks(loads_maybe(layout.get("config", "{}")) or {}),
         }
         resolve_theme_markers(result)
         embed_image_resources(z, result)   # needs the zip still open

@@ -147,3 +147,12 @@ marker while parsing (the theme is read later) and `resolve_theme_markers` turns
 once `layout["theme"]` is known; references it can't resolve are dropped, never guessed.
 Shapes and buttons colour themselves with `objects.fill` (default-state `fillColor`), not
 with the container's `vcObjects.background`.
+
+## Bookmarks and view switchers (classic)
+
+`config.bookmarks[]` → `layout["bookmarks"]` (`parse_bookmarks`). The state that switches views
+is `explorationState.sections[<page>].visualContainerGroups = {groupId: {isHidden}}`; group
+`isHidden` on the page itself is the initial state; a bookmark's `options.targetVisualNames`
+(group and visual ids) + `applyOnlyToTargetVisuals` limit what it changes. Buttons point at a
+bookmark (`visualLink` type `Bookmark`) or a page (`PageNavigation`, empty target = itself).
+Group children's x/y are relative to the group. See `docs/decisions/ADR-005`.

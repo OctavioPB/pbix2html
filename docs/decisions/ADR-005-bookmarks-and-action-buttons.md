@@ -1,6 +1,6 @@
 # ADR-005 — Bookmarks and action buttons
 
-**Status:** proposed (phases 1 and 2a implemented). **Date:** 2026-09-29.
+**Status:** accepted; phases 1, 2a and 2b implemented, phase 3 open. **Date:** 2026-09-29.
 
 ## Context
 
@@ -26,11 +26,18 @@ How the pattern is actually stored (verified against that file, classic format):
 - **A button** carries `vcObjects.visualLink[0].properties`: `type` = `'Bookmark'` +
   `bookmark` = bookmark *name* (id), or `'PageNavigation'` + `navigationSection` = page id.
   `show=false` means the link is disabled.
-- **Bookmarks are bound to a page.** All 7 bookmarks in the sample describe the hidden
-  `HST Spend View` page, and the visible `Spend View` page's buttons reference those same
-  bookmark ids; the group ids inside the bookmarks don't exist on the visible page. In Power
-  BI this is probably a no-op (**still unconfirmed in Desktop**); the HTML must not invent
-  behavior the original doesn't have.
+- **Bookmarks are bound to a page, and this report reuses them on a clone.** All 7 bookmarks
+  were saved on the hidden `HST Spend View` page, yet the visible `Spend View` page's buttons
+  call the same bookmark ids. `Spend View` is a structural clone of `HST Spend View`: same
+  group display names, positions and children, new ids (its section even lacks the `id` /
+  `objectId` keys the original has). The file alone can't show what Power BI does with those
+  buttons; the report owner states white buttons switch which visuals are shown, so the intent
+  is that they act on the clone. (My first reading, "probably a no-op", was wrong.)
+- **Two independent switchers on one page.** `By Org`/`By Lvl 1-3` target the four
+  Org/Lvl groups (24 target ids: the groups *and* their children) and `By Model`/`By Product`
+  the two Model/Product groups (8). With `applyOnlyToTargetVisuals` a bookmark changes only the
+  groups it targets. A bookmark with no targets and no `applyOnly` (`Bookmark 7`, the
+  unlabeled buttons) applies its whole saved state.
 - **Page pairs are a data-source switch, not duplicates** (owner's explanation): `Spend View`
   is fed by the monthly source, its `HST ...` twin by the historical one, and a
   "Current Month / Historic Data" pair of `PageNavigation` buttons swaps between them, so
@@ -62,24 +69,21 @@ reachable (transitively) from a visible page's enabled `PageNavigation` button, 
 Both templates (`report`, `report_hah`) share one `showPage()`; `hah` lazy-loads the page's
 data when it is shown. Verified in a browser on the real report (both directions).
 
-### Phase 2b — bookmarks and buttons as a client-side state machine
-1. **Extract** into `layout.json`:
-   - `bookmarks: [{id, name, page, active_section, groups: {groupId: hidden}, targets: [visualIds],
-     apply_only_to_targets, suppress_data, suppress_active_section}]`.
-   - on each `actionButton`: `action: {type: "bookmark"|"page"|"none", bookmark, page, enabled}`.
-2. **Render**: `actionButton` becomes a real `<button>` (its caption/fill/border already come
-   from the visual's formatting). Every visual element gets `data-groups="g1 g2"` (its ancestor
-   chain). Clicking applies a bookmark: for the groups it lists (all of them, or only
-   `targets` when `applyOnlyToTargetVisuals`), set `hidden`, then show a visual iff none of its
-   ancestors is hidden. `PageNavigation` activates the matching tab. Buttons don't need data.
-3. **Resolve conservatively.** A button whose bookmark is missing, or whose group ids don't
-   exist on the button's own page, is rendered **inert** and listed under `notes` in the
-   yaml ("button X → bookmark Y is bound to page Z; likely a no-op in Power BI"). Never a
-   guess. An opt-in remap by group `displayName` may be added later if owners want it.
-4. **Data**: keep initially-hidden visuals in the spec flagged `hidden` instead of dropping
-   them. `snapshot` queries them like any other (each is visible in some state; one HTML
-   per role still applies). `live`/`hah` fetch lazily the first time a visual is revealed.
-5. A selected state is per-page and ephemeral (no URL/permalink in v1).
+### Phase 2b — bookmarks and buttons as a client-side state machine (done)
+- **Extract**: `layout.json["bookmarks"]` = `[{id, name, page, groups: {gid: hidden}, targets,
+  apply_only_to_targets}]` (`parse_bookmarks`); a button's `action` already carries the id.
+- **Resolve per page** (`render._bookmark_action`): use the group ids as they are when they
+  exist on the page; otherwise match groups by display name, **only when the name is unique
+  on both pages**; then keep just the targeted groups when `apply_only_to_targets`. Each use of
+  the name-based remap is logged as a warning ("applied by group name") so the owner can check
+  it. Nothing mappable, a missing/disabled bookmark → the button stays inert.
+- **Render**: every visual carries its ancestor-group chain (`data-groups`); a page holds the
+  set of hidden groups (initially those with `isHidden`); a bookmark button adds/removes groups
+  and every visual is shown unless an ancestor group is hidden. Visuals inside initially-hidden
+  groups are kept in the page (and queried in `snapshot`) rather than dropped. Same JS in the
+  `report` and `report_hah` templates.
+- Verified in a browser on the real report: each of the six view buttons shows exactly its
+  group and hides its siblings, the two switchers are independent, no JS errors.
 
 ### Phase 3 — bookmark state beyond visibility (only if an owner needs it)
 Filter/slicer state captured in `explorationState` (we already set `suppressData` aside),

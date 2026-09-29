@@ -33,22 +33,11 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
 *images* were ignored (white title text on a white canvas); the table-map detector missed
 `Teradata.Database(host, [Query="..."])` and `SEL`. **Still open** (design work, in priority order):
 
-- [ ] **Bookmarks and action buttons** — designed in `docs/decisions/ADR-005`. Phase 1 (a
-      hidden group hides its descendants) and 2a (page-navigation buttons + reachable hidden
-      pages) are done; 2b (bookmarks as a client-side state machine) is next. Open question to confirm
-      in Desktop: the visible page's buttons reference bookmarks bound to another page.
-- [x] `ThemeDataColor` was resolved wrongly (or not at all): `ColorId 0/1` are the theme
-      background/foreground and `dataColors` start at id 2; `Percent` is a linear tint toward
-      white (>0) or black (<0). Verified on a real button fill (#FF5F02 @ 0.6 = #FFBF9A). Fills of
-      shapes/buttons are now read; colours resolve after the theme is known. Open: button
-      *text* colour and per-state (hover/pressed/selected) formatting are still not read.
-- [ ] Slicers reference an entity (`Table.models`) that isn't in `model.json["tables"]`
-      (only its hidden `H$Table` hierarchy partitions are); warn on unresolved entities.
-- [ ] Two tables are inline data (`Table.FromRows(...)`, no Teradata source): embed or ask.
-- [ ] CLI `--mode` doesn't accept `hah` (docs and `render_html` do); `hah_base` has no CLI flag.
-- [ ] `storage_modes` are raw codes (`0` Import, `1` DirectQuery, `2` Dual): show names.
-- [ ] Rendered HTML loads ECharts from a CDN, not fully self-contained; blocked networks
-      need `ECHARTS_CDN` pointed at an internal copy (or an inline option).
+- [x] **Bookmarks and action buttons** — `docs/decisions/ADR-005`, phases 1, 2a, 2b done and
+      verified on the real report (view switchers, monthly/historical toggle). Bookmarks saved on
+      the historical page are reused on its monthly clone by group name (logged; owner confirmed
+      the intent). Open: bookmark-captured filter/slicer state (phase 3), the button per-state
+      formatting, and PBIR bookmarks (`Report/definition/bookmarks/`, unverified).
 - [x] Hidden `HST ...` pages are the *historical* twin of each monthly page, reached through a
       "Current Month / Historic Data" button pair (owner-confirmed). Now rendered when a
       visible page links to them (ADR-005 phase 2a). Tooltip pages stay out. Open: the twin

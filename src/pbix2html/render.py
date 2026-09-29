@@ -7,6 +7,7 @@ with ECharts from `spec` + `data`. That way the same HTML works for both snapsho
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .config import settings
 from .semantic import KIND_MAP, ReportSpec
 
+log = logging.getLogger(__name__)
 TEMPLATES = Path(__file__).parent / "templates"
 
 # Default Power BI palette (baseTheme with no customization).
@@ -68,19 +70,69 @@ def _background_image_css(bg: dict | None) -> str | None:
     return f"url({uri}) center / {size} no-repeat"
 
 
-def _hidden_with_descendants(visuals: list[dict]) -> set:
-    """Ids of visuals that start hidden: their own `hidden` flag, or any ancestor group's."""
-    by_id = {v.get("id"): v for v in visuals}
-    out: set = set()
+def _group_chain(v: dict, by_id: dict) -> list[str]:
+    """Ids of the groups a visual sits in, nearest first (cycles ignored)."""
+    chain: list[str] = []
+    cur = by_id.get(v.get("parent_group"))
+    while cur is not None and cur.get("id") not in chain:
+        chain.append(cur["id"])
+        cur = by_id.get(cur.get("parent_group"))
+    return chain
+
+
+def _unique_group_names(visuals: list[dict]) -> dict[str, str]:
+    """{group displayName: id} for the names that identify exactly one group on the page."""
+    seen: dict[str, list[str]] = {}
     for v in visuals:
-        cur, seen = v, set()
-        while cur is not None and cur.get("id") not in seen:
-            if cur.get("hidden"):
-                out.add(v.get("id"))
-                break
-            seen.add(cur.get("id"))
-            cur = by_id.get(cur.get("parent_group"))
-    return out
+        if v.get("is_group") and v.get("title"):
+            seen.setdefault(v["title"], []).append(v["id"])
+    return {n: ids[0] for n, ids in seen.items() if len(ids) == 1}
+
+
+def _bookmark_action(action: dict | None, bookmarks: dict, page: dict, all_pages: list[dict],
+                     warnings: list[str]) -> dict | None:
+    """A bookmark button as {"type": "bookmark", "set": {groupId: hidden}} in *this page's*
+    group ids, or None (inert) when nothing in the bookmark maps onto the page.
+
+    Two things make this more than a lookup (see ADR-005):
+    - `applyOnlyToTargetVisuals`: only groups listed in the bookmark's targets change, which
+      is what lets one page host several independent switchers.
+    - Bookmarks are bound to the page they were saved on. A page that is a structural clone
+      of that page (same group display names, new ids: how a "monthly" twin of a
+      "historical" page is built) reuses them; the owner confirmed those buttons are meant to
+      work, so groups are matched by display name, only when the name is unique on both
+      pages, and each such use is reported through `warnings`."""
+    if not action or action.get("type") != "bookmark" or not action.get("enabled"):
+        return None
+    bm = bookmarks.get(action.get("bookmark"))
+    if not bm:
+        return None
+    here = {v["id"] for v in page["visuals"] if v.get("is_group")}
+    src = next((q for q in all_pages if q.get("name") == bm.get("page")), None)
+    src_names = ({v["id"]: v["title"] for v in src["visuals"] if v.get("is_group") and v.get("title")}
+                 if src else {})
+    here_by_name = _unique_group_names(page["visuals"])
+    src_unique = _unique_group_names(src["visuals"]) if src else {}
+    targets = set(bm.get("targets") or [])
+    changes: dict[str, bool] = {}
+    remapped = False
+    for gid, hidden in (bm.get("groups") or {}).items():
+        if bm.get("apply_only_to_targets") and gid not in targets:
+            continue
+        if gid in here:
+            changes[gid] = hidden
+            continue
+        name = src_names.get(gid)
+        tgt = here_by_name.get(name) if name and src_unique.get(name) == gid else None
+        if tgt:
+            changes[tgt] = hidden
+            remapped = True
+    if not changes:
+        return None
+    if remapped:
+        warnings.append(f"page {page.get('display_name')!r}: bookmark {bm.get('name')!r} was saved on "
+                        f"page {src.get('display_name') if src else '?'!r}; applied by group name")
+    return {"type": "bookmark", "set": changes}
 
 
 def _page_action(action: dict | None, by_name: dict, rendered: set) -> dict | None:
@@ -102,6 +154,8 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     """
     pages = []
     all_pages = layout["pages"]
+    bookmarks = {b["id"]: b for b in layout.get("bookmarks") or []}
+    warnings: list[str] = []
     # Hidden pages that a visible page's button navigates to (transitively) are part of
     # the report, e.g. a "Historic Data" view behind a toggle button. Tooltip pages and
     # other hidden pages nobody links to stay out.
@@ -121,9 +175,12 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             continue
         W, H = float(p.get("width") or 1280), float(p.get("height") or 720)
         visuals = []
-        hidden_ids = _hidden_with_descendants(p["visuals"])
+        by_id = {v.get("id"): v for v in p["visuals"]}
+        # Groups that start hidden; their descendants are kept in the page (a bookmark
+        # button can reveal them) and shown/hidden client-side by group chain.
+        hidden_groups = [v["id"] for v in p["visuals"] if v.get("is_group") and v.get("hidden")]
         for v in p["visuals"]:
-            if v.get("is_group") or v.get("id") in hidden_ids:
+            if v.get("is_group") or v.get("hidden"):
                 continue
             vs = spec.visuals.get(v["id"])
             kind = vs.kind if vs else KIND_MAP.get(v["type"], "unsupported")
@@ -141,7 +198,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
                 "image": v.get("image_data_uri"),
-                "action": _page_action(v.get("action"), by_name, shown | nav_only),
+                "action": (_page_action(v.get("action"), by_name, shown | nav_only)
+                           or _bookmark_action(v.get("action"), bookmarks, p, all_pages, warnings)),
+                "groups": _group_chain(v, by_id),
                 # subtitle / button label / axis + legend titles, as the report sets
                 # them (see extract.py's visual_text). Absent keys mean "not set" —
                 # the renderer shows nothing rather than inventing a label.
@@ -150,6 +209,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 # leaves its own default in place instead of inventing a border.
                 "style": v.get("style") or {},
             }
+            entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             if include_sql:
                 entry["sql"] = vs.sql if vs else None
                 entry["params"] = vs.params if vs else []
@@ -157,12 +217,14 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "background": p.get("background"),
                       "background_image": _background_image_css(p.get("background_image")),
-                      "nav_only": i in nav_only,
+                      "nav_only": i in nav_only, "hidden_groups": hidden_groups,
                       "visuals": visuals})
     # the page that is on screen first: the first one that has a tab
     for pg in pages:
         pg["initial"] = False
     next((pg for pg in pages if not pg["nav_only"]), pages[0] if pages else {}).update(initial=True)
+    for w in dict.fromkeys(warnings):
+        log.warning(w)
     parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
                   for name, p in spec.parameters.items()}
     return {"report": spec.report, "theme": resolve_theme(layout.get("theme")), "pages": pages, "parameters": parameters}
