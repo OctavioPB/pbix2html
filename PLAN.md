@@ -124,7 +124,7 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - CSS `z-index` must be an integer (`3000.0` is silently dropped, which hid slicers behind panels).
 - Mapping: 54 data visuals, 44 drafted. Still manual: selection-dependent measures (`MIN(level)` over a
   slicer, `VAR` + `min(Calendar[Date])`), one table not connected to any fact (`not_connected`), 24 of 38 measures.
-- `FILTER(T, T[c] = MIN(T[c]))` (selection-dependent "top level") is now drafted as a DISTINCT-key LEFT JOIN; unverified against real numbers. `MIN/MAX(T[c])` + `VAR` + month-comparison measures are drafted for card context (mapping 44 → 49 of 54). Still manual: `Headcount Ending` (IF across two fact tables), charts grouped by the date (per-group MIN/MAX), 100%-stacked charts with those measures (`shape`).
+- `FILTER(T, T[c] = MIN(T[c]))` (selection-dependent "top level") is now drafted as a DISTINCT-key LEFT JOIN; unverified against real numbers. `MIN/MAX(T[c])` + `VAR` + month-comparison measures are drafted for card context (mapping 44 → 49 of 54). Grouped visuals evaluate MIN/MAX per group (calendar-column category, own-fact category, or whole selection when the category doesn't filter T); `Tooltips`-role fields are no longer drafted. Still manual: `Headcount Ending` (IF across two fact tables), 4 visuals.
 - Not yet verified: 100%-stacked charts in the renderer, MobileState (ignored), storage-mode info in the mapping report.
 
 ## Phase 1 — End-to-end pilot (1 report)

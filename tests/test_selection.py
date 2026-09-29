@@ -114,3 +114,54 @@ def test_date_context_sql_parses_as_teradata():
     sql, params = date_card("Start")
     bound, _ = bind(sql, params, {"months": ["x"]})
     sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
+
+
+# ---- per-category evaluation in grouped visuals ---------------------------------------------
+
+def chart(measure, category="Cal.month_end", kind="column", extra=None):
+    proj = {"Category": [category], "Y": [f"Fact.{measure}"]}
+    v = {"projections": proj}
+    maps = {**DATE_MAP, "Dim": "SELECT k, name FROM db.dim", **(extra or {})}
+    rels = DATE_RELS + [{"FromTableName": "Fact", "FromColumnName": "k", "ToTableName": "Dim",
+                         "ToColumnName": "k", "IsActive": 1, "Cardinality": "M:1"}]
+    return S._draft_visual_sql(v, kind, DATE_MEASURES, maps, rels, DATE_PARAMS)
+
+
+def test_min_over_a_calendar_category_is_computed_per_group_of_that_calendar_column():
+    sql, params = chart("Start")
+    assert "LEFT JOIN (\nSELECT ctx.month_end AS k1, MIN(ctx.\"date\") AS v" in sql
+    assert "GROUP BY 1\n) AS ctx1 ON ctx1.k1 = cal.month_end" in sql
+    assert sql.rstrip().endswith("GROUP BY 1, ctx1.v")
+    assert "months" in params and "{CTX" not in sql
+    # the group's value comes from the calendar alone: no fact rows in that inner query
+    inner = sql.split("LEFT JOIN (", 1)[1].split(") AS ctx1", 1)[0]
+    assert "db.fact" not in inner
+
+
+def test_min_of_the_visuals_own_fact_is_computed_per_group_over_the_visuals_rows():
+    sql, _ = chart("OwnMin", category="Dim.name")
+    inner = sql.split("LEFT JOIN (", 1)[1].split(") AS ctx1", 1)[0]
+    assert "dim.name AS k1, MIN(fact.dt) AS v" in inner and "db.fact" in inner and "GROUP BY 1" in inner
+    assert "(ctx1.k1 = dim.name OR (ctx1.k1 IS NULL AND dim.name IS NULL))" in sql
+
+
+def test_a_category_that_does_not_filter_the_calendar_keeps_one_value_for_the_whole_selection():
+    sql, _ = chart("Start", category="Dim.name")
+    assert "CROSS JOIN (" in sql and "LEFT JOIN" not in sql
+
+
+def test_tooltip_measures_are_not_drafted_as_extra_series():
+    v = {"projections": {"Category": ["Dim.name"], "Y": ["Fact.OwnMin"], "Tooltips": ["Sum(Other.x)"]}}
+    maps = {**DATE_MAP, "Dim": "SELECT k, name FROM db.dim"}
+    rels = DATE_RELS + [{"FromTableName": "Fact", "FromColumnName": "k", "ToTableName": "Dim",
+                         "ToColumnName": "k", "IsActive": 1, "Cardinality": "M:1"}]
+    sql, _ = S._draft_visual_sql(v, "column", DATE_MEASURES, maps, rels, DATE_PARAMS)
+    assert "other" not in sql.lower() and "UNION ALL" not in sql
+
+
+def test_per_group_sql_parses_as_teradata():
+    sqlglot = pytest.importorskip("sqlglot")
+    for cat in ("Cal.month_end", "Dim.name"):
+        sql, params = chart("Start", category=cat)
+        bound, _ = bind(sql, params, {"months": ["x"]})
+        sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")

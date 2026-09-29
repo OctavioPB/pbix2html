@@ -1716,42 +1716,69 @@ _CTX_RE = re.compile(r"\{CTX:(MIN|MAX)\|([^|}]+)\|([^}]+)\}")
 
 
 def _expand_ctxs(fields: list["_Field"], aliases: dict[str, str], sources: list[str], where_parts: list[str],
-                 table_map: dict[str, str], parameters: dict[str, dict]
-                 ) -> tuple[list[str], dict[str, str], list[str]] | None:
-    """`MIN/MAX(T[c])` as a scalar: the value over the rows the report's filters leave in T.
+                 table_map: dict[str, str], parameters: dict[str, dict], categories: list["_Field"],
+                 relationships: list[dict]
+                 ) -> tuple[list[str], dict[str, str], list[str], list[str]] | None:
+    """`MIN/MAX(T[c])` as a scalar: the value over the rows of T the report's filters leave, and, in
+    a visual grouped by categories, over the rows of the current group. Returns (joins, {marker: sql},
+    slicer params used, extra GROUP BY terms) or None when it can't be built.
 
-    T is read by the visual: taken over the visual's own FROM + WHERE. T is not (a calendar behind a
-    date slicer): taken over T's source query filtered by the slicers on T. Either way a one-row
-    derived table CROSS JOINed in (no subquery inside an aggregate, which Teradata rejects, and
-    no fan-out); the marker becomes `ctxN.v`. Evaluated for the whole visual, so it is exact for a
-    card/kpi; in a visual grouped by that table DAX evaluates it per group instead."""
+    * a category is a column of T (calendar month over `MIN(Calendar[Date])`): T's own source,
+      filtered by the slicers that reach T, grouped by those columns and LEFT JOINed on them;
+    * T is read by the visual (a fact table) and there are categories: the visual's own FROM + WHERE,
+      grouped by every category expression, joined back on them (null-safe);
+    * otherwise (a card, or a category that doesn't filter T) one value for the whole selection, a
+      one-row derived table CROSS JOINed in.
+
+    A join and never a subquery: Teradata rejects subqueries inside an aggregate's argument. The
+    joined value is unique per group, so it adds no rows; it is also added to GROUP BY so a use
+    outside an aggregate (an IF's condition) is legal."""
     joins: list[str] = []
     repl: dict[str, str] = {}
     used: list[str] = []
+    extra: list[str] = []
+    cats = [c for c in categories if not c.is_value]
+
+    def own_where(table: str) -> list[str] | None:
+        """Predicates leaving T's rows as the slicers do (direct, or through a relationship)."""
+        parts, ps = _draft_where(parameters, {table: "ctx"}, table_map, relationships)
+        used.extend(p for p in ps if p not in used)
+        return parts
+
     for n, (fn, table, col) in enumerate(sorted({c for f in fields for c in f.ctxs}), start=1):
-        if table in aliases:
-            frm = "\n".join(sources)
-            where = "\nWHERE " + " AND ".join(where_parts) if where_parts else ""
-            inner = f"SELECT {fn}({aliases[table]}.{_sql_col(col)}) AS v\nFROM {frm}{where}"
-        else:
+        alias = f"ctx{n}"
+        group_cols = [c for c in cats if c.key[0] == table]
+        if group_cols or table not in aliases:
             if table not in table_map:
                 return None
             try:
                 source = validate_read_only_sql(table_map[table])
             except ValueError:
                 return None
-            preds = []
-            for pname, p in parameters.items():
-                if (p or {}).get("from_slicer"):
-                    _, ptable, pcol = query_ref_parts(p["from_slicer"])
-                    if ptable == table:
-                        preds.append(_param_predicate(f"ctx.{_sql_col(pcol)}", pname, p))
-                        used.append(pname)
-            where = "\nWHERE " + " AND ".join(preds) if preds else ""
-            inner = f"SELECT {fn}(ctx.{_sql_col(col)}) AS v\nFROM {_subquery(source, 'ctx')}{where}"
-        joins.append(f"CROSS JOIN (\n{inner}\n) AS ctx{n}")
-        repl[f"{{CTX:{fn}|{table}|{col}}}"] = f"ctx{n}.v"
-    return joins, repl, list(dict.fromkeys(used))
+            where = own_where(table)
+            w = "\nWHERE " + " AND ".join(where) if where else ""
+            keys = [f"ctx.{_sql_col(c.key[1])} AS k{i}" for i, c in enumerate(group_cols, start=1)]
+            grp = "\nGROUP BY " + ", ".join(str(i) for i in range(1, len(keys) + 1)) if keys else ""
+            inner = (f"SELECT {', '.join(keys + [f'{fn}(ctx.{_sql_col(col)}) AS v'])}\n"
+                     f"FROM {_subquery(source, 'ctx')}{w}{grp}")
+            on = " AND ".join(f"{alias}.k{i} = {c.expr}" for i, c in enumerate(group_cols, start=1))
+        else:
+            frm = "\n".join(sources)
+            w = "\nWHERE " + " AND ".join(where_parts) if where_parts else ""
+            keys = [f"{c.expr} AS k{i}" for i, c in enumerate(cats, start=1)]
+            grp = "\nGROUP BY " + ", ".join(str(i) for i in range(1, len(keys) + 1)) if keys else ""
+            inner = (f"SELECT {', '.join(keys + [f'{fn}({aliases[table]}.{_sql_col(col)}) AS v'])}\n"
+                     f"FROM {frm}{w}{grp}")
+            on = " AND ".join(f"({alias}.k{i} = {c.expr} OR ({alias}.k{i} IS NULL AND {c.expr} IS NULL))"
+                              for i, c in enumerate(cats, start=1))
+            group_cols = cats
+        if group_cols:
+            joins.append(f"LEFT JOIN (\n{inner}\n) AS {alias} ON {on}")
+            extra.append(f"{alias}.v")
+        else:
+            joins.append(f"CROSS JOIN (\n{inner}\n) AS {alias}")
+        repl[f"{{CTX:{fn}|{table}|{col}}}"] = f"{alias}.v"
+    return joins, repl, used, extra
 
 
 _SELMIN_RE = re.compile(r"\{SELMIN:([^|}]+)\|([^}]+)\}")
@@ -1869,6 +1896,8 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         return None
     fields: list[_Field] = []
     for role, refs in (v.get("projections") or {}).items():
+        if role.lower() == "tooltips":       # only shown on hover; the renderer has no place for them
+            continue
         for ref in refs or []:
             f = _resolve_field(role, ref, measures)
             if f is None:
@@ -1886,22 +1915,23 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     sources, aliases = built
     where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
 
-    def expand(fs: list[_Field], srcs: list[str], als: dict[str, str],
-               arm_where: list[str] | None = None) -> tuple[list[str], list[str]] | None:
-        """Resolve selection-dependent markers (`_expand_selmins`) in `fs`' expressions in place;
-        returns the sources with the extra joins and the slicer parameters they use."""
+    def expand(fs: list[_Field], srcs: list[str], als: dict[str, str], arm_where: list[str] | None = None,
+               cats: list[_Field] | None = None) -> tuple[list[str], list[str], list[str]] | None:
+        """Resolve selection-dependent markers (`_expand_selmins`, `_expand_ctxs`) in `fs`' expressions
+        in place; returns the sources with the extra joins, the slicer parameters they use and
+        the extra GROUP BY terms."""
         if not any(f.selmins or f.ctxs for f in fs):
-            return srcs, []
+            return srcs, [], []
         done = _expand_selmins(fs, als, table_map, relationships, parameters)
         ctx = _expand_ctxs(fs, als, srcs, arm_where if arm_where is not None else where_parts,
-                           table_map, parameters)
+                           table_map, parameters, categories if cats is None else cats, relationships)
         if done is None or ctx is None:
             return None
         joins, repl, used = done
-        cjoins, crepl, cused = ctx
+        cjoins, crepl, cused, extra = ctx
         for f in fs:
             f.expr = _CTX_RE.sub(lambda m: crepl[m.group(0)], _SELMIN_RE.sub(lambda m: repl[m.group(0)], f.expr))
-        return srcs + joins + cjoins, used + [u for u in cused if u not in used]
+        return srcs + joins + cjoins, used + [u for u in cused if u not in used], extra
 
     sort = v.get("sort")
 
@@ -1917,6 +1947,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         return None
 
     # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
+    single_extra: list[str] = []
     multi_arm = kind in _CHART_KINDS and len(values) > 1 and len(categories) == 1 and kind != "pie"
     if not multi_arm:
         done = expand(fields, sources, aliases)
@@ -1924,16 +1955,19 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             return None
         sources = done[0]
         params_used += [p for p in done[1] if p not in params_used]
+        single_extra = done[2]
 
     def assemble(select_parts: list[str], group_positions: list[int], order: str = "",
-                 sources_: list[str] | None = None, where_: list[str] | None = None) -> str:
+                 sources_: list[str] | None = None, where_: list[str] | None = None,
+                 extra_group: list[str] | None = None) -> str:
         sql = "SELECT " + ", ".join(select_parts) + "\nFROM " + "\n".join(sources_ or sources)
         if where_ is None:
             where_ = where_parts
         if where_:
             sql += "\nWHERE " + " AND ".join(where_)
         if group_positions:
-            sql += "\nGROUP BY " + ", ".join(str(p) for p in group_positions)
+            sql += "\nGROUP BY " + ", ".join([str(p) for p in group_positions]
+                                              + (single_extra if extra_group is None else extra_group))
         return sql + order
 
     if kind in ("card", "gauge"):
@@ -1979,17 +2013,18 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships)
             all_params += [p for p in arm_params if p not in all_params]
             arm_field = replace(f)
-            done = expand([arm_field], arm_sources, arm_aliases, arm_where)
+            done = expand([arm_field], arm_sources, arm_aliases, arm_where, categories)
             if done is None:
                 return None
             arm_sources = done[0]
+            arm_extra = done[2]
             all_params += [p for p in done[1] if p not in all_params]
             f = arm_field
             name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
             label = name.replace("'", "''")
             arms.append(assemble([f"{categories[0].expr} AS category",
                                   f"'{label}' AS series",
-                                  f"{f.expr} AS value"], [1, 2], "", arm_sources, arm_where))
+                                  f"{f.expr} AS value"], [1, 2], "", arm_sources, arm_where, arm_extra))
         # a sort on the category applies to the whole union (column 1)
         return "\nUNION ALL\n".join(arms) + _order_by(sort, {categories[0].key: 1}), all_params
 
@@ -2017,6 +2052,8 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
     reasons: list[str] = []
     fields: list[_Field] = []
     for role, refs in (v.get("projections") or {}).items():
+        if role.lower() == "tooltips":
+            continue
         for ref in refs or []:
             _, table, col = query_ref_parts(ref)
             if (table, col) not in measures and model_tables and table not in model_tables:

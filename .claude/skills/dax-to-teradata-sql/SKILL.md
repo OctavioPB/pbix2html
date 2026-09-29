@@ -121,7 +121,12 @@ today (the first also intersects, so a slicer on the same column will differ).
 (`_body`, `_scalar`, `_expand_ctxs`). `MIN/MAX(T[c])` is "the value over the rows the report's filters
 leave in T": a one-row derived table `CROSS JOIN`ed in (`ctxN.v`) — over T's source filtered by the
 slicers on T when the visual doesn't read T (a calendar), over the visual's own FROM + WHERE when it does.
-Unused VARs are dropped. **Exact only for card/kpi**: DAX evaluates it per group in a chart grouped by T
-(e.g. by month); that variant is not implemented, so such charts get a value for the whole selection.
+Unused VARs are dropped. In a **grouped** visual it is evaluated per group, as DAX does:
+a category that is a column of T (calendar month over `MIN(Calendar[Date])`) → T's own source grouped by
+those columns and LEFT JOINed on them; T read by the visual (a fact) → the visual's own FROM + WHERE
+grouped by every category, joined back null-safe; a category that doesn't filter T (gender over the
+calendar) → one value for the whole selection, as in DAX. The joined value is also added to `GROUP BY`
+(unique per group, so no rows change) so an `IF` condition outside an aggregate is legal. Fields in a
+chart's `Tooltips` role are not drafted (they were becoming extra series).
 `Headcount Ending`-style measures (IF over two different fact tables) still stop at the multi-fact guard.
 The generated SQL repeats the visual's WHERE inside the derived table (bind params appear twice).
