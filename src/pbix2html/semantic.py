@@ -17,7 +17,7 @@ import base64
 import json
 import re
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1127,6 +1127,7 @@ class _Sql:
     """A translated fragment plus the Power BI tables it needs joined in."""
     text: str
     tables: set[str] = field(default_factory=set)
+    selmins: set[tuple[str, str]] = field(default_factory=set)   # see _SELMIN_RE
 
 
 def _dax_tokenize(text: str) -> list[tuple[str, str]]:
@@ -1166,6 +1167,7 @@ class _DaxTranslator:
         self.tokens: list[tuple[str, str]] = []
         self.pos = 0
         self._bare_column: str | None = None    # a column used outside any aggregate
+        self.selmins: set[tuple[str, str]] = set()
 
     def translate(self, dax: str) -> _Sql:
         self.tokens, self.pos = _dax_tokenize(dax), 0
@@ -1177,7 +1179,7 @@ class _DaxTranslator:
             # emitting it would produce `SELECT dim.name AS category, fact.amount AS
             # value ... GROUP BY 1`, which the database rejects outright.
             raise _DaxUnsupported(f"{self._bare_column} isn't aggregated")
-        return _Sql(node, set(self.tables))
+        return _Sql(node, set(self.tables), set(self.selmins))
 
     # -- token helpers -------------------------------------------------------
     def _peek(self) -> tuple[str, str] | None:
@@ -1374,6 +1376,10 @@ class _DaxTranslator:
             self._expect("(")
             table = self._table_name()
             self._expect(",")
+            marker = self._selection_min(table)
+            if marker:
+                self._expect(")")
+                return marker
             condition = self._boolean(table)
             self._expect(")")
             return condition
@@ -1381,6 +1387,36 @@ class _DaxTranslator:
             self._take()                        # 'Table' as an argument: all its rows, no filter
             return None
         return self._boolean(None)
+
+    def _selection_min(self, table: str) -> str | None:
+        """`T[c] = MIN(T[c])` inside `FILTER(T, ...)`: "keep the rows of T at the lowest value of c
+        among the rows the report's filters currently leave in T" (a hierarchy slicer's top level).
+        It depends on the selection, so it can't be a column comparison; it becomes a marker that
+        `_draft_visual_sql` expands into a join against T's slicer selection (see `_expand_selmins`)."""
+        start = self.pos
+        try:
+            def ref():
+                kind, text = self._take()
+                if kind not in ("qtable", "ident"):
+                    raise _DaxUnsupported("x")
+                name = text[1:-1].replace("''", "'") if kind == "qtable" else text
+                kb, tb = self._take()
+                if kb != "bracket":
+                    raise _DaxUnsupported("x")
+                return name, tb[1:-1].strip()
+            t1, c1 = ref()
+            if self._take()[1] not in ("=", "==") or self._take()[1].upper() != "MIN":
+                raise _DaxUnsupported("x")
+            self._expect("(")
+            t2, c2 = ref()
+            self._expect(")")
+            if (t1, c1) != (t2, c2) or t1 != table or (self._peek() or ("", ""))[1] != ")":
+                raise _DaxUnsupported("x")
+        except _DaxUnsupported:
+            self.pos = start
+            return None
+        self.selmins.add((table, c1))
+        return f"{{SELMIN:{table}|{c1}}}"
 
     def _boolean(self, table: str | None) -> str:
         left = self._boolean_and(table)
@@ -1454,6 +1490,7 @@ class _Field:
     expr: str                        # ready SQL: an aggregate for a value, a column otherwise
     tables: set[str] = field(default_factory=set)
     key: tuple[str, str] = ("", "")  # (table, column/measure): what a sort definition points at
+    selmins: set[tuple[str, str]] = field(default_factory=set)   # tables whose selection this measure reads
 
 
 def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
@@ -1475,7 +1512,8 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) ->
         translated = translate_dax(measure_dax, measures)
         if translated is None:
             return None
-        return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col))
+        return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col),
+                      set(translated.selmins))
     return _Field(role, False, col, _sql_col(col),
                   f"{_sql_alias(table)}.{_sql_col(col)}", {table}, (table, col))
 
@@ -1587,6 +1625,67 @@ def _filter_edges(relationships: list[dict]) -> list[tuple[str, str, str, str]]:
     return edges
 
 
+def _param_predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str:
+    """`col IN (:p)` for a value slicer; `col >= / <= CAST(:p AS DATE)` for a range bound,
+    wrapped as optional (so `bind` drops it when that bound is empty) unless `wrap` is off
+    (inside a semi-join the whole predicate is already wrapped: markers must not nest)."""
+    bound = (p or {}).get("bound")
+    if not bound:
+        return f"{column} IN (:{pname})"
+    rhs = f"CAST(:{pname} AS DATE)" if (p or {}).get("dtype") == "date" else f":{pname}"
+    text = f"{column} {'>=' if bound == 'from' else '<='} {rhs}"
+    return f"/*if {pname}*/ {text} /*fi {pname}*/" if wrap else text
+
+
+_SELMIN_RE = re.compile(r"\{SELMIN:([^|}]+)\|([^}]+)\}")
+
+
+def _expand_selmins(fields: list["_Field"], aliases: dict[str, str], table_map: dict[str, str],
+                    relationships: list[dict], parameters: dict[str, dict]
+                    ) -> tuple[list[str], dict[str, str], list[str]] | None:
+    """Turns the `{SELMIN:T|c}` markers of `fields` into SQL: (extra LEFT JOINs, {marker: predicate},
+    slicer parameters used), or None when it can't be done (no source query for T, or no
+    relationship from T to a table this visual reads).
+
+    The marker stands for `FILTER(T, T[c] = MIN(T[c]))`: the rows of T at the lowest `c` among those
+    the slicers on T leave. Here that is a derived table of T's key values (DISTINCT, so the join
+    can't duplicate fact rows) LEFT JOINed to the fact table; the measure's CASE WHEN then tests
+    `key IS NOT NULL`. It is a join rather than a subquery in the predicate because Teradata does
+    not accept subqueries inside an aggregate's argument. With no slicer selection the predicates
+    fall away (bind → `1=1`) and c's minimum is taken over all of T, exactly as DAX does."""
+    joins: list[str] = []
+    repl: dict[str, str] = {}
+    used: list[str] = []
+    edges = _filter_edges(relationships)
+    for n, (table, col) in enumerate(sorted({m for f in fields for m in f.selmins}), start=1):
+        if table not in table_map:
+            return None
+        try:
+            source = validate_read_only_sql(table_map[table])
+        except ValueError:
+            return None
+        edge = next(((sc, dst, dc) for src, sc, dst, dc in edges if src == table and dst in aliases), None)
+        if edge is None:
+            return None
+        key_col, dst, dst_col = edge
+        preds = []
+        for pname, p in parameters.items():
+            if not (p or {}).get("from_slicer"):
+                continue
+            _, ptable, pcol = query_ref_parts(p["from_slicer"])
+            if ptable == table:
+                preds.append(_param_predicate(f"hier.{_sql_col(pcol)}", pname, p))
+                used.append(pname)
+        where = "\nWHERE " + " AND ".join(preds) if preds else ""
+        alias = f"selmin{n}"
+        inner = (f"SELECT hier.{_sql_col(key_col)} AS k, hier.{_sql_col(col)} AS lvl, "
+                 f"MIN(hier.{_sql_col(col)}) OVER () AS lvl_min\nFROM {_subquery(source, 'hier')}{where}")
+        joins.append(f"LEFT JOIN (SELECT DISTINCT k FROM (\n{inner}\n) AS h WHERE lvl = lvl_min) AS {alias} "
+                     f"ON {aliases[dst]}.{_sql_col(dst_col)} = {alias}.k")
+        repl[f"{{SELMIN:{table}|{col}}}"] = f"{alias}.k IS NOT NULL"
+    return joins, repl, list(dict.fromkeys(used))
+
+
 def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
                  table_map: dict[str, str] | None = None,
                  relationships: list[dict] | None = None) -> tuple[list[str], list[str]]:
@@ -1603,16 +1702,7 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
     edges = _filter_edges(relationships or [])
     where_parts, params_used = [], []
 
-    def predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str:
-        """`col IN (:p)` for a value slicer; `col >= / <= CAST(:p AS DATE)` for a range bound,
-        wrapped as optional (so `bind` drops it when that bound is empty) unless `wrap` is off
-        (inside a semi-join the whole predicate is already wrapped: markers must not nest)."""
-        bound = (p or {}).get("bound")
-        if not bound:
-            return f"{column} IN (:{pname})"
-        rhs = f"CAST(:{pname} AS DATE)" if (p or {}).get("dtype") == "date" else f":{pname}"
-        text = f"{column} {'>=' if bound == 'from' else '<='} {rhs}"
-        return f"/*if {pname}*/ {text} /*fi {pname}*/" if wrap else text
+    predicate = _param_predicate
 
     for pname, p in parameters.items():
         slicer_ref = (p or {}).get("from_slicer")
@@ -1679,6 +1769,19 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     sources, aliases = built
     where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
 
+    def expand(fs: list[_Field], srcs: list[str], als: dict[str, str]) -> tuple[list[str], list[str]] | None:
+        """Resolve selection-dependent markers (`_expand_selmins`) in `fs`' expressions in place;
+        returns the sources with the extra joins and the slicer parameters they use."""
+        if not any(f.selmins for f in fs):
+            return srcs, []
+        done = _expand_selmins(fs, als, table_map, relationships, parameters)
+        if done is None:
+            return None
+        joins, repl, used = done
+        for f in fs:
+            f.expr = _SELMIN_RE.sub(lambda m: repl[m.group(0)], f.expr)
+        return srcs + joins, used
+
     sort = v.get("sort")
 
     # Aggregates over several fact tables cannot share one joined FROM: every extra table
@@ -1691,6 +1794,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     if len(value_tables(values)) > 1 and not (kind in _CHART_KINDS and len(values) > 1
                                               and all(len(f.tables) == 1 for f in values)):
         return None
+
+    # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
+    multi_arm = kind in _CHART_KINDS and len(values) > 1 and len(categories) == 1 and kind != "pie"
+    if not multi_arm:
+        done = expand(fields, sources, aliases)
+        if done is None:
+            return None
+        sources = done[0]
+        params_used += [p for p in done[1] if p not in params_used]
 
     def assemble(select_parts: list[str], group_positions: list[int], order: str = "",
                  sources_: list[str] | None = None, where_: list[str] | None = None) -> str:
@@ -1745,6 +1857,13 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             arm_sources, arm_aliases = arm_built
             arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships)
             all_params += [p for p in arm_params if p not in all_params]
+            arm_field = replace(f)
+            done = expand([arm_field], arm_sources, arm_aliases)
+            if done is None:
+                return None
+            arm_sources = done[0]
+            all_params += [p for p in done[1] if p not in all_params]
+            f = arm_field
             name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
             label = name.replace("'", "''")
             arms.append(assemble([f"{categories[0].expr} AS category",
@@ -1792,7 +1911,7 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
     if not fields:
         return ["shape"]
     tables = list(dict.fromkeys(t for f in fields for t in f.tables))
-    missing = [t for t in tables if t not in table_map]
+    missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins})] if t not in table_map]
     if missing:
         return [f"no_source:{t}" for t in missing]
     if len(tables) > 1 and _find_join_path(tables, relationships) is None:

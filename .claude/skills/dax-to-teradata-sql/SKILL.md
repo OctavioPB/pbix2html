@@ -98,3 +98,19 @@ columns`; `kpi → value, target`. Aliases always lowercase.
 - **Slicer on a table the visual doesn't read** (typically a calendar or a dimension): applied as
   a semi-join through one relationship, wrapped in `/*if p*/ ... /*fi p*/`; `bind` removes the whole
   predicate when `p` is empty.
+
+## Selection-dependent measures: `FILTER(T, T[c] = MIN(T[c]))`
+
+Recognised automatically (`semantic._DaxTranslator._selection_min`, `_expand_selmins`). Meaning: keep
+the rows of `T` at the lowest `c` among the rows the slicers on `T` leave (a hierarchy slicer's top
+level; with no selection, the lowest level of the whole table). Emitted as a `LEFT JOIN` of a
+`DISTINCT` key set (`MIN(c) OVER ()` over the slicer-filtered `T`) to the fact table, and the
+measure's `CASE WHEN selminN.k IS NOT NULL`. A join, not a subquery, because Teradata rejects
+subqueries inside an aggregate's argument. Needs a source query for `T` and a relationship from `T`
+to the fact table; otherwise the visual stays manual. `MAX`, other columns, or any other shape are
+not matched. **Unverified against Power BI numbers**: the reading (flattened path table, one row
+per leader/ancestor pair) is inferred from the model, so validate one card per report.
+
+Note the two CALCULATE filter forms differ: `Calculate([M], T[c] = "x")` overrides a slicer on `c`;
+`CALCULATE([M], FILTER(T, T[c] = "x"))` intersects with it. Only the second is translated exactly
+today (the first also intersects, so a slicer on the same column will differ).

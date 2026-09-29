@@ -124,6 +124,7 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - CSS `z-index` must be an integer (`3000.0` is silently dropped, which hid slicers behind panels).
 - Mapping: 54 data visuals, 44 drafted. Still manual: selection-dependent measures (`MIN(level)` over a
   slicer, `VAR` + `min(Calendar[Date])`), one table not connected to any fact (`not_connected`), 24 of 38 measures.
+- `FILTER(T, T[c] = MIN(T[c]))` (selection-dependent "top level") is now drafted as a DISTINCT-key LEFT JOIN; unverified against real numbers. Still manual: `MIN/MAX(Calendar[Date])` measures (next: card context from the date slicer's `_from/_to`).
 - Not yet verified: 100%-stacked charts in the renderer, MobileState (ignored), storage-mode info in the mapping report.
 
 ## Phase 1 — End-to-end pilot (1 report)
