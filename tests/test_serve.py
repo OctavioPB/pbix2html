@@ -147,3 +147,24 @@ def test_slicer_options_endpoint(tmp_path, monkeypatch):
     # an id the yaml doesn't list (a yaml older than the HTML): skipped with a reason, not "HTTP 404"
     r = c.get("/reports/S/slicers/nope", headers={"X-Authenticated-User": "u"})
     assert r.status_code == 200 and r.json()["skipped"] is True and "slicers:" in r.json()["note"]
+
+
+def test_unreachable_teradata_is_503_and_a_sql_error_is_500(tmp_path, monkeypatch):
+    _write_slicer_report(tmp_path, monkeypatch)
+    from pbix2html.query import FakeBackend
+
+    class Failing(FakeBackend):
+        def execute(self, sql, values, proxy_user=None):
+            raise RuntimeError(self.message)
+
+    be = Failing(fixtures={}, default=None)
+    serve.app.state.backend = be
+    c = TestClient(serve.app)
+    h = {"X-Authenticated-User": "u"}
+    be.message = "[Teradata SQL Driver] Hostname lookup failed for tdprd.td.teradata.com"
+    r = c.get("/reports/S/slicers/s1", headers=h)
+    assert r.status_code == 503 and "network / VPN" in r.json()["detail"]
+    be.message = "[Teradata SQL Driver] [Error 503] Lost connection to the Teradata Database"
+    assert c.get("/reports/S/slicers/s1", headers=h).status_code == 503
+    be.message = "[Teradata Database] [Error 3706] Syntax error: ordered analytical functions"
+    assert c.get("/reports/S/slicers/s1", headers=h).status_code == 500

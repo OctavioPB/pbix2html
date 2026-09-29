@@ -306,6 +306,13 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > (wrong table/column in a drafted SQL, no access to the view, a SQL syntax error): copy the query
 > from the yaml and run it in a SQL client.
 >
+> **Visual shows `HTTP 503`?** Teradata could not be reached at all (`Hostname lookup failed`, `Lost connection`): check the
+> VPN / network; nothing is wrong with the query. A 500 is the database or the SQL.
+>
+> **Old drafted queries still fail after an update?** The tool repairs the known cases when it sends a query. To draft again
+> what the tool wrote earlier (your own edits are never touched, a backup is kept): `pbix2html redraft <pbix>`, or tick
+> *also redo queries the tool drafted earlier* in the panel.
+>
 > **A slicer shows `HTTP 404`?** Older versions answered 404 when the yaml had no `slicers:` entry for
 > that slicer (a yaml written before slicers became widgets). It now answers "skipped" and the widget
 > takes typed values; to get real dropdowns run the panel's auto-draft (it adds the missing entries) or

@@ -448,6 +448,10 @@ def _inline_table_data(expression: str) -> tuple[list[str], list[bool], list[lis
     return names, numeric, rows
 
 
+# Teradata error 3888: every SELECT of a UNION must reference a table, so a literal-only arm gets a one-row source
+_ONE_ROW = " FROM (SELECT 1 AS one) AS one_row"
+
+
 def _inline_table_sql(expression: str) -> str | None:
     """The rows of an "Enter Data" table (`_inline_table_data`) rebuilt as `SELECT ... UNION ALL
     SELECT ...`, so the table needs no Teradata source."""
@@ -472,7 +476,7 @@ def _inline_table_sql(expression: str) -> str | None:
             if n == 0:   # the first arm fixes each column's type
                 text = f"CAST({text} AS {'DECIMAL(18,6)' if numeric[i] else f'VARCHAR({max(widths[i], 1)})'})"
             parts.append(f"{text} AS {_sql_col(names[i])}" if n == 0 else text)
-        arms.append("SELECT " + ", ".join(parts))
+        arms.append("SELECT " + ", ".join(parts) + _ONE_ROW)
     return "\nUNION ALL\n".join(arms)
 
 
@@ -1102,6 +1106,78 @@ def quote_reserved_aliases(sql: str) -> str:
     for start, end in sorted(set(edits), reverse=True):
         sql = f'{sql[:start]}"{sql[start:end].lower()}"{sql[end:]}'
     return sql
+
+
+_SET_OP_RE = re.compile(r"(?i)\b(UNION(?:\s+ALL)?|INTERSECT|EXCEPT|MINUS)\b")
+_SELECT_RE = re.compile(r"(?i)\bSEL(?:ECT)?\b")
+_FROM_RE = re.compile(r"(?i)\bFROM\b")
+_TRAILING_SET_OP_RE = re.compile(r"(?i)\b(?:UNION(?:\s+ALL)?|INTERSECT|EXCEPT|MINUS)$")
+_LEGACY_TOPN_RE = re.compile(r"\) AS t QUALIFY RANK\(\) OVER \(ORDER BY a (ASC|DESC)\) <= (\d+)\)")
+
+
+def add_from_to_bare_selects(sql: str) -> str:
+    """Teradata error 3888: "A SELECT for a UNION, INTERSECT or MINUS must reference a table". An
+    inline ("Enter Data") table saved in an older table map is `SELECT 'E', 'Employee' UNION ALL SELECT ...`;
+    every arm of a set operation without a FROM gets a one-row source. Only arms that are part of a set
+    operation are touched."""
+    code, pos = _sql_scan(sql)
+    depth, d = [], 0
+    for ch in code:
+        if ch == ")":
+            d -= 1
+        depth.append(d)
+        if ch == "(":
+            d += 1
+    edits: list[int] = []
+    for m in _SELECT_RE.finditer(code):
+        dm, start = depth[m.start()], m.end()
+        end = len(code)
+        for i in range(start, len(code)):
+            if depth[i] < dm:
+                end = i
+                break
+            if depth[i] == dm and _SET_OP_RE.match(code, i) and (i == 0 or not code[i - 1].isalnum()):
+                end = i
+                break
+        before = code[:m.start()].rstrip()
+        prev_op = bool(_TRAILING_SET_OP_RE.search(before)) and depth[len(before) - 1] == dm
+        in_set_op = prev_op or (end < len(code) and _SET_OP_RE.match(code, end) is not None)
+        arm = code[start:end]
+        has_from = any(depth[start + k.start()] == dm for k in _FROM_RE.finditer(arm))
+        if in_set_op and not has_from:
+            cut = end
+            while cut > start and code[cut - 1].isspace():
+                cut -= 1
+            edits.append(pos[cut] if cut < len(pos) else len(sql))
+            if cut >= len(pos):
+                edits[-1] = len(sql)
+    for at in sorted(set(edits), reverse=True):
+        sql = sql[:at] + _ONE_ROW + sql[at:]
+    return sql
+
+
+def rewrite_legacy_top_n(sql: str) -> str:
+    """Top N filters drafted before Teradata rejected `IN (SELECT k FROM (...) t QUALIFY RANK() OVER
+    (ORDER BY a DIR) <= N)` (error 3706: no ordered analytics in a subquery) → the counted form the
+    drafter writes now. The old shape is exact, so the rewrite is exact."""
+    for m in reversed(list(_LEGACY_TOPN_RE.finditer(sql))):
+        head = "SELECT k FROM (\n"
+        start = sql.rfind(head, 0, m.start())
+        if start < 0:
+            continue
+        inner = sql[start + len(head):m.start()].rstrip("\n")
+        better = "<" if m.group(1) == "ASC" else ">"
+        new = (f"SELECT t.k FROM (\n{inner}\n) AS t WHERE (SELECT COUNT(*) FROM (\n{inner}\n) AS u "
+               f"WHERE u.a {better} t.a) < {m.group(2)})")
+        sql = sql[:start] + new + sql[m.end():]
+    return sql
+
+
+def fix_teradata_sql(sql: str) -> str:
+    """Everything `TeradataBackend` fixes before sending SQL that an earlier version of the drafter (or a
+    person) wrote: a reserved word as a name, a window function in a Top N subquery, a set-operation arm with
+    no table. Idempotent; SQL that has none of these comes back unchanged."""
+    return quote_reserved_aliases(add_from_to_bare_selects(rewrite_legacy_top_n(sql)))
 
 
 def _ident(name: str) -> str:
@@ -2946,7 +3022,8 @@ def slicers_section(layout: dict, parameters: dict[str, dict], table_map: dict[s
     return out
 
 
-def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict[str, Any]:
+def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | None = None,
+             redraft: bool = False) -> dict[str, Any]:
     """Fills in what's still missing in an existing metrics yaml, touching nothing that
     already has an answer. Returns {"raw": <updated>, "filled": [...], "already": [...],
     "still_todo": [...], "parameters_added": [...], "slicers_added": [...]}.
@@ -2956,6 +3033,10 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
     the only way to pick up a better draft — including after the translator itself
     improves. Here, a visual whose `sql` someone has actually written is left exactly as
     it is, and only the `TODO`s get a draft.
+
+    With `redraft`, a visual whose notes still say "Auto-drafted" is drafted again too: what an earlier version of
+    the drafter wrote (before filters, Top N, reserved words...) is replaced by the current draft, while SQL a
+    person wrote (no such note) is still left alone. A visual the drafter can't do any more keeps its old SQL.
 
     Each visual is drafted against its *current* `kind` in the yaml, not the one the
     .pbix implies — someone who retyped a custom visual as a `column` in the editor
@@ -2995,7 +3076,8 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
         kind = entry.get("kind") or KIND_MAP.get((by_id.get(vid) or {}).get("type", ""), "unsupported")
         if kind in NO_DATA_KINDS:
             continue
-        if not is_unwritten_sql(entry.get("sql")):
+        auto = "Auto-drafted" in (entry.get("notes") or "")
+        if not is_unwritten_sql(entry.get("sql")) and not (redraft and auto):
             already.append(vid)
             continue
         source = by_id.get(vid)
