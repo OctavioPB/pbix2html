@@ -114,3 +114,14 @@ per leader/ancestor pair) is inferred from the model, so validate one card per r
 Note the two CALCULATE filter forms differ: `Calculate([M], T[c] = "x")` overrides a slicer on `c`;
 `CALCULATE([M], FILTER(T, T[c] = "x"))` intersects with it. Only the second is translated exactly
 today (the first also intersects, so a slicer on the same column will differ).
+
+## Selection-dependent dates: `MIN/MAX(T[c])`, `VAR`, month comparisons
+
+`VAR x = <scalar> RETURN …`, `IF`, `MONTH/YEAR/DAY`, `CONCATENATE`/`&` and `MIN/MAX(T[c])` are translated
+(`_body`, `_scalar`, `_expand_ctxs`). `MIN/MAX(T[c])` is "the value over the rows the report's filters
+leave in T": a one-row derived table `CROSS JOIN`ed in (`ctxN.v`) — over T's source filtered by the
+slicers on T when the visual doesn't read T (a calendar), over the visual's own FROM + WHERE when it does.
+Unused VARs are dropped. **Exact only for card/kpi**: DAX evaluates it per group in a chart grouped by T
+(e.g. by month); that variant is not implemented, so such charts get a value for the whole selection.
+`Headcount Ending`-style measures (IF over two different fact tables) still stop at the multi-fact guard.
+The generated SQL repeats the visual's WHERE inside the derived table (bind params appear twice).

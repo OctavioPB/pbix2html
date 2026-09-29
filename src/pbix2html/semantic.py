@@ -1128,6 +1128,7 @@ class _Sql:
     text: str
     tables: set[str] = field(default_factory=set)
     selmins: set[tuple[str, str]] = field(default_factory=set)   # see _SELMIN_RE
+    ctxs: set[tuple[str, str, str]] = field(default_factory=set)  # (MIN|MAX, table, column), see _CTX_RE
 
 
 def _dax_tokenize(text: str) -> list[tuple[str, str]]:
@@ -1168,10 +1169,12 @@ class _DaxTranslator:
         self.pos = 0
         self._bare_column: str | None = None    # a column used outside any aggregate
         self.selmins: set[tuple[str, str]] = set()
+        self.ctxs: set[tuple[str, str, str]] = set()
+        self._vars: dict[str, str] = {}
 
     def translate(self, dax: str) -> _Sql:
         self.tokens, self.pos = _dax_tokenize(dax), 0
-        node = self._expression([])
+        node = self._body([])
         if self.pos != len(self.tokens):
             raise _DaxUnsupported(f"trailing tokens: {self.tokens[self.pos:][:3]}")
         if self._bare_column:
@@ -1179,7 +1182,9 @@ class _DaxTranslator:
             # emitting it would produce `SELECT dim.name AS category, fact.amount AS
             # value ... GROUP BY 1`, which the database rejects outright.
             raise _DaxUnsupported(f"{self._bare_column} isn't aggregated")
-        return _Sql(node, set(self.tables), set(self.selmins))
+        # a VAR that is never used must not drag its table into the query
+        ctxs = {c for c in self.ctxs if f"{{CTX:{c[0]}|{c[1]}|{c[2]}}}" in node}
+        return _Sql(node, set(self.tables), set(self.selmins), ctxs)
 
     # -- token helpers -------------------------------------------------------
     def _peek(self) -> tuple[str, str] | None:
@@ -1197,6 +1202,82 @@ class _DaxTranslator:
             raise _DaxUnsupported(f"expected {value!r}, got {text!r}")
 
     # -- grammar -------------------------------------------------------------
+    def _body(self, filters: list[str]) -> str:
+        """A measure body: optional `VAR name = <scalar>` lines, `RETURN`, then the expression.
+        A variable holds a scalar (a column, MIN/MAX of a column over the selection, a date part);
+        it is substituted where used, since SQL has no variables."""
+        while (tok := self._peek()) and tok[0] == "ident" and tok[1].upper() == "VAR":
+            self._take()
+            kind, name = self._take()
+            if kind != "ident":
+                raise _DaxUnsupported("VAR needs a name")
+            self._expect("=")
+            self._vars[name.lower()] = self._scalar()
+        if self._vars:
+            tok = self._take()
+            if tok[1].upper() != "RETURN":
+                raise _DaxUnsupported("VAR without RETURN")
+        return self._expression(filters)
+
+    def _scalar(self) -> str:
+        """A scalar expression (the operands of a filter comparison, or a VAR): literals, variables,
+        columns, MONTH/YEAR/DAY, CONCATENATE / `&`, TODAY, and MIN/MAX of a column, which is the
+        value over the report's current selection (a `{CTX:...}` marker, see `_expand_ctxs`)."""
+        left = self._scalar_primary()
+        while (tok := self._peek()) and tok[1] == "&":
+            self._take()
+            left = f"({_as_text(left)} || {_as_text(self._scalar_primary())})"
+        return left
+
+    def _scalar_primary(self) -> str:
+        kind, text = self._take()
+        if kind == "number":
+            return text
+        if kind == "string":
+            return "'" + text[1:-1].replace('""', '"').replace("'", "''") + "'"
+        if kind == "op" and text == "-":
+            return "-" + self._scalar_primary()
+        if text == "(":
+            inner = self._scalar()
+            self._expect(")")
+            return f"({inner})"
+        if kind == "ident" and (nxt := self._peek()) and nxt[1] == "(":
+            return self._scalar_function(text.upper())
+        if kind == "ident" and text.lower() in self._vars:
+            return self._vars[text.lower()]
+        if kind in ("qtable", "ident") and (nxt := self._peek()) and nxt[0] == "bracket":
+            self._take()
+            table = text[1:-1].replace("''", "'") if kind == "qtable" else text
+            self.tables.add(table)
+            return f"{_sql_alias(table)}.{_sql_col(nxt[1][1:-1].strip())}"
+        raise _DaxUnsupported(f"{text!r} isn't a literal, variable or column")
+
+    def _scalar_function(self, name: str) -> str:
+        self._expect("(")
+        if name in ("TODAY", "NOW"):
+            self._expect(")")
+            return "CURRENT_DATE"
+        if name in ("MIN", "MAX"):
+            table = self._table_name()
+            nxt = self._peek()
+            if not nxt or nxt[0] != "bracket":
+                raise _DaxUnsupported(f"{name} needs a column")
+            self._take()
+            column = nxt[1][1:-1].strip()
+            self._expect(")")
+            self.ctxs.add((name, table, column))
+            return f"{{CTX:{name}|{table}|{column}}}"
+        args = [self._scalar()]
+        while (tok := self._peek()) and tok[1] == ",":
+            self._take()
+            args.append(self._scalar())
+        self._expect(")")
+        if name in ("MONTH", "YEAR", "DAY") and len(args) == 1:
+            return f"EXTRACT({name} FROM {args[0]})"
+        if name == "CONCATENATE" and len(args) == 2:
+            return f"({_as_text(args[0])} || {_as_text(args[1])})"
+        raise _DaxUnsupported(f"{name}() isn't translated in a filter")
+
     def _expression(self, filters: list[str]) -> str:
         left = self._term(filters)
         while (tok := self._peek()) and tok[1] in ("+", "-"):
@@ -1256,15 +1337,17 @@ class _DaxTranslator:
         if expression is None:
             raise _DaxUnsupported(f"measure [{name}] isn't in the model")
         self._resolving.add(name)
-        saved_tokens, saved_pos = self.tokens, self.pos
+        saved_tokens, saved_pos, saved_vars = self.tokens, self.pos, self._vars
+        self._vars = {}
         try:
             self.tokens, self.pos = _dax_tokenize(expression), 0
-            inner = self._expression(filters)
+            inner = self._body(filters)
             if self.pos != len(self.tokens):
                 raise _DaxUnsupported(f"measure [{name}] has trailing tokens")
             return f"({inner})"
         finally:
             self.tokens, self.pos = saved_tokens, saved_pos
+            self._vars = saved_vars
             self._resolving.discard(name)
 
     def _aggregate(self, func: str, filters: list[str]) -> str:
@@ -1311,6 +1394,17 @@ class _DaxTranslator:
             return "CURRENT_DATE"
         if name == "CALCULATE":
             return self._calculate(filters)
+        if name == "IF":
+            self._expect("(")
+            cond = self._boolean(None)
+            branches = []
+            while (tok := self._peek()) and tok[1] == ",":
+                self._take()
+                branches.append(self._expression(filters))
+            self._expect(")")
+            if not 1 <= len(branches) <= 2:
+                raise _DaxUnsupported("IF takes 2 or 3 arguments")
+            return f"(CASE WHEN {cond} THEN {branches[0]} ELSE {branches[1] if len(branches) == 2 else 'NULL'} END)"
         if name in ("ABS", "ROUND", "COALESCE"):
             self._expect("(")
             return f"{name}({', '.join(self._arguments(filters))})"
@@ -1439,35 +1533,11 @@ class _DaxTranslator:
             inner = self._boolean(table)
             self._expect(")")
             return f"({inner})"
-        kind, text = self._take()
-        if kind not in ("qtable", "ident"):
-            raise _DaxUnsupported(f"filter must compare a column, got {text!r}")
-        col_table = text[1:-1].replace("''", "'") if kind == "qtable" else text
-        nxt = self._peek()
-        if not nxt or nxt[0] != "bracket":
-            raise _DaxUnsupported(f"filter on {text!r} isn't a column comparison")
-        self._take()
-        column = nxt[1][1:-1].strip()
+        left = self._scalar()
         op = self._take()[1]
         if op not in _DAX_COMPARISONS:
             raise _DaxUnsupported(f"filter operator {op!r} isn't supported")
-        value = self._filter_value()
-        self.tables.add(col_table)
-        return f"{_sql_alias(col_table)}.{_sql_col(column)} {_DAX_COMPARISONS[op]} {value}"
-
-    def _filter_value(self) -> str:
-        kind, text = self._take()
-        if kind == "number":
-            return text
-        if kind == "op" and text == "-":
-            return "-" + self._filter_value()
-        if kind == "string":
-            return "'" + text[1:-1].replace('""', '"').replace("'", "''") + "'"
-        if kind == "ident" and text.upper() in ("TODAY", "NOW"):
-            self._expect("(")
-            self._expect(")")
-            return "CURRENT_DATE"
-        raise _DaxUnsupported(f"filter compares against {text!r}, not a literal")
+        return f"{left} {_DAX_COMPARISONS[op]} {self._scalar()}"
 
 
 def translate_dax(dax: str, measures: dict[tuple[str, str], str]) -> _Sql | None:
@@ -1491,6 +1561,7 @@ class _Field:
     tables: set[str] = field(default_factory=set)
     key: tuple[str, str] = ("", "")  # (table, column/measure): what a sort definition points at
     selmins: set[tuple[str, str]] = field(default_factory=set)   # tables whose selection this measure reads
+    ctxs: set[tuple[str, str, str]] = field(default_factory=set)  # MIN/MAX of a column over the selection
 
 
 def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
@@ -1513,7 +1584,7 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) ->
         if translated is None:
             return None
         return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col),
-                      set(translated.selmins))
+                      set(translated.selmins), set(translated.ctxs))
     return _Field(role, False, col, _sql_col(col),
                   f"{_sql_alias(table)}.{_sql_col(col)}", {table}, (table, col))
 
@@ -1635,6 +1706,52 @@ def _param_predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str
     rhs = f"CAST(:{pname} AS DATE)" if (p or {}).get("dtype") == "date" else f":{pname}"
     text = f"{column} {'>=' if bound == 'from' else '<='} {rhs}"
     return f"/*if {pname}*/ {text} /*fi {pname}*/" if wrap else text
+
+
+def _as_text(sql: str) -> str:
+    return f"TRIM(CAST({sql} AS VARCHAR(40)))"
+
+
+_CTX_RE = re.compile(r"\{CTX:(MIN|MAX)\|([^|}]+)\|([^}]+)\}")
+
+
+def _expand_ctxs(fields: list["_Field"], aliases: dict[str, str], sources: list[str], where_parts: list[str],
+                 table_map: dict[str, str], parameters: dict[str, dict]
+                 ) -> tuple[list[str], dict[str, str], list[str]] | None:
+    """`MIN/MAX(T[c])` as a scalar: the value over the rows the report's filters leave in T.
+
+    T is read by the visual: taken over the visual's own FROM + WHERE. T is not (a calendar behind a
+    date slicer): taken over T's source query filtered by the slicers on T. Either way a one-row
+    derived table CROSS JOINed in (no subquery inside an aggregate, which Teradata rejects, and
+    no fan-out); the marker becomes `ctxN.v`. Evaluated for the whole visual, so it is exact for a
+    card/kpi; in a visual grouped by that table DAX evaluates it per group instead."""
+    joins: list[str] = []
+    repl: dict[str, str] = {}
+    used: list[str] = []
+    for n, (fn, table, col) in enumerate(sorted({c for f in fields for c in f.ctxs}), start=1):
+        if table in aliases:
+            frm = "\n".join(sources)
+            where = "\nWHERE " + " AND ".join(where_parts) if where_parts else ""
+            inner = f"SELECT {fn}({aliases[table]}.{_sql_col(col)}) AS v\nFROM {frm}{where}"
+        else:
+            if table not in table_map:
+                return None
+            try:
+                source = validate_read_only_sql(table_map[table])
+            except ValueError:
+                return None
+            preds = []
+            for pname, p in parameters.items():
+                if (p or {}).get("from_slicer"):
+                    _, ptable, pcol = query_ref_parts(p["from_slicer"])
+                    if ptable == table:
+                        preds.append(_param_predicate(f"ctx.{_sql_col(pcol)}", pname, p))
+                        used.append(pname)
+            where = "\nWHERE " + " AND ".join(preds) if preds else ""
+            inner = f"SELECT {fn}(ctx.{_sql_col(col)}) AS v\nFROM {_subquery(source, 'ctx')}{where}"
+        joins.append(f"CROSS JOIN (\n{inner}\n) AS ctx{n}")
+        repl[f"{{CTX:{fn}|{table}|{col}}}"] = f"ctx{n}.v"
+    return joins, repl, list(dict.fromkeys(used))
 
 
 _SELMIN_RE = re.compile(r"\{SELMIN:([^|}]+)\|([^}]+)\}")
@@ -1769,18 +1886,22 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     sources, aliases = built
     where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
 
-    def expand(fs: list[_Field], srcs: list[str], als: dict[str, str]) -> tuple[list[str], list[str]] | None:
+    def expand(fs: list[_Field], srcs: list[str], als: dict[str, str],
+               arm_where: list[str] | None = None) -> tuple[list[str], list[str]] | None:
         """Resolve selection-dependent markers (`_expand_selmins`) in `fs`' expressions in place;
         returns the sources with the extra joins and the slicer parameters they use."""
-        if not any(f.selmins for f in fs):
+        if not any(f.selmins or f.ctxs for f in fs):
             return srcs, []
         done = _expand_selmins(fs, als, table_map, relationships, parameters)
-        if done is None:
+        ctx = _expand_ctxs(fs, als, srcs, arm_where if arm_where is not None else where_parts,
+                           table_map, parameters)
+        if done is None or ctx is None:
             return None
         joins, repl, used = done
+        cjoins, crepl, cused = ctx
         for f in fs:
-            f.expr = _SELMIN_RE.sub(lambda m: repl[m.group(0)], f.expr)
-        return srcs + joins, used
+            f.expr = _CTX_RE.sub(lambda m: crepl[m.group(0)], _SELMIN_RE.sub(lambda m: repl[m.group(0)], f.expr))
+        return srcs + joins + cjoins, used + [u for u in cused if u not in used]
 
     sort = v.get("sort")
 
@@ -1858,7 +1979,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships)
             all_params += [p for p in arm_params if p not in all_params]
             arm_field = replace(f)
-            done = expand([arm_field], arm_sources, arm_aliases)
+            done = expand([arm_field], arm_sources, arm_aliases, arm_where)
             if done is None:
                 return None
             arm_sources = done[0]
@@ -1911,7 +2032,7 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
     if not fields:
         return ["shape"]
     tables = list(dict.fromkeys(t for f in fields for t in f.tables))
-    missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins})] if t not in table_map]
+    missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins} | {c[1] for f in fields for c in f.ctxs})] if t not in table_map]
     if missing:
         return [f"no_source:{t}" for t in missing]
     if len(tables) > 1 and _find_join_path(tables, relationships) is None:
