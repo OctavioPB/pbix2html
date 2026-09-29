@@ -6,6 +6,8 @@
 {"columns": ["category", "value"], "rows": [["North", 0.21], ["South", 0.18]]}
 ```
 
+On Teradata write the `value` column as `AS "value"` (`value` is a reserved word; `AS value` is error 3707).
+
 The **column names are the contract**. The renderer looks columns up by name, not by
 position, so a block with the right numbers under the wrong names draws an empty chart —
 that's the most common reason a converted report looks broken.

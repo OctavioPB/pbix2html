@@ -166,3 +166,14 @@ published JSON schemas (see ADR-008). Unverified: Top N tie handling (`RANK` kee
 `hh` or before `ss`, month otherwise; 12-hour `AM/PM` isn't translated). `TIME(h,m,s)` with literal integers →
 `INTERVAL 'hh:mm:ss' HOUR TO SECOND`. `NOW()` → `CURRENT_TIMESTAMP(0)` (keeps the time), `TODAY()` → `CURRENT_DATE`.
 Time zone: Power BI's `NOW()` is UTC in the service and local in Desktop; the Teradata session zone decides here.
+
+## Reserved words used as names (found on a real Teradata, 2026-09-29)
+
+`AS value` → Teradata error 3707; the drafted SQL passed sqlglot's Teradata parser, so **parsing with sqlglot is
+not proof the SQL runs**. Output aliases and any Power BI column named like a reserved word are double-quoted
+(`_TERADATA_RESERVED_COLS`, extended with value, values, min, max, sum, avg, count, user, percent, rank, format,
+title, index, order, group, default, current, session, role, size, top, comment, end, over, range, row, rows,
+precision, public, zone, and the date/time words); `quote_reserved_aliases` fixes a bare `AS value|min|max` at run
+time. Quoting is harmless in a Teradata-mode session (names are case-insensitive); an ANSI-mode session would
+make quoted names case-sensitive. Expect further Teradata-only rejections until the drafts are run against a real
+system: send the error text back so the pattern can be fixed and tested.

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .config import settings
-from .semantic import ReportSpec, VisualSpec
+from .semantic import ReportSpec, VisualSpec, quote_reserved_aliases
 
 CACHE_DIR = Path("cache")
 
@@ -129,7 +129,9 @@ class TeradataBackend:
                 if proxy:
                     # Trusted session: Teradata evaluates secure views/RLS as `proxy`.
                     cur.execute(f"SET QUERY_BAND = 'PROXYUSER={_safe_ident(proxy)};APPNAME=pbix2html;' FOR SESSION;")
-                cur.execute(sql, values)
+                # `AS value` is a syntax error on Teradata (reserved word): yamls drafted before the drafter
+                # quoted it, hand-written SQL and the template still say it
+                cur.execute(quote_reserved_aliases(sql), values)
                 columns = [d[0].lower() for d in cur.description]
                 rows = [[_jsonable(c) for c in r] for r in cur.fetchall()]
                 if proxy:

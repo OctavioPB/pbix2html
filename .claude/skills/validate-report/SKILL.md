@@ -37,6 +37,7 @@ For every visual with `sql` in the yaml:
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
+| `Error 3707 … between the 'AS' keyword and the 'value' keyword` | `AS value` unquoted (reserved word) | write `AS "value"`; fixed in the drafter and at run time |
 | Every value × k | A JOIN duplicates rows | relationships in `model.json`; add `DISTINCT` on the dimension |
 | Missing categories | Power BI shows "(Blank)" or filters nulls differently | `HAVING`, `COALESCE` |
 | Extra/missing period | date filter `<` vs `<=`; timezone | `reference_sql` |

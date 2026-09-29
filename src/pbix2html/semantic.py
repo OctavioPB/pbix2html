@@ -1037,8 +1037,27 @@ def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
 
 # Teradata reserved words a Power BI column is commonly named after (a calendar's Date / Year /
 # Month...). Unquoted they are a syntax error as an identifier, so they are always double-quoted.
-_TERADATA_RESERVED_COLS = frozenset(
-    {"date", "day", "month", "year", "hour", "minute", "second", "time", "timestamp"})
+# `value` is the renderer's own column contract and is reserved too: `SELECT SUM(x) AS value` is a
+# Teradata syntax error (3707, "expected a name ... between AS and value"), which sqlglot's Teradata
+# dialect does not catch. Over-quoting is harmless in a Teradata-mode session (names are case-insensitive).
+_TERADATA_RESERVED_COLS = frozenset({
+    "date", "day", "month", "year", "hour", "minute", "second", "time", "timestamp", "zone",
+    "value", "values", "min", "max", "sum", "avg", "count", "user", "percent", "rank", "format",
+    "title", "index", "order", "group", "default", "current", "session", "role", "size", "top",
+    "comment", "end", "over", "range", "row", "rows", "precision", "public"})
+
+_ALIAS_TO_QUOTE_RE = re.compile(r"(?i)\bAS\s+(value|min|max)\b(?!\s*[.(])")
+
+
+def quote_reserved_aliases(sql: str) -> str:
+    """`... AS value` → `... AS "value"` (also min / max, the optional gauge columns) in the code part of
+    `sql`, for SQL written before the drafter quoted them, hand-written SQL and `metrics/_template.yaml`.
+    Literals, quoted identifiers and comments are left alone."""
+    code, pos = _sql_scan(sql)
+    edits = [(pos[m.start(1)], pos[m.end(1) - 1] + 1) for m in _ALIAS_TO_QUOTE_RE.finditer(code)]
+    for start, end in reversed(edits):
+        sql = f'{sql[:start]}"{sql[start:end].lower()}"{sql[end:]}'
+    return sql
 
 
 def _sql_col(name: str) -> str:
@@ -2249,9 +2268,9 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
     msrcs, ps, _extra = done
     used += [p for p in ps if p not in used]
     if not categories:
-        return f"SELECT {outer.expr} AS value\nFROM " + "\n".join(msrcs), used
+        return f'SELECT {outer.expr} AS "value"\nFROM ' + "\n".join(msrcs), used
     names = ["category", "series"]
-    cols = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)] + [f"{outer.expr} AS value"]
+    cols = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)] + [f'{outer.expr} AS "value"']
     pos = {c.key: i for i, c in enumerate(categories, start=1)}
     pos.setdefault(f.key, len(categories) + 1)
     where = mwhere + [f"({outer.expr}) IS NOT NULL"]
@@ -2357,13 +2376,13 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     if kind in ("card", "gauge"):
         if len(values) != 1 or categories:
             return None
-        return assemble([f"{values[0].expr} AS value"], []), params_used
+        return assemble([f'{values[0].expr} AS "value"'], []), params_used
 
     if kind == "kpi":
         # value + target, in field order; a kpi with only a value still renders.
         if not 1 <= len(values) <= 2 or categories:
             return None
-        parts = [f"{values[0].expr} AS value"]
+        parts = [f'{values[0].expr} AS "value"']
         if len(values) == 2:
             parts.append(f"{values[1].expr} AS target")
         return assemble(parts, []), params_used
@@ -2378,7 +2397,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         if len(values) == 1:
             names = ["category", "series"]
             parts = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)]
-            parts.append(f"{values[0].expr} AS value")
+            parts.append(f'{values[0].expr} AS "value"')
             pos = {c.key: i for i, c in enumerate(categories, start=1)}
             pos.setdefault(values[0].key, len(categories) + 1)
             return assemble(parts, list(range(1, len(categories) + 1)), _order_by(sort, pos)), params_used
@@ -2408,7 +2427,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             label = name.replace("'", "''")
             arms.append(assemble([f"{categories[0].expr} AS category",
                                   f"'{label}' AS series",
-                                  f"{f.expr} AS value"], [1, 2], "", arm_sources, arm_where, arm_extra))
+                                  f'{f.expr} AS "value"'], [1, 2], "", arm_sources, arm_where, arm_extra))
         # a sort on the category applies to the whole union (column 1)
         return "\nUNION ALL\n".join(arms) + _order_by(sort, {categories[0].key: 1}), all_params
 
