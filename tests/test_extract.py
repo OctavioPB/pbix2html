@@ -123,3 +123,35 @@ def test_theme_without_custom_theme_does_not_guess(tmp_path):
         z.writestr("Report/StaticResources/RegisteredResources/DenebSpec.json", json.dumps({"mark": "bar"}))
     L = ex.extract_layout(pbix)
     assert L["theme"]["custom_json"] is None
+
+
+def test_pbir_filters_hidden_and_custom_visuals(tmp_path):
+    """PBIR keys per Microsoft's published schemas (not yet seen in a real file)."""
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    flt = {"name": "f1", "type": "Categorical", "isHiddenInViewMode": True,
+           "field": {"Column": {"Expression": {"SourceRef": {"Entity": "Region"}}, "Property": "Name"}},
+           "filter": {"Where": []}}
+    pbix = tmp_path / "R.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/definition/report.json", json.dumps({
+            "publicCustomVisuals": ["Sankey1.0"],
+            "resourcePackages": [{"name": "Acme", "type": "CustomVisual"}, {"name": "Theme", "type": "SharedResources"}]}))
+        z.writestr("Report/definition/pages/pages.json", json.dumps({"pageOrder": ["p1"]}))
+        z.writestr("Report/definition/pages/p1/page.json", json.dumps(
+            {"displayName": "P", "visibility": "HiddenInViewMode", "filterConfig": {"filters": [flt]}}))
+        z.writestr("Report/definition/pages/p1/visuals/v1/visual.json", json.dumps({
+            "position": {"x": 0, "y": 0, "width": 10, "height": 10}, "isHidden": True,
+            "parentGroupName": "g1", "filterConfig": {"filters": [flt]},
+            "visual": {"visualType": "card"}}))
+    lay = extract_layout(pbix)
+    page = lay["pages"][0]
+    v = page["visuals"][0]
+    assert page["hidden"] is True
+    assert page["filters"][0]["target"] == "Region.Name" and page["filters"][0]["is_hidden"]
+    assert v["hidden"] is True and v["parent_group"] == "g1"
+    assert v["filters"][0]["target"] == "Region.Name"
+    assert lay["custom_visual_packages"] == ["Sankey1.0", "Acme"]

@@ -365,7 +365,8 @@ def parse_filters(raw: Any) -> list[dict]:
             target = None
             # "expression" can be absent or explicitly null (TopN filters,
             # multi-field advanced filters, etc.); don't assume it's always a dict.
-            expr = f.get("expression") or {}
+            # PBIR names it "field"; classic names it "expression". Same inner shape.
+            expr = f.get("expression") or f.get("field") or {}
             for kind in ("Column", "Measure", "Aggregation", "HierarchyLevel"):
                 node = expr.get(kind)
                 if isinstance(node, dict):
@@ -575,8 +576,10 @@ def extract_layout(pbix: Path) -> dict:
 #   Report/definition/pages/pages.json                              → pageOrder
 #   Report/definition/pages/<pageId>/page.json                      → one per page
 #   Report/definition/pages/<pageId>/visuals/<visualId>/visual.json → one per visual
-# A few field paths below (visual hidden/group state, page filters) are still
-# best-effort guesses pending confirmation against a real file — see the TODOs.
+# The hidden/filter/custom-visual keys below follow Microsoft's published PBIR JSON
+# schemas (visualContainer `isHidden`/`filterConfig`/`parentGroupName`, page `visibility`/
+# `filterConfig`, report `publicCustomVisuals`/`resourcePackages`) but have not been
+# confirmed against a real file yet; they degrade to "not hidden / no filters".
 # ----------------------------------------------------------------------------
 
 def _pbir_read_json(z: zipfile.ZipFile, path: str) -> dict:
@@ -647,14 +650,14 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
         return {
             "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
             "width": pos.get("width", 0), "height": pos.get("height", 0),
-            "tab_order": pos.get("tabOrder"), "parent_group": None,
+            "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
             "type": vtype, "is_group": False,   # a real group container returns above instead
             "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
             "title": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis).get("title"),
-            "hidden": vis.get("visible") is False,   # TODO: confirm against a real hidden visual
+            "hidden": bool(vdata.get("isHidden")) or vis.get("visible") is False,
             "projections": projections,
             "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
-            "filters": [],   # TODO: PBIR page/visual filter shape not mapped yet
+            "filters": parse_filters((vdata.get("filterConfig") or {}).get("filters")),
             "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "text": extract_textbox_text(vis.get("objects") or {}),
@@ -684,14 +687,25 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         "ordinal": None,
         "width": page_data.get("width", 1280),
         "height": page_data.get("height", 720),
-        "hidden": False,   # TODO: PBIR page-visibility key not confirmed yet
-        "filters": [],   # TODO: PBIR page filter shape not mapped yet
+        "hidden": page_data.get("visibility") == "HiddenInViewMode",
+        "filters": parse_filters((page_data.get("filterConfig") or {}).get("filters")),
         "visuals": visuals,
     }
 
 
+def _pbir_custom_packages(report_meta: dict) -> list[str]:
+    """Custom visual names declared in report.json: `publicCustomVisuals` (AppSource ids)
+    plus `resourcePackages` entries of type CustomVisual."""
+    names = [n for n in report_meta.get("publicCustomVisuals") or [] if isinstance(n, str)]
+    for pkg in report_meta.get("resourcePackages") or []:
+        if isinstance(pkg, dict) and pkg.get("type") == "CustomVisual" and pkg.get("name"):
+            names.append(pkg["name"])
+    return list(dict.fromkeys(names))
+
+
 def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_datamodel: bool) -> dict:
     pages_meta = _pbir_read_json(z, "Report/definition/pages/pages.json")
+    report_meta = _pbir_read_json(z, "Report/definition/report.json")
     page_order = pages_meta.get("pageOrder") or sorted({
         n.split("/")[3] for n in names
         if n.startswith("Report/definition/pages/") and n.count("/") >= 4 and not n.endswith("pages.json")
@@ -708,7 +722,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "layout_version": None,
         "has_embedded_datamodel": has_datamodel,
         "theme": theme,
-        "custom_visual_packages": [],   # TODO: PBIR custom-visual package listing not mapped yet
+        "custom_visual_packages": _pbir_custom_packages(report_meta),
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
         "format": "pbir",
     }

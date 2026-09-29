@@ -14,9 +14,8 @@ Status: **Phase 0 done, Phase 1 in progress.** Update this file when you close o
       Python 3.13 + Starlette `Jinja2Templates` incompatibility in the panel; and — the big
       one — **all of their real `.pbix` files were PBIR format** (Power BI Desktop 2024+'s
       default), which the extractor didn't support at all. PBIR support is now in
-      `extract.py` (see skill `pbix-layout`), but a few field paths (visual groups, page/visual
-      filters, hidden-page key) are still best-effort guesses pending confirmation against a
-      real file. Still blocked on actually getting the ~50 files copied into `reports/` to
+      `extract.py` (see skill `pbix-layout`), and the filter / hidden / custom-visual paths are mapped from Microsoft's PBIR
+      schemas (no more `TODO`s in `extract.py`), but remain unconfirmed against a real file. Still blocked on actually getting the ~50 files copied into `reports/` to
       run the batch and fill in these numbers.
 - [ ] ADR-001: snapshot vs live (draft in `docs/decisions/`). Decide per-report or globally.
       **Blocked by the previous point** (the decision depends on the real inventory).
