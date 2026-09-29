@@ -46,8 +46,23 @@ def cmd_extract(args):
 
 def cmd_scaffold(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
-    path = semantic.write_scaffold(layout, model, overwrite=args.overwrite)
+    table_map, new = semantic.sync_table_map(layout["report"], model)
+    if new:
+        print(f"table map: {len(new)} table(s) auto-detected from Power Query → "
+              f"{semantic.table_map_path(layout['report'])} (review before trusting)")
+    path = semantic.write_scaffold(layout, model, overwrite=args.overwrite, table_map=table_map)
     print(f"yaml generated: {path}  (fill in the `sql: TODO` entries)")
+    cmd_mapping(args)
+
+
+def cmd_mapping(args):
+    layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
+    table_map, _ = semantic.read_table_map(layout["report"])
+    rep = semantic.mapping_report(layout, model, table_map)
+    path = Path(args.out) / layout["report"] / "mapping_report.md"
+    path.write_text(semantic.render_mapping_report(rep), encoding="utf-8")
+    v = rep["visuals"]
+    print(f"mapping report: {path}  (data visuals {v['data_visuals']}, drafted {v['drafted']})")
 
 
 def cmd_convert(args):
@@ -62,7 +77,7 @@ def cmd_convert(args):
         layout = semantic.apply_theme_override(layout, override)
         print(f"Theme override applied from {theme_src}")
     if not semantic.yaml_path(layout["report"]).exists():
-        semantic.write_scaffold(layout, model)
+        semantic.write_scaffold(layout, model, table_map=semantic.sync_table_map(layout["report"], model)[0])
         print(f"! metrics/{layout['report']}.yaml didn't exist: generated the scaffold. Fill in the SQL and convert again.")
     spec = semantic.load(layout["report"])
     values = semantic.resolve_params(spec, _kv(args.params))
@@ -122,6 +137,11 @@ def main(argv=None) -> int:
     p.add_argument("--out", default="out")
     p.add_argument("--overwrite", action="store_true")
     p.set_defaults(fn=cmd_scaffold)
+
+    p = sub.add_parser("mapping", help="how well the model and visuals map to SQL (out/<Report>/mapping_report.md)")
+    p.add_argument("pbix")
+    p.add_argument("--out", default="out")
+    p.set_defaults(fn=cmd_mapping)
 
     p = sub.add_parser("convert", help=".pbix → Report.html")
     p.add_argument("pbix")

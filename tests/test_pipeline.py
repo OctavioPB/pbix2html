@@ -73,7 +73,7 @@ def test_entities_used_does_not_mangle_aggregated_fields():
 
 def test_sql_stub_uses_validated_table_map_as_subquery():
     sql = semantic._sql_stub(["Sales"], {"Sales": "SELECT * FROM sales_fact"})
-    assert "FROM (SELECT * FROM sales_fact) AS sales" in sql
+    assert "FROM (SELECT * FROM sales_fact\n) AS sales" in sql
 
 
 def test_sql_stub_skips_unsafe_table_map_entry():
@@ -232,7 +232,7 @@ def test_scaffold_auto_drafts_single_table_card(fake_pbix):
     L = ex.extract_layout(fake_pbix)
     sc = semantic.scaffold(L, MODEL, TABLE_MAP)
     v1 = sc["visuals"]["v1"]
-    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact) AS sales"
+    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact\n) AS sales"
     assert v1["params"] == []
     assert "Auto-drafted" in v1["notes"]
 
@@ -243,8 +243,8 @@ def test_scaffold_auto_drafts_joined_bar_chart_with_slicer_filter(fake_pbix):
     v2 = sc["visuals"]["v2"]
     assert v2["sql"] == (
         "SELECT region.name AS category, SUM(sales.marginamount) AS value\n"
-        "FROM (SELECT * FROM region_dim) AS region\n"
-        "JOIN (SELECT * FROM sales_fact) AS sales ON region.id = sales.regionid\n"
+        "FROM (SELECT * FROM region_dim\n) AS region\n"
+        "JOIN (SELECT * FROM sales_fact\n) AS sales ON region.id = sales.regionid\n"
         "GROUP BY 1"
     )
     assert v2["params"] == []  # the "year" slicer is on Calendar, not Sales/Region — correctly not attached
@@ -310,7 +310,7 @@ def test_draft_applies_slicer_filters_to_every_union_arm():
                                  "Y": ["Sales.Net Revenue", "Sales.Cost"]},
                          {"year": {"from_slicer": "Sales.Year"}})
     assert params == ["year"]
-    assert sql.count("sales.year IN (:year)") == 2       # not just the first arm
+    assert sql.count('sales."year" IN (:year)') == 2       # not just the first arm
 
 
 def test_draft_now_covers_kpi_gauge_and_matrix():

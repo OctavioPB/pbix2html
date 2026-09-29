@@ -337,15 +337,9 @@ def action_extract(request: Request, name: str):
         # Auto-fill the table mapping (step 2b) from each table's own Power Query M
         # source where it's unambiguous (semantic.detect_table_map_from_power_query) —
         # never touches an entity someone already mapped by hand.
-        detected = semantic.detect_table_map_from_power_query(model)
-        existing = _load_table_map(name)
-        new_entries = {k: v for k, v in detected.items() if k not in existing}
-        if new_entries:
-            merged = {**existing, **new_entries}
-            path = _table_map_path(name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-            detail.append(f"Auto-mapped {len(new_entries)} Power BI table(s) to Teradata from their "
+        _, new_names = semantic.sync_table_map(name, model)
+        if new_names:
+            detail.append(f"Auto-mapped {len(new_names)} Power BI table(s) to Teradata from their "
                           f"Power Query source — review on the table-mapping page before trusting.")
 
         result = {
@@ -608,33 +602,11 @@ async def save_edit(request: Request, name: str):
 # ----------------------------------------------------------------------------
 
 def _table_map_path(name: str) -> Path:
-    return semantic.METRICS_DIR / f"{name}.table_map.json"
+    return semantic.table_map_path(name)
 
 
 def _read_table_map(name: str) -> tuple[dict[str, str], str | None]:
-    """(mapping, problem). Only well-formed `{"entity": "query"}` string pairs come back
-    as mapping; anything else is reported as `problem` instead of being passed on.
-
-    This file can be hand-edited outside the panel, and the shapes that mistake produces
-    used to crash the scaffold step: a JSON list reached `table_map.get(...)`
-    (AttributeError), and a numeric value reached `.strip()`. Silently returning {} is
-    no better — the person's mapping appears to have vanished with no explanation, and
-    the next scaffold quietly writes TODO stubs instead of their queries."""
-    path = _table_map_path(name)
-    if not path.exists():
-        return {}, None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as e:
-        return {}, f"metrics/{path.name} isn't readable as JSON ({e}). Fix or delete it."
-    if not isinstance(data, dict):
-        return {}, f"metrics/{path.name} should be a JSON object of \"table\": \"query\" pairs."
-    bad = sorted(k for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str))
-    clean = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
-    if bad:
-        return clean, (f"metrics/{path.name}: ignored {len(bad)} entry/entries that aren't "
-                       f"text queries ({', '.join(map(str, bad[:3]))}).")
-    return clean, None
+    return semantic.read_table_map(name)
 
 
 def _load_table_map(name: str) -> dict[str, str]:

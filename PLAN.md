@@ -54,6 +54,54 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
       still unconfirmed: this sample was classic. Group children in PBIR are probably
       relative too; `absolutize_group_children` is only applied to classic.
 
+## Findings from a second real report, PBIR format (2026-09-29)
+
+15 pages (8 hidden), 237 visuals, 16 DirectQuery tables + 2 DAX calculated tables. First real
+PBIR file: it **confirmed** `page.visibility = "HiddenInViewMode"`, `parentGroupName` (children
+positions are relative to the group, as in classic), `filterConfig.filters[].field`,
+`sortDefinition`, and that button links live in `visual.visualContainerObjects.visualLink`.
+Fixed: container formatting (`visualContainerObjects`) sits *inside* `visual`, so PBIR titles,
+backgrounds, borders and links were never read; the custom theme (`report.json →
+themeCollection`) was ignored in favour of the base one; PBIR visuals had no style/fill/action/
+button/sort; and, for both formats:
+
+- **`queryRef` keeps a table's old name after a rename** (`Sum(Fixed Capacity Mnthly.x)` for a field
+  whose entity is `Active Compute Fixed Mnthly`; also the `Table.models` seen in the first report).
+  Refs are now rebuilt from the real field.
+- **No JOIN had ever been drafted from a real model**: the drafter read `FromTable/…` and the
+  extractor emits `FromTableName/…`. Inactive relationships are now skipped.
+- **`ORDER BY`** was never emitted (69 visuals here carry a sort); it is now, by column position.
+- **A slicer with nothing selected returned 0 rows** (`IN (NULL)`); it now means "no filter".
+- **Fan-out**: an arm/visual summing several fact tables through one join inflated the numbers.
+  Each `UNION ALL` arm now joins only its own fact; one `SELECT` over several fact tables is left to
+  a person. Series that share a column name are told apart by table.
+- A table query ending in `-- comment` swallowed the closing `)` of `FROM (...) AS t`.
+- The CLI never used the table map (only the panel did): 0 → 46 drafted here. Detection now also
+  covers `Teradata.Database(host, [Query=...])`, `SEL`, and **"Enter Data" tables** (rows decoded
+  from the M into `SELECT ... UNION ALL`). `DISTINCTCOUNTNOBLANK` translates. Reserved words used
+  as columns (`date`, `year`, `month`...) are double-quoted.
+- `pbix2html mapping <pbix>` (also run by `scaffold`) writes `out/<Report>/mapping_report.md`: per
+  visual, why it was or wasn't drafted (`no_source`, `not_connected`, `unknown_table`,
+  `untranslatable_measure`, ...), plus model facts (M:M relationships, tables with no relationship,
+  calculated tables, composite measures).
+
+Result: 91 of 94 drafted queries parse under sqlglot's Teradata dialect at first, 94 of 94 after the
+comment fix (a syntax check only: none has been run on Teradata). **Still open**, in priority order:
+
+- [ ] **Slicers as real widgets.** 62 slicers here; today they are only parameters in the top bar.
+      Needs a values query per slicer (distinct column values), the widget kind (list/dropdown/date
+      range/hierarchy) and positioning; `live`/`hah` can fetch values, `snapshot` needs them at build.
+- [ ] **`Calendar` (a DAX `CALENDAR()` table) has no Teradata source and no relationship to any fact**
+      (23 of 25 undrafted visuals). The facts' M adds `log_dt`; a `Calendar[Date] = log_dt` join is
+      probably intended but undeclared. Needs an owner decision: a hand-written relationship override
+      (`metrics/<Report>.relationships.json`?) plus a derived `sys_calendar.calendar` source.
+- [ ] Composite measures over unrelated fact tables (`Grand Total = [A] + [B] + ...`): one scalar
+      subquery per term instead of a join.
+- [ ] DAX with `VAR`/`EOMONTH`/time intelligence (`Projected Monthly Avg Spend`) stays manual.
+- [ ] Two hidden pages are reachable from no button (drill-through? a bookmark?): listed nowhere yet.
+- [ ] PBIR bookmarks and hidden visuals/groups: this file had none, so still unverified.
+- [ ] Mapping report in the panel (only the CLI writes it).
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`

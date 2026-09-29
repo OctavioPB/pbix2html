@@ -31,8 +31,18 @@ def bind(sql: str, params: list[str], values: dict[str, Any]) -> tuple[str, list
     Converts `WHERE year = :year AND region IN (:regions)` into SQL with `?` and a list of values.
     Only names declared in `params` are substituted; any other `:x` is left intact
     (e.g. time literals). Lists → `?,?,?`.
+
+    A slicer with nothing selected means "no filter" in Power BI, so a predicate of the exact
+    shape `<column> IN (:name)` whose parameter is empty (None, "" or an empty list) becomes
+    `1=1` instead of `IN (NULL)`, which would return no rows at all. Other uses of an empty
+    parameter (e.g. `= :year`) are left to the query's author.
     """
     bound: list[Any] = []
+
+    for name in params:
+        val = values.get(name)
+        if val is None or val == "" or (isinstance(val, (list, tuple)) and not val):
+            sql = re.sub(rf'(?<![\w."])[\w."]+\s+IN\s*\(\s*:{re.escape(name)}\s*\)', "1=1", sql, flags=re.I)
 
     def repl(m: re.Match) -> str:
         name = m.group(1)

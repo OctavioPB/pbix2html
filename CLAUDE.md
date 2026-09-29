@@ -60,6 +60,7 @@ git history if you ever need it.)
     pytest -q                          # tests (use a synthetic .pbix; no Teradata)
     pbix2html extract <pbix|folder>    # inventory only → out/
     pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v]
+    pbix2html mapping <pbix>           # why each visual could / couldn't be drafted → out/<Report>/mapping_report.md
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
     python -m uvicorn pbix2html.serve:app --reload   # live mode (python -m: see README PATH note)

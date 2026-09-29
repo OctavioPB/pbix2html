@@ -76,3 +76,19 @@ columns`; `kpi → value, target`. Aliases always lowercase.
 - Off at period boundaries: Power BI uses `<` at period end, DBQL shows it.
 - NULL vs 0: Power BI hides rows with no value; use `HAVING` or let the renderer skip nulls.
 - Rounding: compare with ≥6 decimals; display formatting doesn't count.
+
+## What the auto-drafter does and does not do (learned on real reports)
+
+- **Slicers**: a drafted visual filters with `col IN (:param)` for each slicer on a table it reads.
+  `query.bind` turns that predicate into `1=1` when the parameter is empty ("nothing selected"
+  means "no filter" in Power BI); other empty uses (`= :year`) are your responsibility.
+- **Joins** follow the model's active relationships (single hops only). A relationship that is
+  M:M can duplicate rows; validate shows it as "every value × k".
+- **Several fact tables**: one `SELECT` never sums two fact tables (their join multiplies rows), so
+  such a visual is left as `TODO`; a chart with several measures gets one `UNION ALL` arm per
+  measure, each joining only its own fact table.
+- **Order**: the visual's sort becomes `ORDER BY <column position>`; a sort on a field the query
+  doesn't select is skipped.
+- Table sources come from Power Query (`Query="..."`, `Value.NativeQuery`, plain accessors, "Enter
+  Data" tables). DAX calculated tables (`CALENDAR`, `Row(...)`) have no source: see
+  `pbix2html mapping` for exactly which visuals that blocks.

@@ -667,6 +667,7 @@ def _parse_visual(vc: dict) -> dict:
     fields = sorted({p.get("queryRef") for role in projections.values() if isinstance(role, list)
                      for p in role if isinstance(p, dict) and p.get("queryRef")})
 
+    qmap = _proto_query_refs(sv)     # renamed tables leave stale names in queryRef
     vco = sv.get("vcObjects") or {}
     texts = visual_text(sv)          # title, subtitle, shape/button label, axis + legend titles
     title = texts.get("title")
@@ -679,9 +680,10 @@ def _parse_visual(vc: dict) -> dict:
         "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
         "title": title,
         "hidden": display == "hidden",
-        "projections": {role: [p.get("queryRef") for p in (refs or []) if isinstance(p, dict)]
+        "projections": {role: [qmap.get(p.get("queryRef"), p.get("queryRef")) for p in (refs or [])
+                               if isinstance(p, dict)]
                         for role, refs in projections.items()},
-        "fields": fields,
+        "fields": sorted({qmap.get(f, f) for f in fields}),
         "filters": parse_filters(vc.get("filters")),
         "has_drill_other_visuals": bool(sv.get("drillFilterOtherVisuals")),
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
@@ -690,6 +692,7 @@ def _parse_visual(vc: dict) -> dict:
         "style": _style_with_fill(container_style(vco), sv.get("objects") or {}),
         "texts": texts,
         "action": _visual_link(vco),
+        "sort": _proto_sort(sv),
         **({"button": parse_button(sv)} if vtype == "actionButton" else {}),
     })
     return visual
@@ -884,6 +887,84 @@ def _pbir_read_json(z: zipfile.ZipFile, path: str) -> dict:
         return {}
 
 
+def canonical_query_ref(query_ref: str, entity: str, prop: str) -> str:
+    """Rebuilds a projection's `queryRef` from its real field. Power BI does not rewrite
+    `queryRef` when a table is renamed, so it keeps the old name (`Sum(Fixed Capacity
+    Mnthly.x)` for a field whose SourceRef.Entity is now `Active Compute Fixed Mnthly`),
+    and everything keyed on it then points at a table that no longer exists. Only the
+    aggregation wrapper is kept from the original."""
+    if not entity or not prop:
+        return query_ref
+    m = re.match(r"^([A-Za-z]+)\((.*)\)$", query_ref or "")
+    inner = f"{entity}.{prop}"
+    return f"{m.group(1)}({inner})" if m else inner
+
+
+def _entity_prop(node: Any, aliases: dict | None = None) -> tuple[str, str] | None:
+    """First (entity, property) found in a field/expression node (any nesting: Column,
+    Measure, Aggregation, HierarchyLevel...). `aliases` maps a classic `Source` alias to its
+    table; PBIR carries the entity directly."""
+    aliases = aliases or {}
+    if isinstance(node, dict):
+        expr = node.get("Expression")
+        src = expr.get("SourceRef") if isinstance(expr, dict) else None
+        if src and ("Property" in node or "Level" in node):
+            return (src.get("Entity") or aliases.get(src.get("Source")) or "",
+                    node.get("Property") or node.get("Level") or "")
+        for v in node.values():
+            found = _entity_prop(v, aliases)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for v in node:
+            found = _entity_prop(v, aliases)
+            if found:
+                return found
+    return None
+
+
+def _sort_entries(items: list, direction_of) -> list[dict]:
+    """[{entity, property, direction: 'asc'|'desc'}] for a visual's sort definition."""
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        ep = _entity_prop(it.get("field") or it.get("Expression"), it.get("_aliases"))
+        if ep and ep[0] and ep[1]:
+            out.append({"entity": ep[0], "property": ep[1], "direction": direction_of(it)})
+    return out
+
+
+def _proto_sort(sv: dict) -> list[dict]:
+    """Classic: `prototypeQuery.OrderBy` (Direction 1 = ascending, 2 = descending)."""
+    pq = (sv or {}).get("prototypeQuery") or {}
+    aliases = {f.get("Name"): f.get("Entity") for f in pq.get("From") or [] if isinstance(f, dict)}
+    items = [{**o, "_aliases": aliases} for o in pq.get("OrderBy") or [] if isinstance(o, dict)]
+    return _sort_entries(items, lambda o: "desc" if o.get("Direction") == 2 else "asc")
+
+
+def _pbir_sort(vis: dict) -> list[dict]:
+    """PBIR: `query.sortDefinition.sort[{field, direction: 'Ascending'|'Descending'}]`."""
+    items = (((vis.get("query") or {}).get("sortDefinition")) or {}).get("sort") or []
+    return _sort_entries(items, lambda o: "desc" if str(o.get("direction")).lower().startswith("desc") else "asc")
+
+
+def _proto_query_refs(sv: dict) -> dict[str, str]:
+    """Classic: {stale Select.Name -> canonical queryRef} from `prototypeQuery`, whose
+    expressions carry the real entity (through the `From` aliases)."""
+    pq = (sv or {}).get("prototypeQuery") or {}
+    aliases = {f.get("Name"): f.get("Entity") for f in pq.get("From") or [] if isinstance(f, dict)}
+    out: dict[str, str] = {}
+    for sel in pq.get("Select") or []:
+        name = (sel or {}).get("Name")
+        ep = _entity_prop(sel, aliases)
+        if name and ep and ep[0] and ep[1]:
+            fixed = canonical_query_ref(name, ep[0], ep[1])
+            if fixed != name:
+                out[name] = fixed
+    return out
+
+
 def _pbir_fields(query_state: dict) -> list[dict]:
     """[{role, entity, property, queryRef}], one per field well entry."""
     fields = []
@@ -898,7 +979,8 @@ def _pbir_fields(query_state: dict) -> list[dict]:
                 prop = col.get("Property", "")
             else:
                 entity, prop = "", ""
-            fields.append({"role": role_name, "entity": entity, "property": prop, "queryRef": query_ref})
+            fields.append({"role": role_name, "entity": entity, "property": prop,
+                           "queryRef": canonical_query_ref(query_ref, entity, prop)})
     return fields
 
 
@@ -925,7 +1007,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             return {
                 "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
                 "width": pos.get("width", 0), "height": pos.get("height", 0),
-                "tab_order": pos.get("tabOrder"), "parent_group": None,
+                "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
                 "type": "__group__", "is_group": True, "is_custom": False,
                 "title": group.get("displayName"), "hidden": bool(vdata.get("isHidden")),
                 "projections": {}, "fields": [], "filters": [],
@@ -939,13 +1021,16 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
         projections: dict[str, list] = {}
         for f in fields:
             projections.setdefault(f["role"], []).append(f["queryRef"])
+        # Container formatting (title, background, border, visualLink...) sits inside `visual`
+        # in real PBIR files; the older fixture put it at the top level, so accept both.
+        vco = vis.get("visualContainerObjects") or vdata.get("visualContainerObjects") or {}
         return {
             "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
             "width": pos.get("width", 0), "height": pos.get("height", 0),
             "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
             "type": vtype, "is_group": False,   # a real group container returns above instead
             "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
-            "title": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis).get("title"),
+            "title": _pbir_texts(vco, vis).get("title"),
             "hidden": bool(vdata.get("isHidden")) or vis.get("visible") is False,
             "projections": projections,
             "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
@@ -954,7 +1039,11 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
-            "texts": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis),
+            "texts": _pbir_texts(vco, vis),
+            "style": _style_with_fill(container_style(vco), vis.get("objects") or {}),
+            "action": _visual_link(vco),
+            "sort": _pbir_sort(vis),
+            **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
         }
     except Exception as e:
         stub = _empty_visual_stub({}, e)
@@ -973,6 +1062,8 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         vdata = _pbir_read_json(z, f"Report/definition/pages/{page_id}/visuals/{vid}/visual.json")
         if vdata:
             visuals.append(_parse_visual_pbir(vdata, vid))
+    objects = page_data.get("objects") or {}
+    absolutize_group_children(visuals)   # PBIR child positions are relative to the group too
     return {
         "name": page_id,
         "display_name": page_data.get("displayName", page_id),
@@ -980,6 +1071,8 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         "width": page_data.get("width", 1280),
         "height": page_data.get("height", 720),
         "hidden": page_data.get("visibility") == "HiddenInViewMode",
+        "background": _object_color(objects, "background") or _object_color(objects, "outspace"),
+        "background_image": _page_background_image(objects),
         "filters": parse_filters((page_data.get("filterConfig") or {}).get("filters")),
         "visuals": visuals,
     }
@@ -1002,6 +1095,27 @@ def _pbir_custom_packages(report_meta: dict) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _pbir_theme(z: zipfile.ZipFile, names: list[str], report_meta: dict) -> dict:
+    """`report.json → themeCollection`: the custom theme (a RegisteredResources JSON) wins over
+    the base one (`SharedResources/BaseThemes/<name>.json`), as in Power BI. Without a
+    declared custom theme the base theme JSON is used, as before."""
+    tc = report_meta.get("themeCollection") or {}
+    custom, base = tc.get("customTheme") or {}, tc.get("baseTheme") or {}
+    theme: dict[str, Any] = {"base": base or None, "custom": custom or None, "custom_json": None}
+    if custom.get("name"):
+        path = f"Report/StaticResources/{custom.get('type') or 'RegisteredResources'}/{custom['name']}"
+        if path in names:
+            theme["custom_json"] = _pbir_read_json(z, path) or None
+            theme["custom_path"] = path
+            return theme
+    entry = next((n for n in names if n.startswith("Report/StaticResources/SharedResources/BaseThemes/")
+                  and n.endswith(".json") and (not base.get("name") or n.endswith(f"/{base['name']}.json"))), None)
+    if entry:
+        theme["custom"] = theme["custom"] or {"name": entry}
+        theme["custom_json"] = _pbir_read_json(z, entry)
+    return theme
+
+
 def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_datamodel: bool) -> dict:
     pages_meta = _pbir_read_json(z, "Report/definition/pages/pages.json")
     report_meta = _pbir_read_json(z, "Report/definition/report.json")
@@ -1009,12 +1123,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         n.split("/")[3] for n in names
         if n.startswith("Report/definition/pages/") and n.count("/") >= 4 and not n.endswith("pages.json")
     })
-    theme: dict[str, Any] = {"base": None, "custom": None, "custom_json": None}
-    theme_entry = next(
-        (n for n in names if n.startswith("Report/StaticResources/SharedResources/BaseThemes/")
-         and n.endswith(".json")), None)
-    if theme_entry:
-        theme = {"base": None, "custom": {"name": theme_entry}, "custom_json": _pbir_read_json(z, theme_entry)}
+    theme = _pbir_theme(z, names, report_meta)
     result = {
         "report": pbix.stem,
         "source": str(pbix),

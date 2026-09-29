@@ -170,3 +170,19 @@ report: `text.text`, `text.fontSize` (`11D` = points), `fill.fillColor` / `trans
 `horizontalAlignment`, `lineColor`, `weight`, `roundEdge`, the hover/pressed states) follow
 Power BI's documented names and are unverified. The report's theme `visualStyles` had no
 `actionButton` entry, so an absent card means "transparent / inherit", not a Power BI default.
+
+## PBIR specifics (verified on a real file)
+
+- `visualContainerObjects` (title, background, border, `visualLink`...) is **inside** `visual`, not a
+  sibling of it; `objects` (formatting of the visual itself) is beside it.
+- `page.json`: `visibility: "HiddenInViewMode"` hides a page; background image/colour use the same
+  `objects.background` / `outspace` shapes as classic. `report.json → themeCollection` names the
+  custom theme (a `RegisteredResources` JSON) and the base one (`SharedResources/BaseThemes`).
+- Children of a group (`parentGroupName`) are positioned relative to it; groups can nest.
+- Sort: `query.sortDefinition.sort[{field, direction}]` (classic: `prototypeQuery.OrderBy`, Direction
+  1/2); `layout.json` stores `sort: [{entity, property, direction}]` and the SQL drafter turns it
+  into `ORDER BY <position>`.
+- **`queryRef` can be stale** after a table rename (Power BI doesn't rewrite it); the real table is
+  the field's `SourceRef.Entity`. `canonical_query_ref` rebuilds refs from it, keeping only the
+  aggregation wrapper.
+- Not seen yet in a real PBIR file: bookmarks (`Report/definition/bookmarks/`), `isHidden`.

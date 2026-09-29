@@ -13,8 +13,10 @@ Semantic layer: metrics/<Report>.yaml.
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -202,6 +204,7 @@ _SQL_SINGLE_STATEMENT_FORBIDDEN = (
     "GRANT", "REVOKE", "EXEC", "EXECUTE", "CALL", "COMMIT", "ROLLBACK", "SET", "INTO",
 )
 _SQL_FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_SQL_SINGLE_STATEMENT_FORBIDDEN) + r")\b", re.IGNORECASE)
+_SQL_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 _SQL_LEADING_RE = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.IGNORECASE)
 _SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -228,7 +231,10 @@ def validate_read_only_sql(sql: str) -> str:
     uncommented = _SQL_BLOCK_COMMENT_RE.sub(" ", _SQL_LINE_COMMENT_RE.sub(" ", raw)).strip()
     if not _SQL_LEADING_RE.match(uncommented):
         raise ValueError("must start with SELECT/SEL (or WITH ... SELECT)")
-    m = _SQL_FORBIDDEN_RE.search(uncommented)
+    # Words inside 'string literals' are data (a status called 'SET'), not statements. Comments
+    # were stripped first on purpose: an apostrophe in a comment ("don't") must not be able to
+    # open a fake literal that swallows real code after it.
+    m = _SQL_FORBIDDEN_RE.search(_SQL_STRING_LITERAL_RE.sub("''", uncommented))
     if m:
         raise ValueError(f"'{m.group(1).upper()}' isn't allowed here — read-only queries only")
     return raw
@@ -360,6 +366,57 @@ def _m_unescape_string(literal: str) -> str | None:
     return inner
 
 
+_M_FROMROWS_RE = re.compile(
+    r'Table\.FromRows\s*\(\s*Json\.Document\s*\(\s*Binary\.Decompress\s*\(\s*Binary\.FromText\s*\('
+    r'\s*"([A-Za-z0-9+/=\s]+)"\s*,\s*BinaryEncoding\.Base64\s*\)\s*,\s*Compression\.Deflate\s*\)\s*\)'
+    r'\s*,(.*)\)\s*(?:,|in\b|$)', re.DOTALL)
+_M_TABLE_TYPE_RE = re.compile(r"type\s+table\s*\[(.*?)\]", re.DOTALL)
+_INLINE_MAX_ROWS = 500
+
+
+def _inline_table_sql(expression: str) -> str | None:
+    """A table typed in by hand ("Enter Data": `Table.FromRows(Json.Document(Binary.Decompress(
+    Binary.FromText("<base64>", ...), Compression.Deflate)), type table [a = _t, b = _t])`) holds
+    its rows inside the M itself. They are decoded and rebuilt as a `SELECT ... UNION ALL SELECT
+    ...` so the table needs no Teradata source. None for anything else (too many rows, a ragged
+    row, an unrecognised column list)."""
+    m = _M_FROMROWS_RE.search(expression or "")
+    if not m:
+        return None
+    try:
+        rows = json.loads(zlib.decompress(base64.b64decode(re.sub(r"\s+", "", m.group(1))), -15).decode("utf-8-sig"))
+    except Exception:
+        return None
+    tm = _M_TABLE_TYPE_RE.search(m.group(2))
+    if not isinstance(rows, list) or not rows or len(rows) > _INLINE_MAX_ROWS or not tm:
+        return None
+    cols = [(c.group(1).strip(), c.group(2)) for c in
+            re.finditer(r'(#"[^"]+"|[A-Za-z_]\w*)\s*=\s*([^,\]]+)', tm.group(1))]
+    if not cols or any(not isinstance(r, list) or len(r) != len(cols) for r in rows):
+        return None
+    names = [c.strip().removeprefix('#"').removesuffix('"') for c, _ in cols]
+    numeric = [bool(re.search(r"number|Int64|Currency|Decimal|Double", t)) for _, t in cols]
+
+    def lit(value: Any, is_num: bool) -> str:
+        if value is None:
+            return "NULL"
+        if is_num and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return repr(value)
+        return "'" + str(value).replace("'", "''") + "'"
+
+    widths = [max((len(str(r[i])) for r in rows if r[i] is not None), default=1) for i in range(len(cols))]
+    arms = []
+    for n, row in enumerate(rows):
+        parts = []
+        for i, value in enumerate(row):
+            text = lit(value, numeric[i])
+            if n == 0:   # the first arm fixes each column's type
+                text = f"CAST({text} AS {'DECIMAL(18,6)' if numeric[i] else f'VARCHAR({max(widths[i], 1)})'})"
+            parts.append(f"{text} AS {_sql_col(names[i])}" if n == 0 else text)
+        arms.append("SELECT " + ", ".join(parts))
+    return "\nUNION ALL\n".join(arms)
+
+
 def _detect_table_query(expression: str) -> str | None:
     """Recognizes two M source shapes for a table backed by Teradata (or any
     connector using the same accessor conventions) and returns a candidate
@@ -381,6 +438,8 @@ def _detect_table_query(expression: str) -> str | None:
     """
     if not expression:
         return None
+    if "Table.FromRows" in expression:
+        return _inline_table_sql(expression)
     dm = _M_DATABASE_CALL_RE.search(expression)
     if dm and not _M_NATIVE_QUERY_RE.search(expression):
         args = _m_split_args(expression[dm.end():])
@@ -441,6 +500,66 @@ def detect_table_map_from_power_query(model: dict) -> dict[str, str]:
     return out
 
 
+def table_map_path(name: str) -> Path:
+    return METRICS_DIR / f"{name}.table_map.json"
+
+
+def read_table_map(name: str) -> tuple[dict[str, str], str | None]:
+    """(mapping, problem) from `metrics/<name>.table_map.json`. Only well-formed
+    `{"entity": "query"}` string pairs come back as mapping; anything else is reported as
+    `problem` instead of being passed on (the file can be hand-edited: a JSON list or a numeric
+    value used to crash the scaffold, and silently returning {} made a person's mapping look
+    like it had vanished)."""
+    path = table_map_path(name)
+    if not path.exists():
+        return {}, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        return {}, f"metrics/{path.name} isn't readable as JSON ({e}). Fix or delete it."
+    if not isinstance(data, dict):
+        return {}, f"metrics/{path.name} should be a JSON object of \"table\": \"query\" pairs."
+    bad = sorted(k for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str))
+    clean = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+    if bad:
+        return clean, (f"metrics/{path.name}: ignored {len(bad)} entry/entries that aren't "
+                       f"text queries ({', '.join(map(str, bad[:3]))}).")
+    return clean, None
+
+
+def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
+    """The report's table map with every table auto-detected from Power Query added and saved
+    (`detect_table_map_from_power_query`). Entries already there, i.e. mapped by hand, are never
+    touched. Returns (merged mapping, names of the newly added tables)."""
+    existing, _ = read_table_map(name)
+    new = {k: v for k, v in detect_table_map_from_power_query(model).items() if k not in existing}
+    merged = {**existing, **new}
+    if new:
+        path = table_map_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return merged, sorted(new)
+
+
+# Teradata reserved words a Power BI column is commonly named after (a calendar's Date / Year /
+# Month...). Unquoted they are a syntax error as an identifier, so they are always double-quoted.
+_TERADATA_RESERVED_COLS = frozenset(
+    {"date", "day", "month", "year", "hour", "minute", "second", "time", "timestamp"})
+
+
+def _sql_col(name: str) -> str:
+    """A Power BI column name as a Teradata identifier (see `_sql_alias`), quoted when it is
+    a reserved word."""
+    alias = _sql_alias(name)
+    return f'"{alias}"' if alias in _TERADATA_RESERVED_COLS else alias
+
+
+def _subquery(sql: str, alias: str) -> str:
+    """`(<sql>) AS alias`, with the closing parenthesis on its own line: a table query that ends
+    in a `-- comment` (common in Power Query SQL) would otherwise swallow the `)` and the alias."""
+    return f"({sql}\n) AS {alias}"
+
+
 def _sql_alias(entity: str) -> str:
     alias = re.sub(r"\W+", "_", entity).strip("_").lower()
     return alias or "t"
@@ -479,7 +598,7 @@ def _sql_stub(entities: list[str], table_map: dict[str, str]) -> str:
             # A hand-edited table_map.json can carry something the panel wouldn't have
             # accepted; skip it here rather than propagate an unsafe query into the yaml.
             continue
-        sources.append(f"({query}) AS {_sql_alias(entity)}")
+        sources.append(_subquery(query, _sql_alias(entity)))
     if not sources:
         return "TODO -- see skill dax-to-teradata-sql; columns per kind"
     return (
@@ -522,6 +641,8 @@ _DAX_AGGREGATES: dict[str, tuple[str, bool, bool]] = {
     "MIN": ("MIN", False, False), "MAX": ("MAX", False, False),
     "COUNT": ("COUNT", False, False), "COUNTA": ("COUNT", False, False),
     "DISTINCTCOUNT": ("COUNT", True, False), "COUNTROWS": ("COUNT", False, True),
+    # ignores blanks, which is exactly what SQL's COUNT(DISTINCT col) does
+    "DISTINCTCOUNTNOBLANK": ("COUNT", True, False),
 }
 # ref-level wrapper Power BI puts on an auto-aggregated column ("Sum(Sales.Amount)")
 _REF_AGG_TO_SQL: dict[str, tuple[str, bool]] = {
@@ -654,7 +775,7 @@ class _DaxTranslator:
                 column = nxt[1][1:-1].strip()
                 self.tables.add(table)
                 self._bare_column = f"{table}[{column}]"
-                return f"{_sql_alias(table)}.{_sql_alias(column)}"
+                return f"{_sql_alias(table)}.{_sql_col(column)}"
             if nxt and nxt[1] == "(":               # a function call
                 return self._function(text.upper(), filters)
             raise _DaxUnsupported(f"bare identifier {text!r}")
@@ -700,7 +821,7 @@ class _DaxTranslator:
                 raise _DaxUnsupported(f"{func} needs a column")
             return (f"SUM(CASE WHEN {' AND '.join(filters)} THEN 1 ELSE 0 END)"
                     if filters else "COUNT(*)")
-        target = f"{_sql_alias(table)}.{_sql_alias(column)}"
+        target = f"{_sql_alias(table)}.{_sql_col(column)}"
         if filters:
             target = f"CASE WHEN {' AND '.join(filters)} THEN {target} END"
         return f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
@@ -781,7 +902,7 @@ class _DaxTranslator:
             raise _DaxUnsupported(f"filter operator {op!r} isn't supported")
         value = self._primary([])
         self.tables.add(table)
-        return f"{_sql_alias(table)}.{_sql_alias(column)} {_DAX_COMPARISONS[op]} {value}"
+        return f"{_sql_alias(table)}.{_sql_col(column)} {_DAX_COMPARISONS[op]} {value}"
 
 
 def translate_dax(dax: str, measures: dict[tuple[str, str], str]) -> _Sql | None:
@@ -803,6 +924,7 @@ class _Field:
     out_name: str                    # its SQL alias
     expr: str                        # ready SQL: an aggregate for a value, a column otherwise
     tables: set[str] = field(default_factory=set)
+    key: tuple[str, str] = ("", "")  # (table, column/measure): what a sort definition points at
 
 
 def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
@@ -816,17 +938,44 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) ->
         sql_func, distinct = _REF_AGG_TO_SQL.get(agg.lower(), (None, False))
         if sql_func is None:
             return None
-        target = f"{_sql_alias(table)}.{_sql_alias(col)}"
+        target = f"{_sql_alias(table)}.{_sql_col(col)}"
         expr = f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
-        return _Field(role, True, col, _sql_alias(col), expr, {table})
+        return _Field(role, True, col, _sql_col(col), expr, {table}, (table, col))
     measure_dax = measures.get((table, col))
     if measure_dax is not None:
         translated = translate_dax(measure_dax, measures)
         if translated is None:
             return None
-        return _Field(role, True, col, _sql_alias(col), translated.text, set(translated.tables))
-    return _Field(role, False, col, _sql_alias(col),
-                  f"{_sql_alias(table)}.{_sql_alias(col)}", {table})
+        return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col))
+    return _Field(role, False, col, _sql_col(col),
+                  f"{_sql_alias(table)}.{_sql_col(col)}", {table}, (table, col))
+
+
+def _order_by(sort: list[dict] | None, positions: dict[tuple[str, str], int]) -> str:
+    """`ORDER BY <column position> ASC|DESC, ...` for the sort entries that point at a selected
+    column; entries for fields the query doesn't select are skipped (Power BI can sort by a
+    field that isn't shown, which a positional ORDER BY can't express)."""
+    parts = []
+    for it in sort or []:
+        pos = positions.get((it.get("entity"), it.get("property")))
+        if pos:
+            parts.append(f"{pos} {'DESC' if it.get('direction') == 'desc' else 'ASC'}")
+    return "\nORDER BY " + ", ".join(parts) if parts else ""
+
+
+def _rel_ends(r: dict) -> tuple[str, str, str, str] | None:
+    """(from_table, from_col, to_table, to_col) of an active relationship, or None. Accepts both
+    spellings: the extractor (pbixray) emits `FromTableName`/`FromColumnName`/`ToTableName`/
+    `ToColumnName` and the older tests used `FromTable`/... Only the latter was read, so no
+    JOIN was ever drafted from a real model. An inactive relationship (`IsActive` 0/false) is
+    not a default join path and is skipped."""
+    if not isinstance(r, dict) or r.get("IsActive") in (0, False, "0", "false"):
+        return None
+    ft = r.get("FromTable") or r.get("FromTableName")
+    fc = r.get("FromColumn") or r.get("FromColumnName")
+    tt = r.get("ToTable") or r.get("ToTableName")
+    tc = r.get("ToColumn") or r.get("ToColumnName")
+    return (ft, fc, tt, tc) if ft and fc and tt and tc else None
 
 
 def _find_join_path(tables: list[str], relationships: list[dict]) -> list[tuple[str, str, str, str]] | None:
@@ -841,9 +990,10 @@ def _find_join_path(tables: list[str], relationships: list[dict]) -> list[tuple[
         return []
     edges: dict[str, list[tuple[str, str, str, str]]] = {}
     for r in relationships or []:
-        ft, fc, tt, tc = r.get("FromTable"), r.get("FromColumn"), r.get("ToTable"), r.get("ToColumn")
-        if not (ft and fc and tt and tc):
+        ends = _rel_ends(r)
+        if ends is None:
             continue
+        ft, fc, tt, tc = ends
         edges.setdefault(ft, []).append((ft, fc, tt, tc))
         edges.setdefault(tt, []).append((tt, tc, ft, fc))
 
@@ -885,10 +1035,10 @@ def _draft_from_clause(tables_needed: list[str], table_map: dict[str, str],
         return None
     aliases = {t: _sql_alias(t) for t in tables_needed}
     root = tables_needed[0]
-    sources = [f"({validated[root]}) AS {aliases[root]}"]
+    sources = [_subquery(validated[root], aliases[root])]
     for ft, fc, tt, tc in join_path:
-        sources.append(f"JOIN ({validated[tt]}) AS {aliases[tt]} "
-                       f"ON {aliases[ft]}.{_sql_alias(fc)} = {aliases[tt]}.{_sql_alias(tc)}")
+        sources.append(f"JOIN {_subquery(validated[tt], aliases[tt])} "
+                       f"ON {aliases[ft]}.{_sql_col(fc)} = {aliases[tt]}.{_sql_col(tc)}")
     return sources, aliases
 
 
@@ -903,7 +1053,7 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str]) -> tuple[
         if ptable in aliases:
             # IN (...) rather than "=": works unchanged whether the parameter stays a
             # single value or someone later turns on `multi` — see query.py's bind().
-            where_parts.append(f"{aliases[ptable]}.{_sql_alias(pcol)} IN (:{pname})")
+            where_parts.append(f"{aliases[ptable]}.{_sql_col(pcol)} IN (:{pname})")
             params_used.append(pname)
     return where_parts, params_used
 
@@ -942,13 +1092,29 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     sources, aliases = built
     where_parts, params_used = _draft_where(parameters, aliases)
 
-    def assemble(select_parts: list[str], group_positions: list[int]) -> str:
-        sql = "SELECT " + ", ".join(select_parts) + "\nFROM " + "\n".join(sources)
-        if where_parts:
-            sql += "\nWHERE " + " AND ".join(where_parts)
+    sort = v.get("sort")
+
+    # Aggregates over several fact tables cannot share one joined FROM: every extra table
+    # multiplies the rows of the others and inflates the sums ("every value x k"). Power BI
+    # aggregates each table separately; a single SELECT over the join does not, so those
+    # visuals are left for a person rather than drafted into a plausible-looking wrong number.
+    def value_tables(fs: list[_Field]) -> set[str]:
+        return {t for f in fs for t in f.tables}
+
+    if len(value_tables(values)) > 1 and not (kind in _CHART_KINDS and len(values) > 1
+                                              and all(len(f.tables) == 1 for f in values)):
+        return None
+
+    def assemble(select_parts: list[str], group_positions: list[int], order: str = "",
+                 sources_: list[str] | None = None, where_: list[str] | None = None) -> str:
+        sql = "SELECT " + ", ".join(select_parts) + "\nFROM " + "\n".join(sources_ or sources)
+        if where_ is None:
+            where_ = where_parts
+        if where_:
+            sql += "\nWHERE " + " AND ".join(where_)
         if group_positions:
             sql += "\nGROUP BY " + ", ".join(str(p) for p in group_positions)
-        return sql
+        return sql + order
 
     if kind in ("card", "gauge"):
         if len(values) != 1 or categories:
@@ -975,17 +1141,30 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             names = ["category", "series"]
             parts = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)]
             parts.append(f"{values[0].expr} AS value")
-            return assemble(parts, list(range(1, len(categories) + 1))), params_used
+            pos = {c.key: i for i, c in enumerate(categories, start=1)}
+            pos.setdefault(values[0].key, len(categories) + 1)
+            return assemble(parts, list(range(1, len(categories) + 1)), _order_by(sort, pos)), params_used
         # Several measures: one arm per measure, the measure's own name as the series.
         if len(categories) != 1 or kind == "pie":
             return None
-        arms = []
+        arms, all_params = [], []
+        # two measures with the same column name (Sum of x over table A / table B): tell them apart
+        dup = {f.label for f in values if [g.label for g in values].count(f.label) > 1}
         for f in values:
-            label = f.label.replace("'", "''")
+            arm_tables = list(dict.fromkeys([t for c in categories for t in c.tables] + sorted(f.tables)))
+            arm_built = _draft_from_clause(arm_tables, table_map, relationships)
+            if arm_built is None:
+                return None
+            arm_sources, arm_aliases = arm_built
+            arm_where, arm_params = _draft_where(parameters, arm_aliases)
+            all_params += [p for p in arm_params if p not in all_params]
+            name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
+            label = name.replace("'", "''")
             arms.append(assemble([f"{categories[0].expr} AS category",
                                   f"'{label}' AS series",
-                                  f"{f.expr} AS value"], [1, 2]))
-        return "\nUNION ALL\n".join(arms), params_used
+                                  f"{f.expr} AS value"], [1, 2], "", arm_sources, arm_where))
+        # a sort on the category applies to the whole union (column 1)
+        return "\nUNION ALL\n".join(arms) + _order_by(sort, {categories[0].key: 1}), all_params
 
     # table / matrix / multicard: every field becomes a column, in projection order.
     parts, group_positions = [], []
@@ -993,7 +1172,136 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         parts.append(f"{f.expr} AS {f.out_name}")
         if not f.is_value:
             group_positions.append(i)
-    return assemble(parts, group_positions if values else []), params_used
+    pos: dict[tuple[str, str], int] = {}
+    for i, f in enumerate(fields, start=1):
+        pos.setdefault(f.key, i)
+    return assemble(parts, group_positions if values else [], _order_by(sort, pos)), params_used
+
+
+def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
+                    relationships: list[dict], model_tables: set[str], parameters: dict) -> list[str]:
+    """Why a data visual can (or cannot) be drafted into SQL, as reason codes: `ok`, or one or
+    more of `kind:<kind>` (no drafter for it), `unknown_table:<t>` (visual points at a table the
+    model doesn't have: renamed/deleted), `no_source:<t>` (no Teradata query for that table, e.g.
+    a DAX calculated table), `not_connected:<t1>+<t2>` (no relationship between them), 
+    `untranslatable_measure:<name>`, `shape` (fields don't fit the kind's column contract)."""
+    if kind not in _DRAFTABLE_KINDS:
+        return [f"kind:{kind}"]
+    reasons: list[str] = []
+    fields: list[_Field] = []
+    for role, refs in (v.get("projections") or {}).items():
+        for ref in refs or []:
+            _, table, col = query_ref_parts(ref)
+            if (table, col) not in measures and model_tables and table not in model_tables:
+                reasons.append(f"unknown_table:{table}")
+                continue
+            f = _resolve_field(role, ref, measures)
+            if f is None:
+                reasons.append(f"untranslatable_measure:{col}")
+            else:
+                fields.append(f)
+    if reasons:
+        return sorted(set(reasons))
+    if not fields:
+        return ["shape"]
+    tables = list(dict.fromkeys(t for f in fields for t in f.tables))
+    missing = [t for t in tables if t not in table_map]
+    if missing:
+        return [f"no_source:{t}" for t in missing]
+    if len(tables) > 1 and _find_join_path(tables, relationships) is None:
+        return ["not_connected:" + "+".join(sorted(tables))]
+    return ["ok"] if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters) else ["shape"]
+
+
+def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict:
+    """How well the model + visuals map to SQL: model facts worth a person's attention, and for
+    every data visual the reason it was (or wasn't) drafted. Read-only: writes nothing."""
+    table_map = table_map or {}
+    tables = [t for t in (model.get("tables") or []) if isinstance(t, str)]
+    measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
+                for m in (model.get("measures") or []) if isinstance(m, dict)}
+    rels = model.get("relationships") if isinstance(model.get("relationships"), list) else []
+    params = _slicer_parameters(layout)
+    calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []}
+    visuals: dict[str, list[str]] = {}
+    n_data = 0
+    for page in layout["pages"]:
+        for v in page["visuals"]:
+            if v.get("is_group"):
+                continue
+            kind = KIND_MAP.get(v["type"], "custom" if v.get("is_custom") else "unsupported")
+            if kind in NO_DATA_KINDS:
+                continue
+            n_data += 1
+            label = f"{page.get('display_name')} / {v.get('title') or v['type']}"
+            for reason in diagnose_visual(v, kind, measures, table_map, rels, set(tables), params):
+                visuals.setdefault(reason, []).append(label)
+    measure_names = {n for (_, n) in measures}
+    composite = sorted(n for (_, n), dax in measures.items()
+                       if any(ref in measure_names for ref in re.findall(r"(?<![\w'\]])\[([^\]]+)\]", dax or "")))
+    return {
+        "report": layout.get("report"),
+        "model": {
+            "tables": len(tables), "mapped": sorted(t for t in tables if t in table_map),
+            "unmapped": sorted(t for t in tables if t not in table_map and t not in calc_tables),
+            "calculated_tables": {t: re.sub(r"\s+", " ", e).strip()[:120] for t, e in calc_tables.items()},
+            "calculated_columns": [f"{c.get('TableName')}.{c.get('ColumnName')}"
+                                   for c in model.get("calculated_columns") or []],
+            "relationships": len(rels),
+            "many_to_many": [f"{e[0]} → {e[2]}" for r in rels if r.get("Cardinality") == "M:M"
+                             and (e := _rel_ends(r))],
+            "unrelated_tables": sorted(t for t in tables if not any(
+                t in (e[0], e[2]) for r in rels if (e := _rel_ends(r)))),
+            "composite_measures": composite,
+            "rls_rules": len(model.get("rls") or []),
+            # fact tables whose Power Query adds a date column: the likely join key for an
+            # undeclared calendar relationship (a hint, never applied automatically)
+            "date_key_hint": sorted({
+                r.get("TableName") for r in model.get("power_query") or []
+                if isinstance(r, dict) and re.search(r"\bAS\s+log_dt\b", r.get("Expression") or "", re.I)}),
+        },
+        "visuals": {"data_visuals": n_data, "drafted": len(visuals.get("ok", [])),
+                    "by_reason": {k: v for k, v in sorted(visuals.items()) if k != "ok"}},
+    }
+
+
+def render_mapping_report(rep: dict) -> str:
+    m, v = rep["model"], rep["visuals"]
+    L = [f"# Mapping coverage: {rep['report']}", "",
+         f"- Data visuals: **{v['data_visuals']}**, SQL auto-drafted: **{v['drafted']}**, "
+         f"needing a person: **{v['data_visuals'] - v['drafted']}**",
+         f"- Tables: {m['tables']} (Teradata query known for {len(m['mapped'])}), "
+         f"relationships: {m['relationships']}, RLS rules: {m['rls_rules']}", ""]
+    if m["calculated_tables"]:
+        L += ["## Calculated tables (DAX, no Teradata source)", ""]
+        L += [f"- `{t}` = `{e}`" for t, e in m["calculated_tables"].items()]
+        if m["calculated_columns"]:
+            L += ["- calculated columns: " + ", ".join(f"`{c}`" for c in m["calculated_columns"])]
+        L += [""]
+    if m["unmapped"]:
+        L += ["## Tables without a Teradata query", "", ", ".join(f"`{t}`" for t in m["unmapped"]), ""]
+    if m["unrelated_tables"]:
+        L += ["## Tables with no relationship at all", "",
+              ", ".join(f"`{t}`" for t in m["unrelated_tables"]),
+              "", "A visual combining one of these with another table cannot be joined automatically; in "
+              "Power BI such a visual shows unfiltered values, so check that the report really means that.", ""]
+    if m["date_key_hint"] and m["calculated_tables"]:
+        L += ["## Hint: possible undeclared calendar relationship", "",
+              "These tables' Power Query adds a date column named `log_dt`: " +
+              ", ".join(f"`{t}`" for t in m["date_key_hint"]) + ". A `Calendar[Date] = log_dt` "
+              "relationship is probably what the report intends, but the model doesn't declare it "
+              "(confirm with the report owner; it is not applied automatically).", ""]
+    if m["many_to_many"]:
+        L += ["## Many-to-many relationships", "", *[f"- {r}" for r in m["many_to_many"]],
+              "", "A join over these can duplicate rows and inflate sums; `validate` will show it.", ""]
+    if m["composite_measures"]:
+        L += ["## Measures built from other measures", "", ", ".join(f"`{n}`" for n in m["composite_measures"]), ""]
+    if v["by_reason"]:
+        L += ["## Why visuals were not drafted", ""]
+        for reason, labels in v["by_reason"].items():
+            L += [f"- `{reason}` × {len(labels)}: " + "; ".join(labels[:4]) + (" ..." if len(labels) > 4 else "")]
+        L += [""]
+    return "\n".join(L)
 
 
 AUTOFILL_NOTE = ("Auto-drafted (rule-based, see skill dax-to-teradata-sql) — review the columns "
