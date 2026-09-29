@@ -72,6 +72,18 @@ dialect does not flag it. The drafter quotes it, and `TeradataBackend` rewrites 
 time (older yamls, hand-written SQL), but write it quoted. Dates as ISO strings. Nulls: the renderer skips categories whose
 `value` is null. Numeric formatting (`format: "#,##0.0%"`) goes in the yaml, not the SQL.
 
+## Titles and text colour
+
+A visual's title formatting is read from `vcObjects.title` (`fontColor`, `fontSize`, `bold`, `alignment`; theme
+colour ids resolved like the other colours) into `style.title_*` and drawn inline (`_title_css`, values
+validated). A slicer on a dark panel normally has a *white* title set by the report; the theme foreground
+would make it dark on dark. When the report sets no title colour, `_backdrop` finds what the visual sits on
+(its own opaque fill, else the highest visual under its centre, else the page, else the theme) and
+`_readable_fg` swaps in a colour with WCAG contrast >= 3 only when the theme foreground fails that; the same
+colour is the default text of a slicer widget (`--sl-fg`). A background at 100 % transparency is not painted
+(`style.transparency`); a partial one is `rgba`. The title text itself comes from the yaml (`title`), so an old
+yaml keeps old text until it is regenerated.
+
 ## 100 % stacked charts
 
 `hundredPercentStacked*` visuals are drawn with `v.percent`: each category's series are rescaled to sum to

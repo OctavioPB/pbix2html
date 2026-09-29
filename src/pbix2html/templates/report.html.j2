@@ -111,7 +111,7 @@
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
-    {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
+    {% if v.title %}<div class="title"{% if v.title_css %} style="{{ v.title_css }}"{% endif %}>{{ v.title }}</div>{% endif %}
     {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}
     <div class="body"></div>
   </div>

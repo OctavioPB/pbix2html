@@ -88,6 +88,78 @@ def _rgba(color: str | None, transparency: float | None) -> str | None:
     return f"rgba({r},{g},{b},{alpha:.2f})"
 
 
+def _rgb(color: str | None) -> tuple[int, int, int, float] | None:
+    """'#RRGGBB' / 'rgba(r,g,b,a)' → (r, g, b, alpha); None for anything else."""
+    if not color:
+        return None
+    if _HEX6.match(color):
+        return (*(int(color[i:i + 2], 16) for i in (1, 3, 5)), 1.0)
+    m = re.fullmatch(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)", color.strip())
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4))) if m else None
+
+
+def _luminance(rgb: tuple[int, int, int, float]) -> float:
+    def lin(c: int) -> float:
+        c /= 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    return 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
+
+
+def _contrast(a: str, b: str) -> float | None:
+    """WCAG contrast ratio of two colours (1-21); None if either isn't a plain colour."""
+    ra, rb = _rgb(a), _rgb(b)
+    if ra is None or rb is None:
+        return None
+    hi, lo = sorted((_luminance(ra), _luminance(rb)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict) -> str:
+    """The colour a visual's text actually sits on: its own opaque fill, else the fill of the highest
+    visual under its centre (a dark panel drawn behind a slicer), else the page, else the theme."""
+    def opaque(style: dict) -> str | None:
+        c = style.get("background")
+        return c if c and (style.get("transparency") or 0) < 50 and _rgb(c) else None
+
+    own = opaque(v.get("style") or {})
+    if own:
+        return own
+    cx, cy = (v.get("x") or 0) + (v.get("width") or 0) / 2, (v.get("y") or 0) + (v.get("height") or 0) / 2
+    z = v.get("z") or 0
+    under = [w for w in visuals if w is not v and not w.get("is_group") and (w.get("z") or 0) <= z
+             and w.get("x") is not None and w["x"] <= cx <= w["x"] + (w.get("width") or 0)
+             and w.get("y") is not None and w["y"] <= cy <= w["y"] + (w.get("height") or 0)
+             and opaque(w.get("style") or {})]
+    if under:
+        return opaque(max(under, key=lambda w: w.get("z") or 0)["style"])       # type: ignore[arg-type]
+    return page_bg if page_bg and _rgb(page_bg) else theme["background"]
+
+
+def _readable_fg(backdrop: str, theme: dict) -> str | None:
+    """A text colour that reads on `backdrop`, or None when the theme's foreground already does."""
+    fg = theme["foreground"]
+    if (_contrast(fg, backdrop) or 21) >= 3:
+        return None
+    candidates = [theme["background"], "#FFFFFF", "#000000"]
+    return max(candidates, key=lambda c: _contrast(c, backdrop) or 0)
+
+
+def _title_css(style: dict, readable: str | None) -> str:
+    """Inline CSS for a visual's title: what the report set (colour, size, weight, alignment), else a
+    colour that reads on what is behind it."""
+    parts = []
+    color = style.get("title_color") or readable
+    if color and _rgb(color):
+        parts.append(f"color:{color}")
+    if style.get("title_size"):
+        parts.append(f"font-size:{round(style['title_size'] * 4 / 3, 1)}px")
+    if style.get("title_bold") is not None:
+        parts.append(f"font-weight:{700 if style['title_bold'] else 400}")
+    if style.get("title_align"):
+        parts.append(f"text-align:{style['title_align']}")
+    return ";".join(parts)
+
+
 def _merged_state(states: dict, name: str) -> dict:
     """`default` overlaid with the named state, card by card (Power BI stores only the
     properties a state changes)."""
@@ -255,6 +327,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     `sql`/`params` — HAH has no server of ours to fetch data from, so the client has to
     run the query itself.
     """
+    theme = resolve_theme(layout.get("theme"))
     pages = []
     all_pages = layout["pages"]
     bookmarks = {b["id"]: b for b in layout.get("bookmarks") or []}
@@ -320,6 +393,16 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 # leaves its own default in place instead of inventing a border.
                 "style": v.get("style") or {},
             }
+            # a fill Power BI shows at 100 % transparency is not drawn; a partly transparent one is rgba
+            st = dict(entry["style"])
+            if st.get("background") and st.get("transparency") is not None:
+                st["background"] = _rgba(st["background"], st["transparency"]) if st["transparency"] < 100 else None
+                if not st["background"]:
+                    st.pop("background")
+            entry["style"] = st
+            readable = _readable_fg(_backdrop(v, p["visuals"], p.get("background"), theme), theme)
+            entry["title_css"] = _title_css(v.get("style") or {}, readable)
+            entry["fg"] = readable                      # default text colour of the visual's own content (slicer widget)
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses
             if kind == "tooltip":       # native tooltip: the header, then the text (the icon has no title)
@@ -351,7 +434,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
         on_page = not p.get("pages") or any(n in rendered for n in p["pages"])
         parameters[name] = {"label": p.get("label") or name, "value": values.get(name),
                             "multi": bool(p.get("multi")), "widget": name in with_widget or not on_page}
-    return {"report": spec.report, "theme": resolve_theme(layout.get("theme")), "pages": pages, "parameters": parameters}
+    return {"report": spec.report, "theme": theme, "pages": pages, "parameters": parameters}
 
 
 def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: dict[str, dict] | None,
