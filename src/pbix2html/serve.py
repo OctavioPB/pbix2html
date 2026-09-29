@@ -106,6 +106,19 @@ def _spec(report: str) -> semantic.ReportSpec:
     return spec
 
 
+_UNREACHABLE = ("Hostname lookup failed", "[Error 503]", "Lost connection", "Connection refused", "timed out",
+                "Connection reset", "Broken pipe", "Socket", "WinError 10054", "[Error 8033]")
+
+
+def _query_error(e: Exception) -> HTTPException:
+    """HTTP 503 (with the reason) when Teradata can't be reached at all, HTTP 500 for anything the database
+    or the SQL did. The two need different actions: check the VPN / network, or fix the query."""
+    text = f"{type(e).__name__}: {e}"
+    if any(marker in text for marker in _UNREACHABLE):
+        return HTTPException(503, f"Teradata isn't reachable (network / VPN?): {text.splitlines()[0]}")
+    return HTTPException(500, text)
+
+
 def _backend() -> TeradataBackend:
     if not hasattr(app.state, "backend"):
         app.state.backend = TeradataBackend()
@@ -144,7 +157,7 @@ def slicer_options(report: str, visual_id: str, request: Request):
         return run_slicer_options(spec, visual_id, _backend(), proxy_user=user, use_cache=True)
     except Exception as e:
         log.exception("slicer %s of %s failed", visual_id, report)
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
+        raise _query_error(e)
 
 
 @app.get("/reports/{report}/visuals/{visual_id}")
@@ -166,7 +179,7 @@ def visual(report: str, visual_id: str, request: Request):
         # whatever actually went wrong. Raising HTTPException instead keeps CORS headers
         # on the response so the report can show the real error inline in the visual.
         log.exception("visual %s of %s failed", visual_id, report)      # full traceback in serve's terminal
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
+        raise _query_error(e)
 
 
 @app.get("/reports/{report}")
