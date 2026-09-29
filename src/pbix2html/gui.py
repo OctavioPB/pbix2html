@@ -35,7 +35,7 @@ from jinja2 import Environment, FileSystemLoader
 from . import extract as ex
 from . import semantic
 from .config import settings
-from .query import FakeBackend, TeradataBackend, run_report
+from .query import FakeBackend, TeradataBackend, run_report, run_slicers
 from .render import render_html
 from .validate import validate_report, write_markdown
 
@@ -826,7 +826,7 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                 raise ValueError(f"role '{role}' isn't defined in metrics/{name}.yaml")
             proxy_user = r.get("proxy_user")
 
-        data = None
+        data = slicer_data = None
         hah_base = None
         if mode == "hah":
             # ADR-004: the HAH platform fetches each visual's SQL itself, client-side —
@@ -845,8 +845,10 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                     "or check the demo box to preview the design."
                 )
             data = run_report(spec, values, backend, proxy_user=proxy_user)
+            slicer_data = run_slicers(spec, backend, proxy_user=proxy_user)
 
-        html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base)
+        html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base,
+                           slicer_data=slicer_data)
         # Both halves go through safe_name(): `role` is a yaml key, and a role called
         # "../../x" (or just "Sales/North", which is a plausible thing to type) would
         # otherwise steer this write outside out/ entirely. save_edit() rejects such

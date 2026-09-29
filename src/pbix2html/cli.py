@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import extract as ex, semantic
 from .config import settings
-from .query import FakeBackend, TeradataBackend, run_report
+from .query import FakeBackend, TeradataBackend, run_report, run_slicers
 from .render import render_html
 from .validate import validate_report, write_markdown
 
@@ -93,11 +93,15 @@ def cmd_convert(args):
         if r is None:
             sys.exit(f"role {role!r} not defined in the yaml")
         proxy_user = r.get("proxy_user")
-    data = None
+    data = slicer_data = None
     if args.mode == "snapshot":
         backend = _backend(args)
         data = run_report(spec, values, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
-    html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden)
+        slicer_data = run_slicers(spec, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
+    if args.mode == "hah" and not args.hah_base:
+        sys.exit("--mode hah needs --hah-base <url of the HTML App Host>")
+    html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden,
+                       slicer_data=slicer_data, hah_base=args.hah_base)
     out = Path(args.html) if args.html else Path(args.out) / (f"{layout['report']}" + (f".{role}" if role else "") + ".html")
     out.write_text(html, encoding="utf-8")
     n_ok = sum(1 for d in (data or {}).values() if d.get("rows")) if data else 0
@@ -152,7 +156,8 @@ def main(argv=None) -> int:
     p.add_argument("pbix")
     p.add_argument("--out", default="out")
     p.add_argument("--html", help="explicit output path")
-    p.add_argument("--mode", choices=["snapshot", "live"], default="snapshot")
+    p.add_argument("--mode", choices=["snapshot", "live", "hah"], default="snapshot")
+    p.add_argument("--hah-base", help="base URL of the HTML App Host (mode hah), e.g. https://hah.example.com")
     p.add_argument("--role")
     p.add_argument("--params", nargs="*", help="k=v (yaml parameters)")
     p.add_argument("--fake-data", help="json {columns,rows} for development without Teradata")

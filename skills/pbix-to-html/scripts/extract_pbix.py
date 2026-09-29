@@ -215,6 +215,9 @@ def resolve_theme_markers(layout: dict) -> None:
             if isinstance(style, dict):
                 fix(style, "background")
                 fix(style, "border_color")
+            if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
+                fix(v["slicer"]["style"], "color")
+                fix(v["slicer"]["style"], "background")
             for state in ((v.get("button") or {}).get("states") or {}).values():
                 for card in ("text", "fill", "outline"):
                     if isinstance(state.get(card), dict):
@@ -694,6 +697,11 @@ def _parse_visual(vc: dict) -> dict:
         "action": _visual_link(vco),
         "sort": _proto_sort(sv),
         **({"button": parse_button(sv)} if vtype == "actionButton" else {}),
+        **({"slicer": parse_slicer(sv.get("objects") or {}, list(dict.fromkeys(
+            qmap.get(p.get("queryRef"), p.get("queryRef")) for refs in projections.values()
+            if isinstance(refs, list) for p in refs if isinstance(p, dict) and p.get("queryRef"))),
+            sv.get("syncGroup"))}
+           if vtype in _SLICER_TYPES else {}),
     })
     return visual
 
@@ -740,6 +748,120 @@ def _visual_link(vco: dict) -> dict | None:
         if kind == "Bookmark":
             return {"type": "bookmark", "bookmark": lit("bookmark"), "enabled": enabled}
     return None
+
+
+_SLICER_TYPES = {"slicer", "advancedSlicerVisual", "listSlicer"}
+_SLICER_MODES = {"dropdown": "dropdown", "basic": "list", "between": "between", "before": "before",
+                 "after": "after", "relative": "relative", "tile": "tile"}
+
+
+def _pbi_literal(text: Any) -> Any:
+    """A Power BI literal as a Python value: `2026L` → 2026, `12.5D` → 12.5, `'abc'` → 'abc',
+    `datetime'2026-04-01T00:00:00'` → '2026-04-01', true/false → bool, null → None."""
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+    m = re.fullmatch(r"datetime'(\d{4}-\d{2}-\d{2})(?:T[\d:.]*)?'", t)
+    if m:
+        return m.group(1)
+    if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
+        return t[1:-1].replace("''", "'")
+    if t.lower() in ("true", "false"):
+        return t.lower() == "true"
+    if t.lower() == "null":
+        return None
+    m = re.fullmatch(r"(-?\d+)L", t)
+    if m:
+        return int(m.group(1))
+    m = re.fullmatch(r"(-?\d+(?:\.\d+)?)[DM]", t)
+    if m:
+        return float(m.group(1))
+    return t
+
+
+def _filter_selection(filt: Any) -> dict:
+    """What a slicer's saved filter selects: {"values": {"Table.Col": [..]}, "range":
+    {"Table.Col": {"from": .., "to": ..}}}. Reads `In`, `Between` and `Comparison` (>=, <=, >, <)
+    conditions, through `And` / `Not`-free nesting; anything else is ignored."""
+    if not isinstance(filt, dict):
+        return {}
+    aliases = {f.get("Name"): f.get("Entity") for f in filt.get("From") or [] if isinstance(f, dict)}
+    values: dict[str, list] = {}
+    ranges: dict[str, dict] = {}
+
+    def ref(node: Any) -> str | None:
+        ep = _entity_prop(node, aliases)
+        return f"{ep[0]}.{ep[1]}" if ep and ep[0] and ep[1] else None
+
+    def lit(node: Any) -> Any:
+        return _pbi_literal(((node or {}).get("Literal") or {}).get("Value")) if isinstance(node, dict) else None
+
+    def walk(cond: Any) -> None:
+        if not isinstance(cond, dict):
+            return
+        if "And" in cond:
+            walk(cond["And"].get("Left"))
+            walk(cond["And"].get("Right"))
+        elif "In" in cond:
+            exprs, rows = cond["In"].get("Expressions") or [], cond["In"].get("Values") or []
+            for k, e in enumerate(exprs):
+                name = ref(e)
+                if name:
+                    values.setdefault(name, []).extend(
+                        v for v in (lit(r[k]) for r in rows if isinstance(r, list) and len(r) > k) if v is not None)
+        elif "Between" in cond:
+            name = ref(cond["Between"].get("Expression"))
+            if name:
+                ranges[name] = {"from": lit(cond["Between"].get("LowerBound")), "to": lit(cond["Between"].get("UpperBound"))}
+        elif "Comparison" in cond:
+            c = cond["Comparison"]
+            name, value = ref(c.get("Left")), lit(c.get("Right"))
+            if name and value is not None:
+                bound = {1: "from", 2: "from", 3: "to", 4: "to"}.get(c.get("ComparisonKind"))
+                if bound:
+                    ranges.setdefault(name, {})[bound] = value
+
+    for w in filt.get("Where") or []:
+        walk((w or {}).get("Condition"))
+    out: dict[str, Any] = {}
+    if values:
+        out["values"] = values
+    if ranges:
+        out["range"] = ranges
+    return out
+
+
+def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = None) -> dict:
+    """A slicer's widget description: {mode, fields, single, select_all, initial, style}.
+
+    `mode` (objects.data.mode: Dropdown / Basic / Between / Before / After / Relative / Tile) is
+    normalised to dropdown / list / between / before / after / relative / tile; a slicer that
+    doesn't say is a plain list, as in Power BI. `initial` is the slicer's saved selection
+    (objects.general.filter), which is part of the report's state. Formatting comes from
+    objects.items."""
+    def prop(card: str, key: str) -> Any:
+        for e in (objects or {}).get(card) or []:
+            pr = (e or {}).get("properties") or {}
+            if key in pr:
+                return pr[key]
+        return None
+
+    mode = (literal_to_text(((prop("data", "mode") or {}).get("expr")) or {}) or "Basic").lower()
+    flt = ((prop("general", "filter") or {}).get("filter"))
+    style = {k: v for k, v in {
+        "color": _color_prop(prop("items", "fontColor")), "background": _color_prop(prop("items", "background")),
+        "size": _num((prop("items", "textSize") or {}).get("expr")),
+    }.items() if v is not None}
+    group = (sync_group or {}).get("groupName") if isinstance(sync_group, dict) else None
+    return {
+        "mode": _SLICER_MODES.get(mode, "other"),
+        **({"sync_group": group} if group else {}),     # slicers sharing a group share one selection
+        "fields": list(fields),
+        "single": _bool((prop("selection", "singleSelect") or {}).get("expr")) is True,
+        "select_all": _bool((prop("selection", "selectAllCheckboxEnabled") or {}).get("expr")) is not False,
+        "initial": _filter_selection(flt),
+        "style": style,
+    }
 
 
 def parse_bookmarks(root_config: dict) -> list[dict]:
@@ -1044,6 +1166,10 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "action": _visual_link(vco),
             "sort": _pbir_sort(vis),
             **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
+            **({"slicer": parse_slicer(vis.get("objects") or {},
+                                       list(dict.fromkeys(f["queryRef"] for f in fields if f["queryRef"])),
+                                       vis.get("syncGroup"))}
+               if vtype in _SLICER_TYPES else {}),
         }
     except Exception as e:
         stub = _empty_visual_stub({}, e)

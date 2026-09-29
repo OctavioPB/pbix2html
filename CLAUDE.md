@@ -43,6 +43,8 @@ git history if you ever need it.)
      Teradata applies row-level security. See skill `teradata-directquery`.
    - Model RLS rules (`model.json → rls`) are documented in the report's yaml;
      their replication in Teradata is tracked in `PLAN.md`.
+   - Slicers are widgets with page-scoped parameters (ADR-006); `snapshot` widgets are read-only, so
+     an interactive report needs `live` or `hah`.
    - `metrics/<Report>.relationships.json` holds extra relationships (a proposed calendar → fact
      date key); it is proposed automatically but must be reviewed like the table map.
    - The panel's table-map step (`metrics/<Report>.table_map.json`) only accepts a

@@ -16,10 +16,12 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .config import settings
+from . import semantic
 from .semantic import KIND_MAP, ReportSpec
 
 log = logging.getLogger(__name__)
 TEMPLATES = Path(__file__).parent / "templates"
+_SLICER_JS = (TEMPLATES / "slicer.js").read_text(encoding="utf-8") if (TEMPLATES / "slicer.js").exists() else ""
 
 # Default Power BI palette (baseTheme with no customization).
 DEFAULT_THEME = {
@@ -150,6 +152,27 @@ def _button_css(button: dict | None) -> str | None:
     return ";".join(f"{k}:{v}" for k, v in css.items())
 
 
+def _slicer_entry(v: dict, page_name: str | None, spec: ReportSpec, include_sql: bool) -> dict | None:
+    """What the template needs to draw a slicer widget: its mode, the parameters it drives (one per
+    hierarchy level, or one per range bound) and, for `hah`, the SQL of its values. None when the
+    slicer drives no parameter (e.g. a relative-date slicer, which has no widget yet)."""
+    d = semantic.slicer_descriptor(v)
+    names = semantic.slicer_params(v, page_name or "", spec.parameters)
+    if not names or d.get("mode") in ("relative", "other", "tile"):
+        return None
+    params = spec.parameters
+    out = {"mode": d.get("mode"), "params": names, "single": bool(d.get("single")),
+           "select_all": d.get("select_all", True) is not False,
+           "levels": [(params.get(n) or {}).get("label") or n for n in names],
+           "dtypes": [(params.get(n) or {}).get("dtype") or "text" for n in names],
+           "bounds": [(params.get(n) or {}).get("bound") for n in names],
+           "style": {k: d["style"][k] for k in ("color", "background", "size")
+                     if isinstance(d.get("style"), dict) and d["style"].get(k) is not None}}
+    if include_sql:
+        out["options_sql"] = ((spec.raw.get("slicers") or {}).get(v["id"]) or {}).get("options_sql")
+    return out
+
+
 def _group_chain(v: dict, by_id: dict) -> list[str]:
     """Ids of the groups a visual sits in, nearest first (cycles ignored)."""
     chain: list[str] = []
@@ -264,8 +287,11 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 continue
             vs = spec.visuals.get(v["id"])
             kind = vs.kind if vs else KIND_MAP.get(v["type"], "unsupported")
+            slicer = None
             if kind == "slicer":
-                continue  # slicers are parameters, they're shown in the top bar
+                slicer = _slicer_entry(v, p.get("display_name"), spec, include_sql)
+                if slicer is None:
+                    continue    # a mode with no widget (relative dates...): nothing to draw
             r = (spec.raw.get("visuals") or {}).get(v["id"]) or {}
             entry = {
                 "id": v["id"], "kind": kind, "type": v["type"],
@@ -293,9 +319,11 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "style": v.get("style") or {},
             }
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
+            entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses
+            if slicer:
+                entry["slicer"] = slicer
             if include_sql:
                 entry["sql"] = vs.sql if vs else None
-                entry["params"] = vs.params if vs else []
             visuals.append(entry)
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "background": p.get("background"),
@@ -308,14 +336,22 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     next((pg for pg in pages if not pg["nav_only"]), pages[0] if pages else {}).update(initial=True)
     for w in dict.fromkeys(warnings):
         log.warning(w)
-    parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
-                  for name, p in spec.parameters.items()}
+    with_widget = {n for pg in pages for vv in pg["visuals"] if vv.get("slicer") for n in vv["slicer"]["params"]}
+    rendered = {pg["name"] for pg in pages}
+    parameters = {}
+    for name, p in spec.parameters.items():
+        p = p or {}
+        # shown in the top bar only when nothing else edits it: no widget, and not a parameter that
+        # belongs to pages this report doesn't show
+        on_page = not p.get("pages") or any(n in rendered for n in p["pages"])
+        parameters[name] = {"label": p.get("label") or name, "value": values.get(name),
+                            "multi": bool(p.get("multi")), "widget": name in with_widget or not on_page}
     return {"report": spec.report, "theme": resolve_theme(layout.get("theme")), "pages": pages, "parameters": parameters}
 
 
 def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: dict[str, dict] | None,
                 mode: str = "snapshot", role: str | None = None, include_hidden: bool = False,
-                hah_base: str | None = None) -> str:
+                hah_base: str | None = None, slicer_data: dict[str, dict] | None = None) -> str:
     env = Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape(["html", "j2"]))
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -327,6 +363,7 @@ def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: di
             spec=page_spec, theme=page_spec["theme"], mode=mode, role=role, generated_at=generated_at,
             hah_base=hah_base, sql_api=f"{hah_base}/api/execute", static_base=f"{hah_base}/static",
             spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
+            slicer_js=_SLICER_JS,
         )
 
     tpl = env.get_template("report.html.j2")
@@ -336,4 +373,6 @@ def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: di
         echarts_cdn=settings.echarts_cdn, api_base=settings.api_base,
         spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
         data_json=json.dumps(data or {}, ensure_ascii=False, default=str).replace("</", "<\\/"),
+        slicer_json=json.dumps(slicer_data or {}, ensure_ascii=False, default=str).replace("</", "<\\/"),
+        slicer_js=_SLICER_JS,
     )

@@ -93,3 +93,16 @@ does `fetch(`${API_BASE}/reports/${report}/visuals/${id}?${params}`)` per visual
 and whenever slicers change. The response has the same shape as the snapshot's data
 block: `{"columns":[...],"rows":[[...]]}`. Errors are shown inside the visual's box with
 the service's message, without hiding the rest of the report.
+
+
+## Slicers (ADR-006)
+
+A slicer is drawn as a widget at its own position. The layout visual carries `slicer:
+{mode, fields, single, select_all, initial, style, sync_group}`; the yaml has, per slicer visual,
+`slicers.<id>: {page, params, options_sql}` (options: one column per hierarchy level, named
+`level1`, `level2`...). Parameters are page-scoped (`name__page`) unless the slicer is in a sync
+group, and a range slicer (`between`/`before`/`after`) drives `<name>_from` / `<name>_to`. In
+`snapshot` the widget is read-only and its options are embedded (`#slicer-data`); in `live` they come
+from `GET /reports/{report}/slicers/{id}` and a change reloads only the visuals using the changed
+parameters; in `hah` the options run client-side from `options_sql`. The widget code is
+`templates/slicer.js`, shared by both templates (`slicerWidget(el, v, host)`).

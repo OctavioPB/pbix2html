@@ -62,6 +62,19 @@
   .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
   .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
   .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
+  .visual.sl-box { overflow: visible; }
+  .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: .85rem; color: var(--sl-fg); font-size: var(--sl-fs); }
+  .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
+  .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
+  .sl-btn:disabled { cursor: default; opacity: .8; }
+  .sl-range { display: flex; gap: .3rem; align-items: center; }
+  .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
+  .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
+  .sl-item:hover { background: rgba(127,127,127,.12); }
+  .sl-parent { font-weight: 600; }
+  .sl-panel { position: fixed; z-index: 10000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
+  .sl-panel .sl-list { overflow: auto; }
+  .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
   .error-state { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
@@ -88,9 +101,10 @@
 </nav>
 {% endif %}
 
-{% if spec.parameters %}
+{% set bar_params = spec.parameters.items()|rejectattr('1.widget')|list %}
+{% if bar_params %}
 <div class="params">
-  {% for name, p in spec.parameters.items() %}
+  {% for name, p in bar_params %}
   <label>{{ p.label }}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}"></label>
   {% endfor %}
 </div>
@@ -122,6 +136,30 @@
   const charts = {};
   const loadedPages = new Set();
 
+  // ---------- slicers: one state object per parameter, shared by every widget bound to it ----------
+  const paramState = {};
+  Object.keys(spec.parameters).forEach(n => { paramState[n] = spec.parameters[n].value === undefined ? null : spec.parameters[n].value; });
+  const slicerRefreshers = [];
+  const slicerPainted = new Set();
+  let reloadTimer = null;
+  const changedParams = new Set();
+  const slicerHost = {
+    interactive: true,
+    get: name => paramState[name],
+    set(update) {
+      Object.keys(update).forEach(n => { paramState[n] = update[n]; changedParams.add(n); });
+      slicerRefreshers.forEach(fn => fn());
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { const names = new Set(changedParams); changedParams.clear(); reloadFor(names); }, 250);
+    },
+    async options(id) {
+      const sql = visualsById[id].slicer && visualsById[id].slicer.options_sql;
+      if (!sql) return { skipped: true };
+      return toBlock(await fetchSQL(sql));
+    },
+  };
+  {{ slicer_js|safe }}
+
   // ---------- HAH SQL contract (ADR-004; unverified against a real HAH) ----------
   // HAH returns HTTP 200 even for SQL errors — always check j.error before j.data.
   async function fetchSQL(sql) {
@@ -136,20 +174,26 @@
   // Mirrors query.py's bind(): substitutes :name tokens declared in `params`, leaves
   // the rest intact. HAH's SQL endpoint takes one raw string (no driver-level `?`
   // parameters), so this interpolates escaped literals instead — see ADR-004.
+  const isEmptyValue = val => val === undefined || val === null || val === '' || (Array.isArray(val) && !val.length);
   function bindSql(sql, params, values) {
+    // an empty parameter means "no filter": drop the drafter's optional predicates and `col IN (:p)`
+    params.forEach(name => {
+      if (!isEmptyValue(values[name])) return;
+      const n = name.replace(/[.*+?^$()|[\]\\]/g, '\\$&');
+      sql = sql.replace(new RegExp('/\\*if ' + n + '\\*/[\\s\\S]*?/\\*fi ' + n + '\\*/', 'g'), '1=1');
+      sql = sql.replace(new RegExp('(?<![\\w."])[\\w."]+\\s+IN\\s*\\(\\s*:' + n + '\\s*\\)', 'gi'), '1=1');
+    });
     return sql.replace(/:(\w+)\b/g, (m, name) => {
       if (!params.includes(name)) return m;
       const val = values[name];
-      if (val === undefined || val === null || val === '') return 'NULL';
-      if (Array.isArray(val)) return val.length ? val.map(x => `'${safeSql(x)}'`).join(',') : 'NULL';
+      if (isEmptyValue(val)) return 'NULL';
+      if (Array.isArray(val)) return val.map(x => `'${safeSql(x)}'`).join(',');
       return `'${safeSql(val)}'`;
     });
   }
   function currentValues() {
-    const values = {};
-    Object.keys(spec.parameters).forEach(name => { values[name] = spec.parameters[name].value; });
-    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') values[i.dataset.param] = i.value; });
-    return values;
+    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') paramState[i.dataset.param] = spec.parameters[i.dataset.param].multi ? i.value.split(',').map(x => x.trim()).filter(Boolean) : i.value; });
+    return Object.assign({}, paramState);
   }
   // Array of row objects (HAH) → {columns, rows} (this project's renderer contract).
   function toBlock(rows) {
@@ -213,6 +257,7 @@
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
+    slicer(el, v) { slicerRefreshers.push(slicerWidget(el, v, slicerHost)); },
     static(el, v) {
       // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
       // for an `image`-kind visual; a shape or button instead carries a label
@@ -310,6 +355,7 @@
   async function loadVisual(v) {
     const el = document.querySelector(`#v-${CSS.escape(v.id)} .body`);
     if (!el) return;
+    if (v.kind === 'slicer') { if (!slicerPainted.has(v.id)) { slicerPainted.add(v.id); paint(v.id, { columns: [], rows: [] }); } return; }
     if (['text', 'static'].includes(v.kind)) { paint(v.id, { columns: [], rows: [] }); return; }
     if (!v.sql) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
     el.innerHTML = '<div class="spinner"></div>';
@@ -333,11 +379,15 @@
   async function loadAll() {
     await Promise.all(spec.pages.map(p => loadPage(p.id)));
   }
-  function reloadVisible() {
-    loadedPages.clear();
+  function reloadFor(changed) {        // only the visible page's visuals that use a changed parameter
     const active = document.querySelector('.page:not([hidden])');
-    if (active) loadPage(active.id);
+    loadedPages.clear();                // other pages reload with the new values when they are shown
+    if (!active) return;
+    loadedPages.add(active.id);
+    Object.values(visualsById).filter(v => pageOfVisual[v.id] === active.id && v.kind !== 'slicer'
+      && (!changed || (v.params || []).some(n => changed.has(n)))).forEach(loadVisual);
   }
+  function reloadVisible() { reloadFor(null); }
 
   document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', reloadVisible));
   function showPage(id) {

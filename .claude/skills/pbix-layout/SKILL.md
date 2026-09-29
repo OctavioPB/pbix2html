@@ -186,3 +186,14 @@ Power BI's documented names and are unverified. The report's theme `visualStyles
   the field's `SourceRef.Entity`. `canonical_query_ref` rebuilds refs from it, keeping only the
   aggregation wrapper.
 - Not seen yet in a real PBIR file: bookmarks (`Report/definition/bookmarks/`), `isHidden`.
+
+## Slicers
+
+`objects.data.mode` (`Dropdown`, `Basic` = list, `Between`, `Before`, `After`, `Relative`, `Tile`),
+`objects.selection.singleSelect` / `selectAllCheckboxEnabled`, `objects.items` (font colour, size,
+background) and `objects.general.filter.filter` — the saved selection: `Where[].Condition` with `In`
+(`Values` are typed literals: `2026L`, `'text'`, `datetime'2026-04-01T00:00:00'`), `Between` or
+`Comparison` (`ComparisonKind` 1/2 = from, 3/4 = to). Hierarchy levels are the projections, in
+order. A sync group (`visual.syncGroup.groupName`, classic `singleVisual.syncGroup`) makes slicers on
+different pages share one selection; otherwise each page's slicer is independent. Parsed by
+`extract.parse_slicer`.

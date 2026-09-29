@@ -18,3 +18,12 @@ def test_selected_values_still_bind():
 def test_other_empty_uses_and_undeclared_names_are_left_alone():
     out, vals = bind("WHERE year = :year AND ts > '10:30:00' AND a IN (:other)", ["year"], {"year": None})
     assert out == "WHERE year = ? AND ts > '10:30:00' AND a IN (:other)" and vals == [None]
+
+
+def test_cache_key_changes_when_the_sql_changes():
+    from pbix2html.query import _cache_key
+
+    a = _cache_key("R", "v1", {"p": 1}, None, "SELECT 1")
+    assert a == _cache_key("R", "v1", {"p": 1}, None, "SELECT 1")
+    assert a != _cache_key("R", "v1", {"p": 1}, None, "SELECT 2")
+    assert a != _cache_key("R", "v1", {"p": 2}, None, "SELECT 1")

@@ -88,9 +88,11 @@ button/sort; and, for both formats:
 Result: 91 of 94 drafted queries parse under sqlglot's Teradata dialect at first, 94 of 94 after the
 comment fix (a syntax check only: none has been run on Teradata). **Still open**, in priority order:
 
-- [ ] **Slicers as real widgets.** 62 slicers here; today they are only parameters in the top bar.
-      Needs a values query per slicer (distinct column values), the widget kind (list/dropdown/date
-      range/hierarchy) and positioning; `live`/`hah` can fetch values, `snapshot` needs them at build.
+- [x] **Slicers as real widgets** (`docs/decisions/ADR-006`): dropdown / list / hierarchy tree / date
+      range, page- or sync-group-scoped parameters, saved selection as default, `slicers:` in the yaml
+      with `options_sql`, and `/reports/{r}/slicers/{visual}` for `live`. Verified in a browser on
+      both reports with a simulated backend (`live` and `hah`). Open: relative-date and tile
+      slicers, cascading options, pair-accurate hierarchy selection, a real Teradata / HAH run.
 - [x] **`Calendar` (a DAX `CALENDAR(start, end)` table)** is rebuilt on `sys_calendar.calendar`
       (`detect_calendar_tables`; owner-confirmed pattern, e.g. `CALENDAR("2017-01-01", NOW())`),
       together with its calculated columns (`FORMAT`, `YEAR/MONTH/DAY`, `VALUE`, `IF`, `&&`/`||`,

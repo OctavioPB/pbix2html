@@ -141,8 +141,11 @@ def _jsonable(v: Any) -> Any:
     return v
 
 
-def _cache_key(report: str, visual_id: str, values: dict[str, Any], proxy_user: str | None) -> Path:
-    h = hashlib.sha1(json.dumps([report, visual_id, values, proxy_user], sort_keys=True, default=str).encode()).hexdigest()
+def _cache_key(report: str, visual_id: str, values: dict[str, Any], proxy_user: str | None,
+               sql: str | None = None) -> Path:
+    """Cache file for one result. The SQL text is part of the key so editing a query in the yaml
+    never serves the previous query's rows."""
+    h = hashlib.sha1(json.dumps([report, visual_id, values, proxy_user, sql], sort_keys=True, default=str).encode()).hexdigest()
     return CACHE_DIR / f"{report}.{visual_id}.{h[:12]}.json"
 
 
@@ -151,7 +154,7 @@ def run_visual(spec: ReportSpec, visual: VisualSpec, values: dict[str, Any], bac
     if not visual.has_data:
         return {"columns": [], "rows": [], "skipped": True}
     ttl = settings.cache_ttl_seconds if ttl is None else ttl
-    key = _cache_key(spec.report, visual.id, {k: values.get(k) for k in visual.params}, proxy_user)
+    key = _cache_key(spec.report, visual.id, {k: values.get(k) for k in visual.params}, proxy_user, visual.sql)
     if use_cache and key.exists() and time.time() - key.stat().st_mtime < ttl:
         return json.loads(key.read_text(encoding="utf-8"))
     sql, bound = bind(visual.sql, visual.params, values)
@@ -160,6 +163,37 @@ def run_visual(spec: ReportSpec, visual: VisualSpec, values: dict[str, Any], bac
         CACHE_DIR.mkdir(exist_ok=True)
         key.write_text(json.dumps(block, ensure_ascii=False, default=str), encoding="utf-8")
     return block
+
+
+def run_slicer_options(spec: ReportSpec, visual_id: str, backend: Backend, proxy_user: str | None = None,
+                       use_cache: bool = True, ttl: int | None = None) -> DataBlock:
+    """Distinct values for one slicer's widget (yaml `slicers.<visual>.options_sql`, one column per
+    hierarchy level). A slicer without a query comes back `skipped`: its widget then accepts typed
+    values instead of offering a list."""
+    entry = (spec.raw.get("slicers") or {}).get(visual_id) or {}
+    sql = entry.get("options_sql")
+    if not sql or "TODO" in sql:
+        return {"columns": [], "rows": [], "skipped": True}
+    ttl = settings.cache_ttl_seconds if ttl is None else ttl
+    key = _cache_key(spec.report, f"slicer-{visual_id}", {}, proxy_user, sql)
+    if use_cache and key.exists() and time.time() - key.stat().st_mtime < ttl:
+        return json.loads(key.read_text(encoding="utf-8"))
+    block = backend.execute(sql, [], proxy_user)
+    if use_cache:
+        CACHE_DIR.mkdir(exist_ok=True)
+        key.write_text(json.dumps(block, ensure_ascii=False, default=str), encoding="utf-8")
+    return block
+
+
+def run_slicers(spec: ReportSpec, backend: Backend, proxy_user: str | None = None,
+                use_cache: bool = True) -> dict[str, DataBlock]:
+    out: dict[str, DataBlock] = {}
+    for vid in (spec.raw.get("slicers") or {}):
+        try:
+            out[vid] = run_slicer_options(spec, vid, backend, proxy_user, use_cache)
+        except Exception as e:
+            out[vid] = {"columns": [], "rows": [], "error": f"{type(e).__name__}: {e}"}
+    return out
 
 
 def run_report(spec: ReportSpec, values: dict[str, Any], backend: Backend, proxy_user: str | None = None,

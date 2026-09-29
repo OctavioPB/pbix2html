@@ -348,7 +348,7 @@ def test_snapshot_html(fake_pbix, tmp_path):
     assert data["v1"]["rows"][0][0] == 1234567.8
     assert be.calls[0][1] == [2025]
     html = render_html(L, spec, values, data, mode="snapshot")
-    assert 'id="v-v1"' in html and 'id="v-v2"' in html and 'id="v-v3"' not in html   # slicers aren't drawn
+    assert 'id="v-v1"' in html and 'id="v-v2"' in html and 'id="v-v3"' in html   # a slicer is a widget now
     assert "#0F2B46" in html                                                        # pbix theme
     assert '"kind": "column"' in html                                              # custom reinterpreted
     (tmp_path / "r.html").write_text(html)

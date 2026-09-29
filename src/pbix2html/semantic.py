@@ -1414,6 +1414,18 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
     table_map = table_map or {}
     edges = _filter_edges(relationships or [])
     where_parts, params_used = [], []
+
+    def predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str:
+        """`col IN (:p)` for a value slicer; `col >= / <= CAST(:p AS DATE)` for a range bound,
+        wrapped as optional (so `bind` drops it when that bound is empty) unless `wrap` is off
+        (inside a semi-join the whole predicate is already wrapped: markers must not nest)."""
+        bound = (p or {}).get("bound")
+        if not bound:
+            return f"{column} IN (:{pname})"
+        rhs = f"CAST(:{pname} AS DATE)" if (p or {}).get("dtype") == "date" else f":{pname}"
+        text = f"{column} {'>=' if bound == 'from' else '<='} {rhs}"
+        return f"/*if {pname}*/ {text} /*fi {pname}*/" if wrap else text
+
     for pname, p in parameters.items():
         slicer_ref = (p or {}).get("from_slicer")
         if not slicer_ref:
@@ -1422,7 +1434,7 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
         if ptable in aliases:
             # IN (...) rather than "=": works unchanged whether the parameter stays a
             # single value or someone later turns on `multi` — see query.py's bind().
-            where_parts.append(f"{aliases[ptable]}.{_sql_col(pcol)} IN (:{pname})")
+            where_parts.append(predicate(f"{aliases[ptable]}.{_sql_col(pcol)}", pname, p))
             params_used.append(pname)
             continue
         if ptable not in table_map:
@@ -1436,10 +1448,10 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
             if src != ptable or dst not in aliases or dst in seen:
                 continue
             seen.add(dst)
+            inner = predicate(f"{_sql_alias(ptable)}.{_sql_col(pcol)}", pname, p, wrap=False)
             where_parts.append(
                 f"/*if {pname}*/ {aliases[dst]}.{_sql_col(dcol)} IN (SELECT {_sql_col(scol)} FROM "
-                f"{_subquery(source, _sql_alias(ptable))} WHERE {_sql_alias(ptable)}.{_sql_col(pcol)} "
-                f"IN (:{pname})) /*fi {pname}*/")
+                f"{_subquery(source, _sql_alias(ptable))} WHERE {inner}) /*fi {pname}*/")
             if pname not in params_used:
                 params_used.append(pname)
     return where_parts, params_used
@@ -1608,7 +1620,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
     rels = model.get("relationships") if isinstance(model.get("relationships"), list) else []
-    params = _slicer_parameters(layout)
+    params = _slicer_parameters(layout, model)
     calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []}
     visuals: dict[str, list[str]] = {}
     n_data = 0
@@ -1621,7 +1633,8 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
                 continue
             n_data += 1
             label = f"{page.get('display_name')} / {v.get('title') or v['type']}"
-            for reason in diagnose_visual(v, kind, measures, table_map, rels, set(tables), params):
+            for reason in diagnose_visual(v, kind, measures, table_map, rels, set(tables),
+                                          _params_for_page(params, page.get("display_name"))):
                 visuals.setdefault(reason, []).append(label)
     measure_names = {n for (_, n) in measures}
     composite = sorted(n for (_, n), dax in measures.items()
@@ -1714,7 +1727,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
 
     # Pass 1: parameters (from slicers), across every page — a visual auto-drafted
     # below may reference a slicer declared on a page processed later than its own.
-    parameters: dict[str, dict] = _slicer_parameters(layout)
+    parameters: dict[str, dict] = _slicer_parameters(layout, model)
 
     # Pass 2: visuals, with the full parameter set already known.
     visuals: dict[str, dict] = {}
@@ -1741,7 +1754,8 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             notes = []
             if v.get("is_custom"):
                 notes.append(f"Custom visual '{v['type']}': pick a standard kind and document the differences.")
-            draft = _draft_visual_sql(v, kind, measures, table_map, relationships, parameters)
+            draft = _draft_visual_sql(v, kind, measures, table_map, relationships,
+                                      _params_for_page(parameters, page["display_name"]))
             if draft:
                 entry["sql"], entry["params"] = draft
                 notes.append(AUTOFILL_NOTE)
@@ -1763,6 +1777,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
         "delivery": "snapshot",  # snapshot | live  (ADR-001)
         "page_filters": [f"{f['target']} ({f['type']})" for p in layout["pages"] for f in p["filters"]],
         "parameters": parameters,
+        "slicers": slicers_section(layout, parameters, table_map, model),
         "roles": {r.get("RoleName", "role"): {"proxy_user": None, "where": None,
                                              "dax": r.get("FilterExpression"), "table": r.get("TableName")}
                   for r in rls} or {"default": {"proxy_user": None, "where": None}},
@@ -1770,21 +1785,160 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
     }
 
 
-def _slicer_parameters(layout: dict) -> dict[str, dict]:
-    """Every slicer in the report as a named parameter."""
-    parameters: dict[str, dict] = {}
+def _slug(text: str) -> str:
+    return re.sub(r"\W+", "_", str(text or "")).strip("_").lower() or "x"
+
+
+def slicer_descriptor(v: dict) -> dict:
+    """The slicer description of a layout visual, with defaults for layouts extracted before
+    `parse_slicer` existed: a plain multi-select list over the visual's fields."""
+    d = v.get("slicer")
+    if isinstance(d, dict) and d.get("fields") is not None:
+        return d
+    return {"mode": "list", "fields": list(v.get("fields") or []), "single": False, "select_all": True,
+            "initial": {}, "style": {}}
+
+
+_BOUNDS_BY_MODE = {"between": ("from", "to"), "before": ("to",), "after": ("from",)}
+
+
+def _column_dtype(model: dict | None, ref: str) -> str:
+    """'date' | 'number' | 'text' for `Table.Column`, from the model's column list."""
+    table, _, col = ref.partition(".")
+    for c in (model or {}).get("columns") or []:
+        if isinstance(c, dict) and c.get("TableName") == table and c.get("ColumnName") == col:
+            kind = str(c.get("PandasDataType") or "").lower()
+            return "date" if "datetime" in kind else "number" if any(k in kind for k in ("int", "float", "decimal")) else "text"
+    return "text"
+
+
+def _slicer_parameters(layout: dict, model: dict | None = None) -> dict[str, dict]:
+    """Every slicer of the report as named parameters, scoped like Power BI scopes them.
+
+    Slicers on different pages are independent unless they share a sync group, so a parameter
+    belongs to the page (or sync group) it was set on: the same field on two pages gives two
+    parameters (`org_name__elastic_compute`, `org_name__node_pool`), each with its own saved
+    selection. A field used on one page keeps the plain column name. A `between`/`before`/
+    `after` slicer yields `<name>_from` / `<name>_to` bound parameters. The slicer's saved
+    selection becomes the default."""
+    entries: dict[tuple[str, str | None], dict[str, dict]] = {}
     for page in layout["pages"]:
         for v in page["visuals"]:
-            if v.get("is_group"):
+            if v.get("is_group") or KIND_MAP.get(v.get("type", ""), "") != "slicer":
                 continue
-            kind = KIND_MAP.get(v["type"], "custom" if v.get("is_custom") else "unsupported")
-            if kind != "slicer":
-                continue
-            for ref in v.get("fields") or []:
-                _, _table, col = query_ref_parts(ref)
-                pname = re.sub(r"\W+", "_", col).lower()
-                parameters[pname] = {"type": "string", "default": None, "from_slicer": ref, "multi": False}
+            d = slicer_descriptor(v)
+            scope = d.get("sync_group") or f"page:{page['display_name']}"
+            label = d.get("sync_group") or page["display_name"]
+            for ref in d.get("fields") or []:
+                for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
+                    slot = entries.setdefault((ref, bound), {}).setdefault(scope, {
+                        "label": label, "pages": [], "d": d, "sync": d.get("sync_group")})
+                    if page["display_name"] not in slot["pages"]:
+                        slot["pages"].append(page["display_name"])
+    # base names, disambiguated between different tables that share a column name
+    def base(ref: str, bound: str | None) -> str:
+        return _slug(ref.partition(".")[2]) + (f"_{bound}" if bound else "")
+    by_base: dict[str, set[str]] = {}
+    for (ref, bound) in entries:
+        by_base.setdefault(base(ref, bound), set()).add(ref)
+    parameters: dict[str, dict] = {}
+    for (ref, bound), scopes in entries.items():
+        stem = base(ref, bound)
+        if len(by_base[stem]) > 1:
+            stem = f"{_slug(ref.partition('.')[0])}_{stem}"
+        dtype = "date" if bound and _column_dtype(model, ref) == "text" else _column_dtype(model, ref)
+        for scope, slot in scopes.items():
+            name = stem if len(scopes) == 1 else f"{stem}__{_slug(slot['label'])}"
+            n = 2
+            while name in parameters:
+                name, n = f"{name}_{n}", n + 1
+            d, initial = slot["d"], slot["d"].get("initial") or {}
+            if bound:
+                default = ((initial.get("range") or {}).get(ref) or {}).get(bound)
+            else:
+                vals = (initial.get("values") or {}).get(ref)
+                default = None if not vals else (vals[0] if d.get("single") else list(vals))
+            p: dict[str, Any] = {"type": "string", "default": default, "from_slicer": ref,
+                                 "multi": bool(not bound and not d.get("single")),
+                                 "label": ref.partition(".")[2], "dtype": dtype, "pages": slot["pages"]}
+            if bound:
+                p["bound"] = bound
+            if slot["sync"]:
+                p["sync"] = slot["sync"]
+            parameters[name] = p
     return parameters
+
+
+def _params_for_page(parameters: dict[str, dict], page_name: str | None) -> dict[str, dict]:
+    """The parameters a visual on `page_name` may use: those set by a slicer on its page (or in a
+    sync group that reaches it). A parameter without a `pages` list (an older yaml, or one added
+    by hand) applies everywhere."""
+    return {n: p for n, p in parameters.items()
+            if not (p or {}).get("pages") or page_name in (p or {}).get("pages", [])}
+
+
+def slicer_params(v: dict, page_name: str, parameters: dict[str, dict]) -> list[str]:
+    """Parameter names a slicer visual drives, one per level (or per bound), in field order."""
+    d = slicer_descriptor(v)
+    out: list[str] = []
+    for ref in d.get("fields") or []:
+        for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
+            for name, p in _params_for_page(parameters, page_name).items():
+                if (p or {}).get("from_slicer") == ref and (p or {}).get("bound") == bound:
+                    out.append(name)
+                    break
+    return out
+
+
+def _slicer_options_sql(v: dict, table_map: dict[str, str], calendars: dict[str, dict]) -> str | None:
+    """Distinct values for a slicer's widget: one column per level (all levels must come from
+    the same table with a known source). A calendar-derived table is ordered chronologically
+    (by the earliest date of each value); anything else by value. None for range slicers or
+    when the source is unknown."""
+    d = slicer_descriptor(v)
+    if d.get("mode") in _BOUNDS_BY_MODE or not d.get("fields"):
+        return None
+    tables = {ref.partition(".")[0] for ref in d["fields"]}
+    if len(tables) != 1:
+        return None
+    table = next(iter(tables))
+    if table not in table_map:
+        return None
+    try:
+        source = validate_read_only_sql(table_map[table])
+    except ValueError:
+        return None
+    alias = _sql_alias(table)
+    cols = [f"{alias}.{_sql_col(ref.partition('.')[2])}" for ref in d["fields"]]
+    cal = calendars.get(table)
+    if cal:
+        order = f"MIN({alias}.{_sql_col(cal['date_column'])})"
+    else:
+        order = ", ".join(str(i) for i in range(1, len(cols) + 1))
+    select = ", ".join(f"{c} AS level{i}" for i, c in enumerate(cols, start=1))
+    group = ", ".join(str(i) for i in range(1, len(cols) + 1))
+    if cal:
+        return f"SELECT {select}\nFROM {_subquery(source, alias)}\nGROUP BY {group}\nORDER BY {order}"
+    return f"SELECT DISTINCT {select}\nFROM {_subquery(source, alias)}\nORDER BY {order}"
+
+
+def slicers_section(layout: dict, parameters: dict[str, dict], table_map: dict[str, str] | None,
+                    model: dict | None = None) -> dict[str, dict]:
+    """The yaml `slicers:` section: for each slicer visual, the parameters it drives and the SQL
+    of its distinct values. Written for people to edit, like `visuals:`."""
+    calendars = detect_calendar_tables(model or {})
+    out: dict[str, dict] = {}
+    for page in layout["pages"]:
+        for v in page["visuals"]:
+            if v.get("is_group") or KIND_MAP.get(v.get("type", ""), "") != "slicer":
+                continue
+            names = slicer_params(v, page["display_name"], parameters)
+            entry: dict[str, Any] = {"page": page["display_name"], "params": names}
+            sql = _slicer_options_sql(v, table_map or {}, calendars)
+            if sql:
+                entry["options_sql"] = sql
+            out[v["id"]] = entry
+    return out
 
 
 def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1809,7 +1963,7 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
     raw = dict(raw)
     parameters = dict(raw.get("parameters") or {})
     added_parameters = []
-    for name, p in _slicer_parameters(layout).items():
+    for name, p in _slicer_parameters(layout, model).items():
         if name not in parameters:          # never overwrite a default someone set
             parameters[name] = p
             added_parameters.append(name)
@@ -1828,7 +1982,8 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
             already.append(vid)
             continue
         source = by_id.get(vid)
-        draft = (_draft_visual_sql(source, kind, measures, table_map, relationships, parameters)
+        draft = (_draft_visual_sql(source, kind, measures, table_map, relationships,
+                                   _params_for_page(parameters, entry.get("page")))
                  if source else None)
         if draft is None:
             still_todo.append(vid)
