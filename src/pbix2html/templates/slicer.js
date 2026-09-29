@@ -7,6 +7,7 @@ function slicerWidget(el, v, host) {
   el.classList.add('sl');
   if (el.parentElement) el.parentElement.classList.add('sl-box');   // let the widget overflow its box
   if (st.color) el.style.setProperty('--sl-fg', st.color);
+  else if (v.fg) el.style.setProperty('--sl-fg', v.fg);   // readable on the panel behind it (no colour set by the report)
   if (st.background) el.style.setProperty('--sl-bg', st.background);
   if (st.size) el.style.setProperty('--sl-fs', st.size + 'pt');
   const same = (a, b) => String(a) === String(b);
