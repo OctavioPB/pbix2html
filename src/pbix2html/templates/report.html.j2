@@ -46,10 +46,35 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
+  .visual[hidden] { display: none; }
+  .visual.btn { background: var(--bg0, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
+  .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, .8rem); font-family: var(--ff, inherit); font-weight: var(--fw, normal); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
+  .visual.btn:hover { background: var(--bg-h, var(--bg0, transparent)); box-shadow: var(--ol-h, var(--ol, none)); }
+  .visual.btn:hover .shape-text { color: var(--fg-h, var(--fg, inherit)); }
+  .visual.btn:active { background: var(--bg-p, var(--bg-h, var(--bg0, transparent))); box-shadow: var(--ol-p, var(--ol-h, var(--ol, none))); }
+  .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
+  .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
+  .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
+  .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.3rem; height: 1.3rem; margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 .8rem serif; color: var(--accent, #666); cursor: help; }
+  .clickable { cursor: pointer; }
+  .clickable:hover { opacity: .8; }
   .error { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
   .loading { color: var(--muted); font-size: .75rem; padding: .5rem .6rem; }
+  .visual.sl-box { overflow: visible; }
+  .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: .85rem; color: var(--sl-fg); font-size: var(--sl-fs); }
+  .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
+  .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
+  .sl-btn:disabled { cursor: default; opacity: .8; }
+  .sl-range { display: flex; gap: .3rem; align-items: center; }
+  .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
+  .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
+  .sl-item:hover { background: rgba(127,127,127,.12); }
+  .sl-parent { font-weight: 600; }
+  .sl-panel { position: fixed; z-index: 10000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
+  .sl-panel .sl-list { overflow: auto; }
+  .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-  @media print { nav.tabs, .params { display: none; } .page[hidden] { display: block; page-break-after: always; } }
+  @media print { nav.tabs, .params { display: none; } .page[hidden] { display: block; page-break-after: always; } .page.navonly[hidden] { display: none; } }
 </style>
 </head>
 <body>
@@ -58,15 +83,17 @@
   <span class="meta">{% if mode == "snapshot" %}Data as of {{ generated_at }}{% if role %} · role {{ role }}{% endif %}{% else %}Live data{% endif %}</span>
 </header>
 
-{% if spec.pages|length > 1 %}
+{% set tab_pages = spec.pages|rejectattr('nav_only')|list %}
+{% if tab_pages|length > 1 %}
 <nav class="tabs" role="tablist">
-  {% for p in spec.pages %}<button role="tab" data-page="{{ p.id }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ p.name }}</button>{% endfor %}
+  {% for p in tab_pages %}<button role="tab" data-page="{{ p.id }}" aria-selected="{{ 'true' if p.initial else 'false' }}">{{ p.name }}</button>{% endfor %}
 </nav>
 {% endif %}
 
-{% if spec.parameters %}
+{% set bar_params = spec.parameters.items()|rejectattr('1.widget')|list %}
+{% if bar_params %}
 <div class="params">
-  {% for name, p in spec.parameters.items() %}
+  {% for name, p in bar_params %}
   <label>{{ p.label }}
     {% if mode == "live" %}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}">{% else %}<strong>{{ p.value if p.value is not none else '—' }}</strong>{% endif %}
   </label>
@@ -75,14 +102,14 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background %}; background: {{ p.background }}{% endif %}" {% if not loop.first %}hidden{% endif %}>
+<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
-              ; background: {{ v.style.background or 'transparent' }}
+              {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}
@@ -94,6 +121,7 @@
 
 <script id="spec" type="application/json">{{ spec_json|safe }}</script>
 {% if mode == "snapshot" %}<script id="data" type="application/json">{{ data_json|safe }}</script>
+<script id="slicer-data" type="application/json">{{ slicer_json|safe }}</script>
 {% else %}<script>window.API_BASE = {{ api_base|tojson }};</script>{% endif %}
 
 <script>
@@ -103,6 +131,29 @@
   const visualsById = {};
   spec.pages.forEach(p => p.visuals.forEach(v => { visualsById[v.id] = v; }));
   const charts = {};
+
+  // ---------- slicers: one state object per parameter, shared by every widget bound to it ----------
+  const paramState = {};
+  Object.keys(spec.parameters).forEach(n => { paramState[n] = spec.parameters[n].value === undefined ? null : spec.parameters[n].value; });
+  const slicerRefreshers = [];
+  let reloadTimer = null;
+  const changedParams = new Set();
+  const slicerHost = {
+    interactive: !!window.API_BASE,
+    get: name => paramState[name],
+    set(update) {
+      Object.keys(update).forEach(n => { paramState[n] = update[n]; changedParams.add(n); });
+      slicerRefreshers.forEach(fn => fn());
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { const names = new Set(changedParams); changedParams.clear(); if (window.API_BASE) load(names); }, 250);
+    },
+    options(id) {
+      if (!window.API_BASE) { const d = JSON.parse(document.getElementById('slicer-data').textContent); return Promise.resolve(d[id] || { skipped: true }); }
+      return fetch(`${window.API_BASE}/reports/${encodeURIComponent(spec.report)}/slicers/${encodeURIComponent(id)}`)
+        .then(r => r.ok ? r.json() : { error: `HTTP ${r.status}` });
+    },
+  };
+  {{ slicer_js|safe }}
 
   // ---------- formatting ----------
   const fmt = (v, f) => {
@@ -159,6 +210,13 @@
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
+    slicer(el, v) { slicerRefreshers.push(slicerWidget(el, v, slicerHost)); },
+    tooltip(el, v) {          // an info icon: the definition is its (native) tooltip
+      const i = document.createElement('span');
+      i.className = 'info-icon'; i.textContent = 'i'; i.tabIndex = 0; i.setAttribute('role', 'img');
+      if (v.tooltip) { i.title = v.tooltip; i.setAttribute('aria-label', v.tooltip); }
+      el.replaceChildren(i);
+    },
     static(el, v) {
       // An `image` visual has its picture embedded as a data: URI; a shape or button
       // instead carries a label (extract.py's visual_text). Either way the point is not
@@ -192,9 +250,12 @@
   };
   function cartesian(v, b, type, horizontal, area) {
     const { cats, groups } = series(b);
+    // 100% stacked: every category's series are rescaled to share 100 (ECharts has no such mode)
+    const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
+    const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };
     const ser = [...groups.entries()].map(([name, m]) => ({
       name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
-      data: cats.map(c => m.get(c) ?? null), stack: v.stacked ? 'total' : undefined,
+      data: cats.map((c, i) => val(m, c, i)), stack: v.stacked ? 'total' : undefined,
       areaStyle: area ? {} : undefined, smooth: false,
     }));
     // Axis and legend titles as the report labels them (extract.py's visual_text).
@@ -204,7 +265,7 @@
     const axisTitle = name => name ? { name, nameLocation: 'middle', nameGap: 26,
                                        nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
     const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x) };
-    const valAxis = { type: 'value', ...axisStyle, axisLabel: { color: theme.muted, formatter: x => fmt(x, v.format.value) },
+    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
                       ...axisTitle(t.axis_y) };
     const legend = groups.size > 1
       ? { top: 0, textStyle: { color: theme.muted }, ...(t.legend ? { name: t.legend } : {}) }
@@ -231,7 +292,7 @@
     // Check "no sql written yet" before "no renderer for this kind": an unimplemented
     // visual type (kind "unsupported"/"custom") is expected and still TODO right out of
     // scaffold — it should read as "not started" here, not look like a crash.
-    if (block.skipped && !['text', 'static'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
+    if (block.skipped && !['text', 'static', 'slicer', 'tooltip'].includes(v.kind)) { el.innerHTML = '<div class="loading">No query defined</div>'; return; }
     const fn = R[v.kind];
     if (!fn) {
       el.innerHTML = `<div class="loading">Visual type "${v.kind}" isn't supported yet — pick a `
@@ -240,19 +301,38 @@
     }
     try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
   }
-  function currentParams() {
+  function currentParams(names) {
     const q = new URLSearchParams();
-    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') q.set(i.dataset.param, i.value); });
+    document.querySelectorAll('[data-param]').forEach(i => { if (i.value !== '') paramState[i.dataset.param] = spec.parameters[i.dataset.param].multi ? i.value.split(',').map(x => x.trim()).filter(Boolean) : i.value; });
+    (names || Object.keys(paramState)).forEach(n => {
+      const val = paramState[n];
+      if (Array.isArray(val)) val.forEach(x => q.append(n, x));
+      else if (val !== null && val !== undefined && val !== '') q.set(n, val);
+    });
     return q.toString();
   }
-  async function load() {
+  let slicersPainted = false;
+  function paintSlicers() {           // widgets are drawn once: they hold their own state
+    if (slicersPainted) return; slicersPainted = true;
+    Object.values(visualsById).filter(v => v.kind === 'slicer').forEach(v => paint(v.id, { columns: [], rows: [], skipped: true }));
+  }
+  // live mode fetches a page's visuals when the page is first shown, not all pages up front
+  const pageOfVisual = {};
+  spec.pages.forEach(p => p.visuals.forEach(v => { pageOfVisual[v.id] = p.id; }));
+  const loadedPages = new Set();
+  async function load(changed, onlyPage) {   // `changed`: parameter names that moved, so only visuals using them reload
+    paintSlicers();
+    if (!onlyPage && spec.pages.length) { const first = spec.pages.find(p => p.initial) || spec.pages[0]; loadedPages.add(first.id); }
+    const dataIds = Object.keys(visualsById).filter(id => visualsById[id].kind !== 'slicer'
+      && (!window.API_BASE || (onlyPage ? pageOfVisual[id] === onlyPage : loadedPages.has(pageOfVisual[id])))
+      && (!changed || (visualsById[id].params || []).some(n => changed.has(n))));
     if (!window.API_BASE) {
       const data = JSON.parse(document.getElementById('data').textContent);
-      Object.keys(visualsById).forEach(id => paint(id, data[id] || { columns: [], rows: [], skipped: true }));
+      dataIds.forEach(id => paint(id, data[id] || { columns: [], rows: [], skipped: true }));
       return;
     }
-    const qs = currentParams();
-    await Promise.all(Object.keys(visualsById).map(async id => {
+    await Promise.all(dataIds.map(async id => {
+      const qs = currentParams(visualsById[id].params);
       const el = document.querySelector(`#v-${CSS.escape(id)} .body`); if (el) el.innerHTML = '<div class="loading">Loading…</div>';
       try {
         // No `credentials: 'include'`: the identity comes from a header the reverse
@@ -267,12 +347,36 @@
       } catch (e) { paint(id, { error: e.message }); }
     }));
   }
-  document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', load));
-  document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => {
-    document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
-    document.querySelectorAll('.page').forEach(p => { p.hidden = p.id !== b.dataset.page; });
+  document.querySelectorAll('[data-param]').forEach(i => i.addEventListener('change', () => load()));
+  function showPage(id) {
+    document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.page === id));
+    document.querySelectorAll('.page').forEach(p => { p.hidden = p.id !== id; });
     Object.values(charts).forEach(c => c.resize());
-  }));
+    if (window.API_BASE && !loadedPages.has(id)) { loadedPages.add(id); load(null, id); }
+  }
+  document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
+  document.querySelectorAll('[data-nav]').forEach(b => {
+    b.addEventListener('click', () => showPage(b.dataset.nav));
+    b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPage(b.dataset.nav); } });
+  });
+  // Bookmark buttons: each page keeps the set of hidden groups; a visual is shown unless one
+  // of its ancestor groups is in that set (ADR-005).
+  const hiddenGroups = new Map();
+  document.querySelectorAll('.page').forEach(pg => hiddenGroups.set(pg.id, new Set(JSON.parse(pg.dataset.hiddenGroups || '[]'))));
+  function applyGroups(page) {
+    const hs = hiddenGroups.get(page.id);
+    page.querySelectorAll('[data-groups]').forEach(el => { el.hidden = el.dataset.groups.split(' ').some(g => hs.has(g)); });
+    Object.values(charts).forEach(c => c.resize());
+  }
+  document.querySelectorAll('[data-set]').forEach(b => {
+    const activate = () => {
+      const page = b.closest('.page'), hs = hiddenGroups.get(page.id);
+      Object.entries(JSON.parse(b.dataset.set)).forEach(([g, hidden]) => hidden ? hs.add(g) : hs.delete(g));
+      applyGroups(page);
+    };
+    b.addEventListener('click', activate);
+    b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
+  });
   window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
   load();
 })();

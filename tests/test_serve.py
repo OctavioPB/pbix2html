@@ -102,3 +102,46 @@ def test_missing_yaml_error_names_the_path_it_looked_for():
     detail = r.json()["detail"]
     assert "NoSuchReport.yaml" in detail
     assert "project root" in detail
+
+
+def _write_slicer_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(semantic, "METRICS_DIR", tmp_path)
+    serve._spec_cache.clear()
+    (tmp_path / "S.yaml").write_text(
+        "report: S\nconnection: teradata\ndelivery: snapshot\n"
+        "parameters:\n  org: {type: string, default: null, from_slicer: T.org, multi: true}\n"
+        "  year: {type: string, default: '2026', from_slicer: T.year, multi: false}\n"
+        "slicers:\n  s1: {page: P, params: [org], options_sql: 'SELECT DISTINCT org AS level1 FROM t'}\n"
+        "  s2: {page: P, params: [year]}\n"
+        "roles: {default: {proxy_user: null}}\n"
+        "visuals:\n  v1: {kind: card, sql: 'SELECT 1 AS value FROM t WHERE org IN (:org) AND y = :year', "
+        "params: [org, year]}\n", encoding="utf-8")
+
+
+def test_multi_select_parameters_arrive_as_repeated_keys_and_keep_their_commas(tmp_path, monkeypatch):
+    _write_slicer_report(tmp_path, monkeypatch)
+    be = FakeBackend(fixtures={}, default={"columns": ["value"], "rows": [[1]]}, calls=[])
+    serve.app.state.backend = be
+    c = TestClient(serve.app)
+    r = c.get("/reports/S/visuals/v1?org=Acme%2C+Inc&org=Globex&year=2025", headers={"X-Authenticated-User": "u"})
+    assert r.status_code == 200
+    sql, values, _ = be.calls[-1]
+    assert values == ["Acme, Inc", "Globex", "2025"] and "IN (?,?)" in sql       # the comma is not a separator
+    c.get("/reports/S/visuals/v1", headers={"X-Authenticated-User": "u"})          # defaults: org empty = no filter
+    sql, values, _ = be.calls[-1]
+    assert values == ["2026"] and "1=1" in sql
+
+
+def test_slicer_options_endpoint(tmp_path, monkeypatch):
+    _write_slicer_report(tmp_path, monkeypatch)
+    block = {"columns": ["level1"], "rows": [["Acme"], ["Globex"]]}
+    be = FakeBackend(fixtures={}, default=block, calls=[])
+    serve.app.state.backend = be
+    c = TestClient(serve.app)
+    assert c.get("/reports/S/slicers/s1").status_code == 401
+    r = c.get("/reports/S/slicers/s1", headers={"X-Authenticated-User": "u"})
+    assert r.status_code == 200 and r.json()["rows"] == [["Acme"], ["Globex"]]
+    assert be.calls[-1][0].startswith("SELECT DISTINCT org AS level1")
+    # a slicer with no options query is reported as skipped (its widget takes typed values)
+    assert c.get("/reports/S/slicers/s2", headers={"X-Authenticated-User": "u"}).json()["skipped"] is True
+    assert c.get("/reports/S/slicers/nope", headers={"X-Authenticated-User": "u"}).status_code == 404

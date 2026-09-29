@@ -155,3 +155,125 @@ def test_pbir_filters_hidden_and_custom_visuals(tmp_path):
     assert v["hidden"] is True and v["parent_group"] == "g1"
     assert v["filters"][0]["target"] == "Region.Name"
     assert lay["custom_visual_packages"] == ["Sankey1.0", "Acme"]
+
+
+def test_textbox_with_field_bound_run_is_not_lost():
+    """Real report: a textbox run whose `value` is a dict (field reference)."""
+    from pbix2html.extract import extract_textbox_text
+
+    objs = {"general": [{"properties": {"paragraphs": [{"textRuns": [
+        {"value": "Last Data Available "},
+        {"value": {"propertyIdentifier": {"objectName": "values"}, "selector": {"id": "lu"}}},
+    ]}]}}]}
+    assert extract_textbox_text(objs) == "<p>Last Data Available </p>"
+
+
+def test_classic_group_has_same_keys_and_bundled_custom_visuals(tmp_path):
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    cfg = json.dumps({"name": "g1", "singleVisualGroup": {"displayName": "G"}})
+    layout = {"sections": [{"name": "s", "displayName": "S", "visualContainers": [
+        {"config": cfg, "x": 0, "y": 0, "width": 1, "height": 1}]}], "resourcePackages": []}
+    pbix = tmp_path / "C.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/CustomVisuals/MyViz123/package.json", "{}")
+        z.writestr("Report/CustomVisuals/MyViz123/resources/MyViz123.pbiviz.json", "{}")
+    lay = extract_layout(pbix)
+    g = lay["pages"][0]["visuals"][0]
+    assert g["is_group"] and g["hidden"] is False and g["filters"] == []
+    assert lay["custom_visual_packages"] == ["MyViz123"]
+
+
+def test_page_background_image_is_embedded_and_rendered(tmp_path):
+    """Real report: a page whose whole canvas is a picture (white text sits on it)."""
+    import base64
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+    from pbix2html.render import _background_image_css
+
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+    bg = {"background": [{"properties": {"image": {"image": {
+        "name": {"expr": {"Literal": {"Value": "'bg.png'"}}},
+        "url": {"expr": {"ResourcePackageItem": {"PackageName": "RegisteredResources", "ItemName": "bg1.png"}}},
+        "scaling": {"expr": {"Literal": {"Value": "'Fit'"}}}}}}}]}
+    layout = {"sections": [{"name": "s", "displayName": "S", "config": json.dumps({"objects": bg}),
+                            "visualContainers": []}]}
+    pbix = tmp_path / "B.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/StaticResources/RegisteredResources/bg1.png", png)
+    page = extract_layout(pbix)["pages"][0]
+    assert page["background_image"]["scaling"] == "Fit"
+    assert page["background_image"]["data_uri"].startswith("data:image/png;base64,")
+    css = _background_image_css(page["background_image"])
+    assert css.startswith("url(data:image/png;base64,") and css.endswith("100% 100% no-repeat")
+    assert _background_image_css({"data_uri": 'data:image/png;base64,x");evil', "scaling": "Fit"}) is None
+
+
+def test_group_children_positions_become_absolute():
+    """Classic Layout: children are relative to their (possibly nested) group."""
+    from pbix2html.extract import absolutize_group_children
+
+    vs = [
+        {"id": "g1", "x": 100, "y": 200, "parent_group": None},
+        {"id": "g2", "x": 10, "y": 20, "parent_group": "g1"},     # nested group
+        {"id": "a", "x": 1, "y": 2, "parent_group": "g2"},
+        {"id": "b", "x": 5, "y": 5, "parent_group": None},         # top-level: untouched
+        {"id": "c", "x": 7, "y": 7, "parent_group": "missing"},    # unknown parent: untouched
+    ]
+    absolutize_group_children(vs)
+    pos = {v["id"]: (v["x"], v["y"]) for v in vs}
+    assert pos == {"g1": (100, 200), "g2": (110, 220), "a": (111, 222), "b": (5, 5), "c": (7, 7)}
+
+
+def test_theme_colour_ids_and_tints():
+    from pbix2html.extract import _tint, literal_color, theme_palette
+
+    theme = {"custom_json": {"background": "#FFFFFF", "foreground": "#00233C",
+                             "dataColors": ["#FF5F02", "#00233C", "#3053F4"]}}
+    pal = theme_palette(theme)
+    ref = lambda i, p=0: {"ThemeDataColor": {"ColorId": i, "Percent": p}}   # noqa: E731
+    assert literal_color(ref(0), pal) == "#FFFFFF"                 # 0 = background
+    assert literal_color(ref(1), pal) == "#00233C"                 # 1 = foreground
+    assert literal_color(ref(2), pal) == "#FF5F02"                 # 2 = dataColors[0]
+    assert literal_color(ref(2, 0.6), pal) == "#FFBF9A"            # value seen in a real report
+    assert _tint("#FFFFFF", -0.5) == "#808080"                      # negative = darker
+    assert literal_color(ref(2, 0.6)) == "theme:2:0.6"              # palette unknown yet: marker
+    assert theme_palette({}) is None
+
+
+def test_shape_fill_uses_theme_colour_end_to_end(tmp_path):
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    def fill(color_id, pct):
+        return {"fill": [
+            {"properties": {"show": {"expr": {"Literal": {"Value": "true"}}}}},
+            {"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": {"expr": {
+                "ThemeDataColor": {"ColorId": color_id, "Percent": pct}}}}}}}]}
+
+    def vc(name, objects):
+        cfg = {"name": name, "layouts": [{"position": {"x": 0, "y": 0, "width": 10, "height": 10}}],
+               "singleVisual": {"visualType": "actionButton", "objects": objects}}
+        return {"config": json.dumps(cfg), "x": 0, "y": 0, "width": 10, "height": 10}
+
+    layout = {
+        "config": json.dumps({"themeCollection": {"customTheme": {"name": "T.json"}}}),
+        "sections": [{"name": "s", "displayName": "S", "visualContainers": [
+            vc("active", fill(2, 0.6)), vc("idle", fill(0, 0))]}]}
+    pbix = tmp_path / "F.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/StaticResources/RegisteredResources/T.json", json.dumps(
+            {"background": "#FFFFFF", "foreground": "#00233C", "dataColors": ["#FF5F02", "#00233C"]}))
+    v = {x["id"]: x for x in extract_layout(pbix)["pages"][0]["visuals"]}
+    assert v["active"]["style"]["background"] == "#FFBF9A"
+    assert v["idle"]["style"]["background"] == "#FFFFFF"

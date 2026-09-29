@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import extract as ex, semantic
 from .config import settings
-from .query import FakeBackend, TeradataBackend, run_report
+from .query import FakeBackend, TeradataBackend, run_report, run_slicers
 from .render import render_html
 from .validate import validate_report, write_markdown
 
@@ -28,7 +28,12 @@ def _layout_and_model(pbix: Path, out_dir: Path):
     rdir.mkdir(parents=True, exist_ok=True)
     (rdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
     (rdir / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    return layout, model
+    # proposed extra relationships (a calendar's date key) are saved for review, then applied
+    _, new_rels = semantic.sync_relationships(layout["report"], model)
+    if new_rels:
+        print(f"relationships: {len(new_rels)} proposed (fact date key → calendar) → "
+              f"{semantic.relationships_path(layout['report'])} (review before trusting)")
+    return layout, semantic.with_relationship_overrides(layout["report"], model)
 
 
 def _backend(args):
@@ -46,8 +51,23 @@ def cmd_extract(args):
 
 def cmd_scaffold(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
-    path = semantic.write_scaffold(layout, model, overwrite=args.overwrite)
+    table_map, new = semantic.sync_table_map(layout["report"], model)
+    if new:
+        print(f"table map: {len(new)} table(s) auto-detected from Power Query → "
+              f"{semantic.table_map_path(layout['report'])} (review before trusting)")
+    path = semantic.write_scaffold(layout, model, overwrite=args.overwrite, table_map=table_map)
     print(f"yaml generated: {path}  (fill in the `sql: TODO` entries)")
+    cmd_mapping(args)
+
+
+def cmd_mapping(args):
+    layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
+    table_map = semantic.preview_table_map(layout["report"], model)
+    rep = semantic.mapping_report(layout, model, table_map)
+    path = Path(args.out) / layout["report"] / "mapping_report.md"
+    path.write_text(semantic.render_mapping_report(rep), encoding="utf-8")
+    v = rep["visuals"]
+    print(f"mapping report: {path}  (data visuals {v['data_visuals']}, drafted {v['drafted']})")
 
 
 def cmd_convert(args):
@@ -62,7 +82,7 @@ def cmd_convert(args):
         layout = semantic.apply_theme_override(layout, override)
         print(f"Theme override applied from {theme_src}")
     if not semantic.yaml_path(layout["report"]).exists():
-        semantic.write_scaffold(layout, model)
+        semantic.write_scaffold(layout, model, table_map=semantic.sync_table_map(layout["report"], model)[0])
         print(f"! metrics/{layout['report']}.yaml didn't exist: generated the scaffold. Fill in the SQL and convert again.")
     spec = semantic.load(layout["report"])
     values = semantic.resolve_params(spec, _kv(args.params))
@@ -73,11 +93,15 @@ def cmd_convert(args):
         if r is None:
             sys.exit(f"role {role!r} not defined in the yaml")
         proxy_user = r.get("proxy_user")
-    data = None
+    data = slicer_data = None
     if args.mode == "snapshot":
         backend = _backend(args)
         data = run_report(spec, values, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
-    html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden)
+        slicer_data = run_slicers(spec, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
+    if args.mode == "hah" and not args.hah_base:
+        sys.exit("--mode hah needs --hah-base <url of the HTML App Host>")
+    html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden,
+                       slicer_data=slicer_data, hah_base=args.hah_base)
     out = Path(args.html) if args.html else Path(args.out) / (f"{layout['report']}" + (f".{role}" if role else "") + ".html")
     out.write_text(html, encoding="utf-8")
     n_ok = sum(1 for d in (data or {}).values() if d.get("rows")) if data else 0
@@ -123,11 +147,17 @@ def main(argv=None) -> int:
     p.add_argument("--overwrite", action="store_true")
     p.set_defaults(fn=cmd_scaffold)
 
+    p = sub.add_parser("mapping", help="how well the model and visuals map to SQL (out/<Report>/mapping_report.md)")
+    p.add_argument("pbix")
+    p.add_argument("--out", default="out")
+    p.set_defaults(fn=cmd_mapping)
+
     p = sub.add_parser("convert", help=".pbix → Report.html")
     p.add_argument("pbix")
     p.add_argument("--out", default="out")
     p.add_argument("--html", help="explicit output path")
-    p.add_argument("--mode", choices=["snapshot", "live"], default="snapshot")
+    p.add_argument("--mode", choices=["snapshot", "live", "hah"], default="snapshot")
+    p.add_argument("--hah-base", help="base URL of the HTML App Host (mode hah), e.g. https://hah.example.com")
     p.add_argument("--role")
     p.add_argument("--params", nargs="*", help="k=v (yaml parameters)")
     p.add_argument("--fake-data", help="json {columns,rows} for development without Teradata")

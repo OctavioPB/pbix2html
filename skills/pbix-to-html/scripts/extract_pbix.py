@@ -69,6 +69,8 @@ def literal_to_text(expr: Any) -> str | None:
         return None
     lit = expr.get("Literal", {}).get("Value")
     if isinstance(lit, str):
+        if len(lit) >= 2 and lit[0] == "'" and lit[-1] == "'":
+            return lit[1:-1].replace("''", "'")          # '' is an escaped quote inside a text literal
         return lit.strip("'\"")
     return None
 
@@ -107,7 +109,10 @@ def extract_textbox_text(objects: dict) -> str | None:
         runs = []
         for run in para.get("textRuns") or []:
             value = run.get("value") or ""
-            if not value:
+            # A run bound to a field/measure carries a dict (propertyIdentifier/selector)
+            # instead of literal text; there's nothing static to render, so skip it
+            # rather than losing the whole textbox (seen in a real report).
+            if not value or not isinstance(value, str):
                 continue
             style = run.get("textStyle") or {}
             css = []
@@ -136,25 +141,89 @@ _IMAGE_MIME = {
 }
 
 
+def theme_palette(theme: dict | None) -> list[str] | None:
+    """The palette `ThemeDataColor.ColorId` indexes into: 0 = background, 1 = foreground,
+    then the theme's `dataColors` from index 2 (verified against a real report: a fill of
+    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). None
+    when the report's theme JSON isn't available, in which case theme references are dropped
+    rather than guessed."""
+    cj = (theme or {}).get("custom_json") or {}
+    colors = cj.get("dataColors")
+    if not colors:
+        return None
+    return [cj.get("background") or "#FFFFFF", cj.get("foreground") or "#000000", *colors]
+
+
+def _tint(hex_color: str, percent: float) -> str:
+    """Power BI's Percent: >0 lightens toward white, <0 darkens toward black (linear mix)."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6 or not percent:
+        return "#" + h.upper() if len(h) == 6 else hex_color
+    target = 255 if percent > 0 else 0
+    f = min(abs(float(percent)), 1.0)
+    rgb = [round(int(h[k:k + 2], 16) + (target - int(h[k:k + 2], 16)) * f) for k in (0, 2, 4)]
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+_THEME_MARKER_RE = re.compile(r"^theme:(\d+):(-?[\d.]+)$")
+
+
 def literal_color(expr: Any, theme_colors: list[str] | None = None) -> str | None:
     """A Power BI colour expression → '#RRGGBB'.
 
     Two shapes appear in Layout: a literal (`{"Literal": {"Value": "'#FFFFFF'"}}`) and a
     reference into the theme palette (`{"ThemeDataColor": {"ColorId": 0, "Percent": 0}}`).
-    The palette reference is resolved against the report's own `dataColors` when they're
-    known. `Percent` (Power BI's lighter/darker shades of a palette entry) is ignored —
-    returning the base colour is much closer to the original than returning nothing."""
+    With the palette known (`theme_colors`, see `theme_palette`) the reference is resolved
+    to a hex colour; without it — parsing happens before the theme is read — it comes back
+    as a `theme:<id>:<percent>` marker that `resolve_theme_markers` resolves afterwards."""
     if not isinstance(expr, dict):
         return None
     literal = literal_to_text(expr)
     if literal and literal.startswith("#"):
         return literal
     theme_ref = expr.get("ThemeDataColor")
-    if isinstance(theme_ref, dict) and theme_colors:
-        idx = theme_ref.get("ColorId")
-        if isinstance(idx, int) and 0 <= idx < len(theme_colors):
-            return theme_colors[idx]
+    if isinstance(theme_ref, dict):
+        idx, pct = theme_ref.get("ColorId"), theme_ref.get("Percent") or 0
+        if isinstance(idx, int) and isinstance(pct, (int, float)):
+            if not theme_colors:
+                return f"theme:{idx}:{pct}"
+            if 0 <= idx < len(theme_colors):
+                return _tint(theme_colors[idx], pct)
     return None
+
+
+def resolve_theme_markers(layout: dict) -> None:
+    """Replaces `theme:<id>:<pct>` markers (page background, visual background/border/fill)
+    with real colours now that the theme is known; unresolvable ones are removed."""
+    palette = theme_palette(layout.get("theme"))
+
+    def fix(holder: dict, key: str, keep_key: bool = False) -> None:
+        val = holder.get(key)
+        m = _THEME_MARKER_RE.match(val) if isinstance(val, str) else None
+        if not m:
+            return
+        idx, pct = int(m.group(1)), float(m.group(2))
+        if palette and 0 <= idx < len(palette):
+            holder[key] = _tint(palette[idx], pct)
+        elif keep_key:
+            holder[key] = None
+        else:
+            holder.pop(key, None)
+
+    for page in layout.get("pages", []):
+        fix(page, "background", keep_key=True)
+        for v in page.get("visuals", []):
+            style = v.get("style")
+            if isinstance(style, dict):
+                fix(style, "background")
+                fix(style, "border_color")
+            if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
+                fix(v["slicer"]["style"], "color")
+                fix(v["slicer"]["style"], "background")
+            for state in ((v.get("button") or {}).get("states") or {}).values():
+                for card in ("text", "fill", "outline"):
+                    if isinstance(state.get(card), dict):
+                        fix(state[card], "color")
 
 
 def _object_color(objects: dict, name: str, prop: str = "color",
@@ -270,6 +339,126 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     return style
 
 
+def _fill_color(objects: dict) -> str | None:
+    """Fill of a shape / button (`objects.fill`): the default-state `fillColor` when the
+    fill is shown and not fully transparent. Same colour forms as `literal_color`."""
+    entries = (objects or {}).get("fill") or []
+    shown = True
+    for e in entries:
+        if not (e or {}).get("selector"):
+            flag = literal_to_text((((e.get("properties") or {}).get("show") or {}).get("expr")) or {})
+            if flag == "false":
+                shown = False
+    if not shown:
+        return None
+    for e in entries:
+        sel = (e or {}).get("selector") or {}
+        props = (e or {}).get("properties") or {}
+        if sel.get("id") != "default" or "fillColor" not in props:
+            continue
+        transp = literal_to_text(((props.get("transparency") or {}).get("expr")) or {})
+        try:
+            if transp is not None and float(str(transp).rstrip("DdLl")) >= 100:
+                return None
+        except ValueError:
+            pass
+        solid = ((props["fillColor"] or {}).get("solid") or {}).get("color") or {}
+        return literal_color(solid.get("expr"))
+    return None
+
+
+_BUTTON_STATES = ("default", "hover", "pressed", "disabled", "selected")
+
+
+def _num(expr: Any) -> float | None:
+    """A numeric literal such as `11D` / `2L` / `0.5D` → float."""
+    text = literal_to_text(expr)
+    if text is None:
+        return None
+    try:
+        return float(text.rstrip("DdLl"))
+    except ValueError:
+        return None
+
+
+def _bool(expr: Any) -> bool | None:
+    text = literal_to_text(expr)
+    return {"true": True, "false": False}.get(text) if text is not None else None
+
+
+def _color_prop(prop: Any) -> str | None:
+    return literal_color(((prop or {}).get("solid") or {}).get("color", {}).get("expr")) if isinstance(prop, dict) else None
+
+
+def parse_button(sv: dict) -> dict | None:
+    """Formatting of an `actionButton`, per state: {state: {text, fill, outline, round, icon}}.
+
+    Power BI stores each formatting card (`text`, `fill`, `outline`, `shape`, `icon`) as a list
+    of entries: one without a selector that carries the card's `show` flag, and one per
+    state (`selector.id`: default / hover / pressed / disabled / selected) with only the
+    properties that differ from the button defaults. A state's missing properties fall back
+    to `default` (merged by the renderer). Only what the report sets is returned, so absent
+    keys mean "not set" and the renderer does not invent styling. The property names beyond
+    `text`, `fontSize`, `fill.fillColor/transparency` and `icon.shapeType` follow Power BI's
+    documented names but are unverified against a real file (see ADR-005)."""
+    objects = (sv or {}).get("objects") or {}
+    shown: dict[str, bool] = {}
+    for card in ("text", "fill", "outline", "shape", "icon"):
+        for e in objects.get(card) or []:
+            if not (e or {}).get("selector"):
+                flag = _bool((((e.get("properties") or {}).get("show") or {}).get("expr")))
+                if flag is not None:
+                    shown[card] = flag
+    states: dict[str, dict] = {}
+    for card in ("text", "fill", "outline", "shape", "icon"):
+        for e in objects.get(card) or []:
+            sel = ((e or {}).get("selector") or {}).get("id")
+            if sel not in _BUTTON_STATES:
+                continue
+            pr = e.get("properties") or {}
+            st = states.setdefault(sel, {})
+            ex = lambda k: (pr.get(k) or {}).get("expr")   # noqa: E731
+            if card == "text":
+                t = {k: v for k, v in {
+                    "label": literal_to_text(ex("text")), "size": _num(ex("fontSize")),
+                    "color": _color_prop(pr.get("fontColor")), "font": literal_to_text(ex("fontFamily")),
+                    "bold": _bool(ex("bold")), "italic": _bool(ex("italic")), "underline": _bool(ex("underline")),
+                    "align": literal_to_text(ex("horizontalAlignment")),
+                    "valign": literal_to_text(ex("verticalAlignment")),
+                }.items() if v is not None}
+                if t:
+                    st["text"] = t
+            elif card == "fill":
+                f = {k: v for k, v in {"color": _color_prop(pr.get("fillColor")),
+                                       "transparency": _num(ex("transparency"))}.items() if v is not None}
+                if f:
+                    st["fill"] = f
+            elif card == "outline":
+                o = {k: v for k, v in {"color": _color_prop(pr.get("lineColor")), "weight": _num(ex("weight")),
+                                       "transparency": _num(ex("transparency"))}.items() if v is not None}
+                if o:
+                    st["outline"] = o
+            elif card == "shape":
+                r = _num(ex("roundEdge"))
+                if r is not None:
+                    st["round"] = r
+            elif card == "icon":
+                kind = literal_to_text(ex("shapeType"))
+                if kind:
+                    st["icon"] = kind
+    hidden = {c for c, flag in shown.items() if flag is False}
+    if not states and not hidden:
+        return None
+    return {"states": states, "hidden": sorted(hidden)}
+
+
+def _style_with_fill(style: dict, objects: dict) -> dict:
+    """A shape/button's own fill is its background unless the container sets one."""
+    if "background" not in style and (fill := _fill_color(objects)):
+        style["background"] = fill
+    return style
+
+
 def _image_ref(objects: dict) -> dict | None:
     """{'package': ..., 'item': ...} for an `image`-kind visual's picture — the
     resource reference at objects.general[0].properties.imageUrl.expr.ResourcePackageItem
@@ -281,6 +470,20 @@ def _image_ref(objects: dict) -> dict | None:
         item = ((props.get("imageUrl") or {}).get("expr") or {}).get("ResourcePackageItem") or {}
         if item.get("ItemName"):
             return {"package": item.get("PackageName"), "item": item.get("ItemName")}
+    return None
+
+
+def _page_background_image(objects: dict) -> dict | None:
+    """{'package', 'item', 'scaling'} for a page's background *image*
+    (objects.background[*].properties.image.image), or None. Many designed reports put
+    their whole layout (panels, banners, a pale title area) in this picture, so ignoring
+    it can leave white text on a white canvas. Resolved to bytes by embed_image_resources."""
+    for b in (objects or {}).get("background") or []:
+        img = (((b or {}).get("properties") or {}).get("image") or {}).get("image") or {}
+        item = ((img.get("url") or {}).get("expr") or {}).get("ResourcePackageItem") or {}
+        if item.get("ItemName"):
+            return {"package": item.get("PackageName"), "item": item["ItemName"],
+                    "scaling": (literal_to_text((img.get("scaling") or {}).get("expr") or {}) or "Normal")}
     return None
 
 
@@ -316,16 +519,21 @@ def embed_image_resources(z: zipfile.ZipFile, layout: dict) -> None:
     to the rest of the report."""
     names = set(z.namelist())
     cache: dict[tuple, str | None] = {}
+
+    def resolve(ref: dict) -> str | None:
+        key = (ref.get("package"), ref.get("item"))
+        if key not in cache:
+            cache[key] = _read_image_data_uri(z, names, ref)
+        return cache[key]
+
     for page in layout.get("pages", []):
+        bg = page.get("background_image")
+        if bg and (uri := resolve(bg)):
+            bg["data_uri"] = uri
         for v in page.get("visuals", []):
             ref = v.get("image_ref")
-            if not ref:
-                continue
-            key = (ref.get("package"), ref.get("item"))
-            if key not in cache:
-                cache[key] = _read_image_data_uri(z, names, ref)
-            if cache[key]:
-                v["image_data_uri"] = cache[key]
+            if ref and (uri := resolve(ref)):
+                v["image_data_uri"] = uri
 
 
 def safe_name(s: str) -> str:
@@ -349,7 +557,13 @@ STANDARD_VISUALS = {
     "azureMap", "textbox", "image", "shape", "actionButton", "basicShape", "decompositionTreeVisual",
     "keyDriversVisual", "qnaVisual", "scriptVisual", "pythonVisual", "cardVisual",
     "advancedSlicerVisual", "listSlicer", "textFilter", "esriVisual", "smartNarrative", "rdlVisual",
+    "dynamicTooltip",      # reinterpreted (see _CUSTOM_ALIASES)
 }
+
+
+# filterConfiguration schema (microsoft/json-schemas): PBIR writes the name, the classic Layout the
+# position in this list
+_HOW_CREATED = {"Auto": 0, "User": 1, "Drill": 2, "Include": 3, "Exclude": 4, "Drillthrough": 5}
 
 
 def parse_filters(raw: Any) -> list[dict]:
@@ -374,6 +588,10 @@ def parse_filters(raw: Any) -> list[dict]:
                     entity = (inner.get("SourceRef") or {}).get("Entity") \
                         or (((inner.get("Column") or {}).get("Expression") or {}).get("SourceRef") or {}).get("Entity")
                     prop = node.get("Property") or node.get("Level")
+                    if kind == "Aggregation":      # `Sum(T.c)`: the column is one level down
+                        col = (inner.get("Column") or {})
+                        entity = (((col.get("Expression") or {}).get("SourceRef") or {}).get("Entity")) or entity
+                        prop = col.get("Property") or prop
                     target = f"{entity}.{prop}" if entity or prop else kind
                     break
             out.append({
@@ -383,6 +601,10 @@ def parse_filters(raw: Any) -> list[dict]:
                 "is_hidden": bool(f.get("isHiddenInViewMode")),
                 "is_locked": bool(f.get("isLockedInViewMode")),
                 "definition": f.get("filter"),   # raw; contains Where/Condition
+                # howCreated: 0 auto, 1 user, 2 drill, 3 include, 4 exclude, 5 drill-through
+                "how_created": _HOW_CREATED.get(f.get("howCreated"), f.get("howCreated")),
+                # a filter on an aggregate (`Sum(T.c) < 100`), not on the column's rows
+                "aggregation": ((f.get("expression") or f.get("field") or {}).get("Aggregation") or {}).get("Function"),
             })
         except Exception as e:
             # A filter with an unexpected shape must not take down the rest of the visual/page.
@@ -450,16 +672,21 @@ def _parse_visual(vc: dict) -> dict:
     if group is not None:
         visual.update({"type": "__group__", "is_group": True, "is_custom": False,
                        "title": group.get("displayName"), "projections": {}, "fields": [],
-                       "text": None, "image_ref": None})
+                       "text": None, "image_ref": None, "filters": [],
+                       # A hidden group hides all its descendants: it is how reports build
+                       # "view switchers" (see ADR-005).
+                       "hidden": bool(group.get("isHidden")),
+                       "has_drill_other_visuals": False, "objects_keys": []})
         return visual
 
     sv = sv or {}
-    vtype = sv.get("visualType", "unknown")
+    vtype, custom_type = normalize_visual_type(sv.get("visualType", "unknown"))
     projections = sv.get("projections") or {}
     # A projections role can come back as null (empty field well) instead of omitted.
     fields = sorted({p.get("queryRef") for role in projections.values() if isinstance(role, list)
                      for p in role if isinstance(p, dict) and p.get("queryRef")})
 
+    qmap = _proto_query_refs(sv)     # renamed tables leave stale names in queryRef
     vco = sv.get("vcObjects") or {}
     texts = visual_text(sv)          # title, subtitle, shape/button label, axis + legend titles
     title = texts.get("title")
@@ -468,22 +695,257 @@ def _parse_visual(vc: dict) -> dict:
 
     visual.update({
         "type": vtype,
+        **({"custom_type": custom_type} if custom_type else {}),
         "is_group": False,
         "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
         "title": title,
         "hidden": display == "hidden",
-        "projections": {role: [p.get("queryRef") for p in (refs or []) if isinstance(p, dict)]
+        "projections": {role: [qmap.get(p.get("queryRef"), p.get("queryRef")) for p in (refs or [])
+                               if isinstance(p, dict)]
                         for role, refs in projections.items()},
-        "fields": fields,
+        "fields": sorted({qmap.get(f, f) for f in fields}),
         "filters": parse_filters(vc.get("filters")),
         "has_drill_other_visuals": bool(sv.get("drillFilterOtherVisuals")),
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
-        "style": container_style(vco),
+        "style": _style_with_fill(container_style(vco), sv.get("objects") or {}),
         "texts": texts,
+        "action": _visual_link(vco),
+        "sort": _proto_sort(sv),
+        **({"button": parse_button(sv)} if vtype == "actionButton" else {}),
+        **({"tooltip": parse_tooltip(sv.get("objects") or {})} if vtype == "dynamicTooltip" else {}),
+        **({"slicer": parse_slicer(sv.get("objects") or {}, list(dict.fromkeys(
+            qmap.get(p.get("queryRef"), p.get("queryRef")) for refs in projections.values()
+            if isinstance(refs, list) for p in refs if isinstance(p, dict) and p.get("queryRef"))),
+            sv.get("syncGroup"))}
+           if vtype in _SLICER_TYPES else {}),
     })
     return visual
+
+
+def absolutize_group_children(visuals: list[dict]) -> None:
+    """Classic Layout stores a grouped visual's x/y *relative to its group* (a child
+    that fills its group is at 0,0 with the group's width/height), and nested groups
+    are relative to their parent. Rendering them as-is piles every grouped visual into
+    the page's top-left corner, so add the ancestors' offsets in place. Seen on a real
+    report where half the visuals were grouped. Cycles / unknown parents are ignored."""
+    by_id = {v.get("id"): v for v in visuals if v.get("id")}
+    done: set[str] = set()
+
+    def shift(v: dict, seen: frozenset = frozenset()) -> None:
+        vid = v.get("id")
+        parent = by_id.get(v.get("parent_group"))
+        if vid in done or parent is None or vid in seen:
+            return
+        shift(parent, seen | {vid})
+        v["x"] = (v.get("x") or 0) + (parent.get("x") or 0)
+        v["y"] = (v.get("y") or 0) + (parent.get("y") or 0)
+        done.add(vid)
+
+    for v in visuals:
+        shift(v)
+
+
+def _visual_link(vco: dict) -> dict | None:
+    """What clicking a visual/button does, from `vcObjects.visualLink`:
+    {"type": "page", "page": <section name>, "enabled"} for PageNavigation, or
+    {"type": "bookmark", "bookmark": <bookmark name>, "enabled"}. Other link types
+    (WebUrl, Back, drill-through) are not modelled yet."""
+    for link in (vco or {}).get("visualLink") or []:
+        props = (link or {}).get("properties") or {}
+
+        def lit(key: str) -> str | None:
+            text = literal_to_text(((props.get(key) or {}).get("expr")) or {})
+            return text.strip("'") if isinstance(text, str) else None
+
+        kind = lit("type")
+        enabled = lit("show") != "false"
+        if kind == "PageNavigation":
+            return {"type": "page", "page": lit("navigationSection"), "enabled": enabled}
+        if kind == "Bookmark":
+            return {"type": "bookmark", "bookmark": lit("bookmark"), "enabled": enabled}
+    return None
+
+
+_SLICER_TYPES = {"slicer", "advancedSlicerVisual", "listSlicer"}
+# Custom visuals with a standard meaning here, matched by the type's prefix (the rest is a
+# publisher hash): a hierarchy slicer is a slicer; a "dynamic tooltip" is an info icon.
+_CUSTOM_ALIASES = (("HierarchySlicer", "slicer"), ("dynamicTooltip", "dynamicTooltip"))
+
+
+def normalize_visual_type(vtype: str) -> tuple[str, str | None]:
+    """(type, custom_type): a custom visual we know how to reinterpret gets its standard type and
+    keeps the original id in `custom_type`; anything else comes back unchanged."""
+    for prefix, standard in _CUSTOM_ALIASES:
+        if vtype.startswith(prefix):
+            return standard, vtype
+    return vtype, None
+_SLICER_MODES = {"dropdown": "dropdown", "basic": "list", "between": "between", "before": "before",
+                 "after": "after", "relative": "relative", "tile": "tile"}
+
+
+def _pbi_literal(text: Any) -> Any:
+    """A Power BI literal as a Python value: `2026L` → 2026, `12.5D` → 12.5, `'abc'` → 'abc',
+    `datetime'2026-04-01T00:00:00'` → '2026-04-01', true/false → bool, null → None."""
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+    m = re.fullmatch(r"datetime'(\d{4}-\d{2}-\d{2})(?:T[\d:.]*)?'", t)
+    if m:
+        return m.group(1)
+    if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
+        return t[1:-1].replace("''", "'")
+    if t.lower() in ("true", "false"):
+        return t.lower() == "true"
+    if t.lower() == "null":
+        return None
+    m = re.fullmatch(r"(-?\d+)L", t)
+    if m:
+        return int(m.group(1))
+    m = re.fullmatch(r"(-?\d+(?:\.\d+)?)[DM]", t)
+    if m:
+        return float(m.group(1))
+    return t
+
+
+def _filter_selection(filt: Any) -> dict:
+    """What a slicer's saved filter selects: {"values": {"Table.Col": [..]}, "range":
+    {"Table.Col": {"from": .., "to": ..}}}. Reads `In`, `Between` and `Comparison` (>=, <=, >, <)
+    conditions, through `And` / `Not`-free nesting; anything else is ignored."""
+    if not isinstance(filt, dict):
+        return {}
+    aliases = {f.get("Name"): f.get("Entity") for f in filt.get("From") or [] if isinstance(f, dict)}
+    values: dict[str, list] = {}
+    ranges: dict[str, dict] = {}
+
+    def ref(node: Any) -> str | None:
+        ep = _entity_prop(node, aliases)
+        return f"{ep[0]}.{ep[1]}" if ep and ep[0] and ep[1] else None
+
+    def lit(node: Any) -> Any:
+        return _pbi_literal(((node or {}).get("Literal") or {}).get("Value")) if isinstance(node, dict) else None
+
+    def walk(cond: Any) -> None:
+        if not isinstance(cond, dict):
+            return
+        if "And" in cond:
+            walk(cond["And"].get("Left"))
+            walk(cond["And"].get("Right"))
+        elif "In" in cond:
+            exprs, rows = cond["In"].get("Expressions") or [], cond["In"].get("Values") or []
+            for k, e in enumerate(exprs):
+                name = ref(e)
+                if name:
+                    values.setdefault(name, []).extend(
+                        v for v in (lit(r[k]) for r in rows if isinstance(r, list) and len(r) > k)
+                        if v is not None and v != "Select All")     # custom hierarchy slicers' "no filter"
+        elif "Between" in cond:
+            name = ref(cond["Between"].get("Expression"))
+            if name:
+                ranges[name] = {"from": lit(cond["Between"].get("LowerBound")), "to": lit(cond["Between"].get("UpperBound"))}
+        elif "Comparison" in cond:
+            c = cond["Comparison"]
+            name, value = ref(c.get("Left")), lit(c.get("Right"))
+            if name and value is not None:
+                bound = {1: "from", 2: "from", 3: "to", 4: "to"}.get(c.get("ComparisonKind"))
+                if bound:
+                    ranges.setdefault(name, {})[bound] = value
+
+    for w in filt.get("Where") or []:
+        walk((w or {}).get("Condition"))
+    out: dict[str, Any] = {}
+    values = {k: v for k, v in values.items() if v}
+    if values:
+        out["values"] = values
+    if ranges:
+        out["range"] = ranges
+    return out
+
+
+def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = None) -> dict:
+    """A slicer's widget description: {mode, fields, single, select_all, initial, style}.
+
+    `mode` (objects.data.mode: Dropdown / Basic / Between / Before / After / Relative / Tile) is
+    normalised to dropdown / list / between / before / after / relative / tile; a slicer that
+    doesn't say is a plain list, as in Power BI. `initial` is the slicer's saved selection
+    (objects.general.filter), which is part of the report's state. Formatting comes from
+    objects.items."""
+    def prop(card: str, key: str) -> Any:
+        for e in (objects or {}).get(card) or []:
+            pr = (e or {}).get("properties") or {}
+            if key in pr:
+                return pr[key]
+        return None
+
+    mode = (literal_to_text(((prop("data", "mode") or {}).get("expr")) or {}) or "Basic").lower()
+    flt = ((prop("general", "filter") or {}).get("filter"))
+    style = {k: v for k, v in {
+        "color": _color_prop(prop("items", "fontColor")), "background": _color_prop(prop("items", "background")),
+        "size": _num((prop("items", "textSize") or {}).get("expr")),
+    }.items() if v is not None}
+    group = (sync_group or {}).get("groupName") if isinstance(sync_group, dict) else None
+    return {
+        "mode": _SLICER_MODES.get(mode, "other"),
+        **({"sync_group": group} if group else {}),     # slicers sharing a group share one selection
+        "fields": list(fields),
+        "single": _bool((prop("selection", "singleSelect") or {}).get("expr")) is True,
+        "select_all": _bool((prop("selection", "selectAllCheckboxEnabled") or {}).get("expr")) is not False,
+        "initial": _filter_selection(flt),
+        "style": style,
+    }
+
+
+def parse_tooltip(objects: dict) -> dict | None:
+    """The `dynamicTooltip` custom visual keeps its content as literals in `objects.tooltip`:
+    {"header": ..., "text": ...}. None when there is nothing to show."""
+    for e in (objects or {}).get("tooltip") or []:
+        props = (e or {}).get("properties") or {}
+        out = {k: _pbi_literal(literal_to_text_raw(props.get(k)))
+               for k in ("header", "text") if props.get(k)}
+        out = {k: v for k, v in out.items() if isinstance(v, str) and v.strip()}
+        if out:
+            return out
+    return None
+
+
+def literal_to_text_raw(prop: Any) -> str | None:
+    """The raw literal text of a property (`{"expr": {"Literal": {"Value": "'x'"}}}` → `'x'`)."""
+    val = (((prop or {}).get("expr") or {}).get("Literal") or {}).get("Value") if isinstance(prop, dict) else None
+    return val if isinstance(val, str) else None
+
+
+def parse_bookmarks(root_config: dict) -> list[dict]:
+    """Classic `config.bookmarks[]` → [{id, name, page, groups, targets, apply_only_to_targets}].
+
+    A bookmark is a saved page state. What matters for view switchers is
+    `explorationState.sections[<page>].visualContainerGroups` = {groupId: {isHidden}}: which
+    groups are visible. `options.targetVisualNames` (group *and* visual ids) plus
+    `applyOnlyToTargetVisuals` limit which groups the bookmark is allowed to change, which is
+    how one page hosts independent switchers. Filter/slicer state (`suppressData`) is not
+    modelled (ADR-005, phase 3). See ADR-005."""
+    out: list[dict] = []
+
+    def visit(items: Any) -> None:
+        for b in items if isinstance(items, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("children"):
+                visit(b["children"])
+            es = b.get("explorationState") or {}
+            sections = es.get("sections") or {}
+            sid = es.get("activeSection") if es.get("activeSection") in sections else next(iter(sections), None)
+            sec = sections.get(sid) or {}
+            groups = {gid: bool((st or {}).get("isHidden"))
+                      for gid, st in (sec.get("visualContainerGroups") or {}).items()}
+            opts = b.get("options") or {}
+            if b.get("name"):
+                out.append({"id": b["name"], "name": b.get("displayName"), "page": sid, "groups": groups,
+                            "targets": list(opts.get("targetVisualNames") or []),
+                            "apply_only_to_targets": bool(opts.get("applyOnlyToTargetVisuals"))})
+
+    visit((root_config or {}).get("bookmarks"))
+    return out
 
 
 def parse_page(section: dict) -> dict:
@@ -495,6 +957,8 @@ def parse_page(section: dict) -> dict:
     # so either one is better than falling back to the theme default.
     page_background = (_object_color(objects, "background")
                        or _object_color(objects, "outspace"))
+    visuals = [parse_visual(vc) for vc in section.get("visualContainers", [])]
+    absolutize_group_children(visuals)
     return {
         "name": section.get("name"),
         "display_name": section.get("displayName"),
@@ -503,8 +967,9 @@ def parse_page(section: dict) -> dict:
         "height": section.get("height"),
         "hidden": cfg.get("visibility") == 1,
         "background": page_background,
+        "background_image": _page_background_image(objects),
         "filters": parse_filters(section.get("filters")),
-        "visuals": [parse_visual(vc) for vc in section.get("visualContainers", [])],
+        "visuals": visuals,
     }
 
 
@@ -559,10 +1024,14 @@ def extract_layout(pbix: Path) -> dict:
             "layout_version": (loads_maybe(layout.get("config", "{}")) or {}).get("version"),
             "has_embedded_datamodel": has_datamodel,
             "theme": theme,
-            "custom_visual_packages": [c for c in custom_packages if c],
+            "custom_visual_packages": list(dict.fromkeys(
+                [c for c in custom_packages if c] + _zip_custom_visuals(names))),
             "pages": [parse_page(s) for s in layout.get("sections", [])],
+            "filters": parse_filters(layout.get("filters")),      # report-level filter pane
             "format": "classic",
+            "bookmarks": parse_bookmarks(loads_maybe(layout.get("config", "{}")) or {}),
         }
+        resolve_theme_markers(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
 
@@ -592,6 +1061,84 @@ def _pbir_read_json(z: zipfile.ZipFile, path: str) -> dict:
         return {}
 
 
+def canonical_query_ref(query_ref: str, entity: str, prop: str) -> str:
+    """Rebuilds a projection's `queryRef` from its real field. Power BI does not rewrite
+    `queryRef` when a table is renamed, so it keeps the old name (`Sum(Fixed Capacity
+    Mnthly.x)` for a field whose SourceRef.Entity is now `Active Compute Fixed Mnthly`),
+    and everything keyed on it then points at a table that no longer exists. Only the
+    aggregation wrapper is kept from the original."""
+    if not entity or not prop:
+        return query_ref
+    m = re.match(r"^([A-Za-z]+)\((.*)\)$", query_ref or "")
+    inner = f"{entity}.{prop}"
+    return f"{m.group(1)}({inner})" if m else inner
+
+
+def _entity_prop(node: Any, aliases: dict | None = None) -> tuple[str, str] | None:
+    """First (entity, property) found in a field/expression node (any nesting: Column,
+    Measure, Aggregation, HierarchyLevel...). `aliases` maps a classic `Source` alias to its
+    table; PBIR carries the entity directly."""
+    aliases = aliases or {}
+    if isinstance(node, dict):
+        expr = node.get("Expression")
+        src = expr.get("SourceRef") if isinstance(expr, dict) else None
+        if src and ("Property" in node or "Level" in node):
+            return (src.get("Entity") or aliases.get(src.get("Source")) or "",
+                    node.get("Property") or node.get("Level") or "")
+        for v in node.values():
+            found = _entity_prop(v, aliases)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for v in node:
+            found = _entity_prop(v, aliases)
+            if found:
+                return found
+    return None
+
+
+def _sort_entries(items: list, direction_of) -> list[dict]:
+    """[{entity, property, direction: 'asc'|'desc'}] for a visual's sort definition."""
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        ep = _entity_prop(it.get("field") or it.get("Expression"), it.get("_aliases"))
+        if ep and ep[0] and ep[1]:
+            out.append({"entity": ep[0], "property": ep[1], "direction": direction_of(it)})
+    return out
+
+
+def _proto_sort(sv: dict) -> list[dict]:
+    """Classic: `prototypeQuery.OrderBy` (Direction 1 = ascending, 2 = descending)."""
+    pq = (sv or {}).get("prototypeQuery") or {}
+    aliases = {f.get("Name"): f.get("Entity") for f in pq.get("From") or [] if isinstance(f, dict)}
+    items = [{**o, "_aliases": aliases} for o in pq.get("OrderBy") or [] if isinstance(o, dict)]
+    return _sort_entries(items, lambda o: "desc" if o.get("Direction") == 2 else "asc")
+
+
+def _pbir_sort(vis: dict) -> list[dict]:
+    """PBIR: `query.sortDefinition.sort[{field, direction: 'Ascending'|'Descending'}]`."""
+    items = (((vis.get("query") or {}).get("sortDefinition")) or {}).get("sort") or []
+    return _sort_entries(items, lambda o: "desc" if str(o.get("direction")).lower().startswith("desc") else "asc")
+
+
+def _proto_query_refs(sv: dict) -> dict[str, str]:
+    """Classic: {stale Select.Name -> canonical queryRef} from `prototypeQuery`, whose
+    expressions carry the real entity (through the `From` aliases)."""
+    pq = (sv or {}).get("prototypeQuery") or {}
+    aliases = {f.get("Name"): f.get("Entity") for f in pq.get("From") or [] if isinstance(f, dict)}
+    out: dict[str, str] = {}
+    for sel in pq.get("Select") or []:
+        name = (sel or {}).get("Name")
+        ep = _entity_prop(sel, aliases)
+        if name and ep and ep[0] and ep[1]:
+            fixed = canonical_query_ref(name, ep[0], ep[1])
+            if fixed != name:
+                out[name] = fixed
+    return out
+
+
 def _pbir_fields(query_state: dict) -> list[dict]:
     """[{role, entity, property, queryRef}], one per field well entry."""
     fields = []
@@ -606,7 +1153,8 @@ def _pbir_fields(query_state: dict) -> list[dict]:
                 prop = col.get("Property", "")
             else:
                 entity, prop = "", ""
-            fields.append({"role": role_name, "entity": entity, "property": prop, "queryRef": query_ref})
+            fields.append({"role": role_name, "entity": entity, "property": prop,
+                           "queryRef": canonical_query_ref(query_ref, entity, prop)})
     return fields
 
 
@@ -633,27 +1181,31 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             return {
                 "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
                 "width": pos.get("width", 0), "height": pos.get("height", 0),
-                "tab_order": pos.get("tabOrder"), "parent_group": None,
+                "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
                 "type": "__group__", "is_group": True, "is_custom": False,
-                "title": group.get("displayName"), "hidden": False,
+                "title": group.get("displayName"), "hidden": bool(vdata.get("isHidden")),
                 "projections": {}, "fields": [], "filters": [],
                 "has_drill_other_visuals": False, "objects_keys": [], "text": None,
                 "image_ref": None,
             }
         vis = vdata.get("visual") or {}
         qs = ((vis.get("query") or {}).get("queryState")) or {}
-        vtype = vis.get("visualType", "unknown")
+        vtype, custom_type = normalize_visual_type(vis.get("visualType", "unknown"))
         fields = _pbir_fields(qs)
         projections: dict[str, list] = {}
         for f in fields:
             projections.setdefault(f["role"], []).append(f["queryRef"])
+        # Container formatting (title, background, border, visualLink...) sits inside `visual`
+        # in real PBIR files; the older fixture put it at the top level, so accept both.
+        vco = vis.get("visualContainerObjects") or vdata.get("visualContainerObjects") or {}
         return {
             "id": vid, "x": pos.get("x", 0), "y": pos.get("y", 0), "z": pos.get("z", 0),
             "width": pos.get("width", 0), "height": pos.get("height", 0),
             "tab_order": pos.get("tabOrder"), "parent_group": vdata.get("parentGroupName"),
             "type": vtype, "is_group": False,   # a real group container returns above instead
+            **({"custom_type": custom_type} if custom_type else {}),
             "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
-            "title": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis).get("title"),
+            "title": _pbir_texts(vco, vis).get("title"),
             "hidden": bool(vdata.get("isHidden")) or vis.get("visible") is False,
             "projections": projections,
             "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
@@ -662,7 +1214,16 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
-            "texts": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis),
+            "texts": _pbir_texts(vco, vis),
+            "style": _style_with_fill(container_style(vco), vis.get("objects") or {}),
+            "action": _visual_link(vco),
+            "sort": _pbir_sort(vis),
+            **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
+            **({"tooltip": parse_tooltip(vis.get("objects") or {})} if vtype == "dynamicTooltip" else {}),
+            **({"slicer": parse_slicer(vis.get("objects") or {},
+                                       list(dict.fromkeys(f["queryRef"] for f in fields if f["queryRef"])),
+                                       vis.get("syncGroup"))}
+               if vtype in _SLICER_TYPES else {}),
         }
     except Exception as e:
         stub = _empty_visual_stub({}, e)
@@ -681,6 +1242,8 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         vdata = _pbir_read_json(z, f"Report/definition/pages/{page_id}/visuals/{vid}/visual.json")
         if vdata:
             visuals.append(_parse_visual_pbir(vdata, vid))
+    objects = page_data.get("objects") or {}
+    absolutize_group_children(visuals)   # PBIR child positions are relative to the group too
     return {
         "name": page_id,
         "display_name": page_data.get("displayName", page_id),
@@ -688,9 +1251,18 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         "width": page_data.get("width", 1280),
         "height": page_data.get("height", 720),
         "hidden": page_data.get("visibility") == "HiddenInViewMode",
+        "background": _object_color(objects, "background") or _object_color(objects, "outspace"),
+        "background_image": _page_background_image(objects),
         "filters": parse_filters((page_data.get("filterConfig") or {}).get("filters")),
         "visuals": visuals,
     }
+
+
+def _zip_custom_visuals(names: list[str]) -> list[str]:
+    """Custom visuals bundled inside the file: `Report/CustomVisuals/<visualType>/...`.
+    Real reports list them here rather than in `resourcePackages`."""
+    return sorted({n.split("/")[2] for n in names
+                   if n.startswith("Report/CustomVisuals/") and n.count("/") >= 3})
 
 
 def _pbir_custom_packages(report_meta: dict) -> list[str]:
@@ -703,6 +1275,27 @@ def _pbir_custom_packages(report_meta: dict) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _pbir_theme(z: zipfile.ZipFile, names: list[str], report_meta: dict) -> dict:
+    """`report.json → themeCollection`: the custom theme (a RegisteredResources JSON) wins over
+    the base one (`SharedResources/BaseThemes/<name>.json`), as in Power BI. Without a
+    declared custom theme the base theme JSON is used, as before."""
+    tc = report_meta.get("themeCollection") or {}
+    custom, base = tc.get("customTheme") or {}, tc.get("baseTheme") or {}
+    theme: dict[str, Any] = {"base": base or None, "custom": custom or None, "custom_json": None}
+    if custom.get("name"):
+        path = f"Report/StaticResources/{custom.get('type') or 'RegisteredResources'}/{custom['name']}"
+        if path in names:
+            theme["custom_json"] = _pbir_read_json(z, path) or None
+            theme["custom_path"] = path
+            return theme
+    entry = next((n for n in names if n.startswith("Report/StaticResources/SharedResources/BaseThemes/")
+                  and n.endswith(".json") and (not base.get("name") or n.endswith(f"/{base['name']}.json"))), None)
+    if entry:
+        theme["custom"] = theme["custom"] or {"name": entry}
+        theme["custom_json"] = _pbir_read_json(z, entry)
+    return theme
+
+
 def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_datamodel: bool) -> dict:
     pages_meta = _pbir_read_json(z, "Report/definition/pages/pages.json")
     report_meta = _pbir_read_json(z, "Report/definition/report.json")
@@ -710,22 +1303,20 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         n.split("/")[3] for n in names
         if n.startswith("Report/definition/pages/") and n.count("/") >= 4 and not n.endswith("pages.json")
     })
-    theme: dict[str, Any] = {"base": None, "custom": None, "custom_json": None}
-    theme_entry = next(
-        (n for n in names if n.startswith("Report/StaticResources/SharedResources/BaseThemes/")
-         and n.endswith(".json")), None)
-    if theme_entry:
-        theme = {"base": None, "custom": {"name": theme_entry}, "custom_json": _pbir_read_json(z, theme_entry)}
+    theme = _pbir_theme(z, names, report_meta)
     result = {
         "report": pbix.stem,
         "source": str(pbix),
         "layout_version": None,
         "has_embedded_datamodel": has_datamodel,
         "theme": theme,
-        "custom_visual_packages": _pbir_custom_packages(report_meta),
+        "custom_visual_packages": list(dict.fromkeys(
+            _pbir_custom_packages(report_meta) + _zip_custom_visuals(names))),
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
+        "filters": parse_filters((report_meta.get("filterConfig") or {}).get("filters")),
         "format": "pbir",
     }
+    resolve_theme_markers(result)
     embed_image_resources(z, result)
     return result
 
@@ -739,6 +1330,49 @@ def df_records(df) -> list[dict]:
         return json.loads(df.to_json(orient="records"))
     except Exception:
         return []
+
+
+_AUTO_DATE_TABLE_RE = re.compile(r"^(LocalDateTable|DateTableTemplate)_")
+
+
+def _all_relationships(m) -> list[dict]:
+    """The model's relationships, including those with a calculated table.
+
+    `pbixray.relationships` filters `SystemFlags = 0` on both ends, and a calculated table
+    (a DAX `CALENDAR(...)`, the usual date table) has SystemFlags 2, so every relationship
+    `fact.date → Calendar.Date` is silently dropped, and with it the only thing that lets a
+    date slicer filter the facts. Also, a calculated table's columns have no ExplicitName
+    (only InferredName). The same query is re-run without that filter, through pbixray's own
+    metadata database; the relationships of Power BI's automatic date/time helper tables
+    (`LocalDateTable_*`, `DateTableTemplate_*`) are left out as noise. Falls back to
+    pbixray's list if its internals aren't what this expects."""
+    try:
+        src = m._metadata.source
+        db = src._db
+        c = src._rel_col
+        sql = f"""
+        SELECT ft.Name AS FromTableName, COALESCE(fc.ExplicitName, fc.InferredName) AS FromColumnName,
+               tt.Name AS ToTableName, COALESCE(tc.ExplicitName, tc.InferredName) AS ToColumnName,
+               rel.IsActive,
+               CASE WHEN rel.{c("FromCardinality")} = 2 THEN 'M' ELSE '1' END || ':' ||
+               CASE WHEN rel.{c("ToCardinality")} = 2 THEN 'M' ELSE '1' END AS Cardinality,
+               CASE WHEN rel.CrossFilteringBehavior = 1 THEN 'Single'
+                    WHEN rel.CrossFilteringBehavior = 2 THEN 'Both'
+                    ELSE CAST(rel.CrossFilteringBehavior AS TEXT) END AS CrossFilteringBehavior
+        FROM Relationship rel
+            LEFT JOIN [Table] ft ON rel.{c("FromTableID")} = ft.id
+            LEFT JOIN [Column] fc ON rel.{c("FromColumnID")} = fc.id
+            LEFT JOIN [Table] tt ON rel.{c("ToTableID")} = tt.id
+            LEFT JOIN [Column] tc ON rel.{c("ToColumnID")} = tc.id
+        """
+        rows = df_records(db.query(sql))
+        rows = [r for r in rows if r.get("FromTableName") and r.get("ToTableName")
+                and r.get("FromColumnName") and r.get("ToColumnName")
+                and not _AUTO_DATE_TABLE_RE.match(r["FromTableName"])
+                and not _AUTO_DATE_TABLE_RE.match(r["ToTableName"])]
+        return rows or df_records(m.relationships)
+    except Exception:
+        return df_records(m.relationships)
 
 
 def extract_model(pbix: Path) -> dict:
@@ -761,10 +1395,11 @@ def extract_model(pbix: Path) -> dict:
             out[key] = {"error": f"{type(e).__name__}: {e}"}
 
     grab("tables", lambda: list(m.tables))
+    grab("columns", lambda: df_records(m.schema))     # [{TableName, ColumnName, PandasDataType}]
     grab("measures", lambda: df_records(m.dax_measures))
     grab("calculated_columns", lambda: df_records(m.dax_columns))
     grab("calculated_tables", lambda: df_records(m.dax_tables))
-    grab("relationships", lambda: df_records(m.relationships))
+    grab("relationships", lambda: _all_relationships(m))
     grab("rls", lambda: df_records(m.rls))
     grab("role_memberships", lambda: df_records(m.tmschema_role_memberships))
     grab("partitions", lambda: df_records(m.tmschema_partitions))   # Mode: 0=Import, 1=DirectQuery...
@@ -777,9 +1412,20 @@ def extract_model(pbix: Path) -> dict:
     parts = out.get("partitions")
     if isinstance(parts, list):
         for p in parts:
+            if re.match(r"^[HRU]\$", str(p.get("TableName") or "")):
+                continue
             mode = p.get("Mode") if "Mode" in p else p.get("mode")
             modes[str(mode)] += 1
     out["storage_modes"] = dict(modes)   # '1' = DirectQuery in TMSCHEMA
+    # per table: 0 Import, 1 DirectQuery, 2 Dual (composite models mix them)
+    mode_names = {0: "Import", 1: "DirectQuery", 2: "Dual"}
+    table_modes: dict[str, str] = {}
+    for p in parts if isinstance(parts, list) else []:
+        t, mode = p.get("TableName"), p.get("Mode") if "Mode" in p else p.get("mode")
+        # H$/R$/U$ entries are the engine's internal column-hierarchy/relationship storage, not tables
+        if t and not _AUTO_DATE_TABLE_RE.match(t) and not re.match(r"^[HRU]\$", t) and mode in mode_names:
+            table_modes[t] = mode_names[mode]
+    out["table_modes"] = table_modes
     try:
         m.close()
     except Exception:

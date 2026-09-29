@@ -47,7 +47,34 @@ Import-mode models can be far worse.
 | `USERELATIONSHIP` | join on the alternate column instead of the default one |
 | `TOPN(10, …)` | `ORDER BY m DESC LIMIT 10` (or `QUALIFY ROW_NUMBER() OVER (ORDER BY m DESC) <= 10`) |
 | `RANKX` | `RANK() OVER (ORDER BY …)` — check ties, DAX and SQL differ on them |
-| `FORMAT(…)` | don't — formatting belongs in the spec's `format`, not the query |
+| `FORMAT(date, "yyyy-mm-dd hh:mm:ss")` returned as text | `TO_CHAR` pieces joined with `\|\|` (`hh`→`HH24`; `mm` is minutes right after `hh`, month otherwise); `TIME(h,m,s)` → `INTERVAL 'hh:mm:ss' HOUR TO SECOND`; `NOW()` → `CURRENT_TIMESTAMP(0)`, `TODAY()` → `CURRENT_DATE` |
+| `FORMAT(number, …)` for display | don't — number formatting belongs in the spec's `format`, not the query |
+
+## Filter-pane filters (report, page and visual level)
+
+They constrain the visual as much as a slicer does, and they are easy to miss because they aren't in the
+measure's DAX. Every one with a `definition` becomes a `WHERE` predicate on that visual's query:
+
+| Filter | SQL |
+|---|---|
+| `In` values | `col IN ('a', 'b')` (`OR col IS NULL` if null is listed) |
+| `Not In` / "is not" | `(col NOT IN (...) OR col IS NULL)` — Power BI keeps blanks in a negated filter |
+| comparison, range (`And` of `>=`/`<=`) | `col >= x AND col <= y`; dates as `DATE 'YYYY-MM-DD'` |
+| contains / starts / ends with | `col LIKE '%x%' ESCAPE '\'` (escape `%` and `_`) |
+| Top N (`Top n` of `col` by `Sum(y)`) | `col IN (SELECT k FROM (SELECT col k, SUM(y) a FROM T [WHERE slicers on T] GROUP BY 1) t QUALIFY RANK() OVER (ORDER BY a DESC) <= n)` |
+| a filter on a table the visual doesn't read | semi-join through the relationship; with no relationship it has no effect |
+| filter on an aggregate (`aggregation` set) or a measure | `HAVING` / measure test — not automatic, do it by hand |
+
+Report-level, page-level and visual-level filters all apply together. Ignore drill-through filters
+(`how_created` 5): their saved value is not the real context.
+
+## Selection-dependent measures
+
+Some measures read the report's current selection: `MIN/MAX('Calendar'[Date])` (a slicer's first/last day, or a
+month's when the visual is grouped by month), `FILTER(T, T[c] = MIN(T[c]))` (a hierarchy slicer's top level), an
+`IF` choosing between two fact tables by the selected month. In SQL each becomes a small derived table joined
+in (one row for a card, one row per group in a chart) — never a subquery inside `SUM(...)`, which Teradata
+rejects. Translate them only when the shape is exactly one of these, and say the result is unverified.
 
 ## What doesn't translate cleanly
 

@@ -152,7 +152,8 @@ def test_table_map_accepts_read_only_query_and_feeds_scaffold(tmp_path, monkeypa
     r = c.post(f"/reports/{name}/scaffold")
     assert r.status_code == 200 and "Template generated" in r.text
     yaml_text = (tmp_path / "metrics" / f"{name}.yaml").read_text(encoding="utf-8")
-    assert "FROM (SELECT * FROM sales_fact) AS sales" in yaml_text
+    import re
+    assert re.search(r"FROM \(SELECT \* FROM sales_fact\s*\) AS sales", yaml_text)   # yaml indents block lines
 
 
 # ----------------------------------------------------------------------------

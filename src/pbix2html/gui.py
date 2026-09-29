@@ -35,7 +35,7 @@ from jinja2 import Environment, FileSystemLoader
 from . import extract as ex
 from . import semantic
 from .config import settings
-from .query import FakeBackend, TeradataBackend, run_report
+from .query import FakeBackend, TeradataBackend, run_report, run_slicers
 from .render import render_html
 from .validate import validate_report, write_markdown
 
@@ -337,15 +337,14 @@ def action_extract(request: Request, name: str):
         # Auto-fill the table mapping (step 2b) from each table's own Power Query M
         # source where it's unambiguous (semantic.detect_table_map_from_power_query) —
         # never touches an entity someone already mapped by hand.
-        detected = semantic.detect_table_map_from_power_query(model)
-        existing = _load_table_map(name)
-        new_entries = {k: v for k, v in detected.items() if k not in existing}
-        if new_entries:
-            merged = {**existing, **new_entries}
-            path = _table_map_path(name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-            detail.append(f"Auto-mapped {len(new_entries)} Power BI table(s) to Teradata from their "
+        _, new_rels = semantic.sync_relationships(name, model)
+        if new_rels:
+            detail.append(f"Proposed {len(new_rels)} relationship(s) from a calendar table to the fact "
+                          f"tables' date column — saved to metrics/{name}.relationships.json, review them.")
+        model = semantic.with_relationship_overrides(name, model)
+        _, new_names = semantic.sync_table_map(name, model)
+        if new_names:
+            detail.append(f"Auto-mapped {len(new_names)} Power BI table(s) to Teradata from their "
                           f"Power Query source — review on the table-mapping page before trusting.")
 
         result = {
@@ -364,6 +363,7 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
     try:
         layout = ex.extract_layout(pbix)
         model = ex.extract_model(pbix)
+        model = semantic.with_relationship_overrides(name, model)
         table_map = _load_table_map(name)
         had_previous = semantic.yaml_path(name).exists()
         path = semantic.write_scaffold(layout, model, overwrite=regenerate, table_map=table_map)
@@ -411,7 +411,8 @@ def action_autofill(request: Request, name: str):
             return _page(request, pbix, result)
 
         layout = ex.extract_layout(pbix)
-        outcome = semantic.autofill(spec.raw, layout, ex.extract_model(pbix), _load_table_map(name))
+        outcome = semantic.autofill(spec.raw, layout, semantic.with_relationship_overrides(name, ex.extract_model(pbix)),
+                                    _load_table_map(name))
         detail = []
         if outcome["filled"]:
             semantic.backup_yaml(name)          # writing: keep the version before it
@@ -608,33 +609,11 @@ async def save_edit(request: Request, name: str):
 # ----------------------------------------------------------------------------
 
 def _table_map_path(name: str) -> Path:
-    return semantic.METRICS_DIR / f"{name}.table_map.json"
+    return semantic.table_map_path(name)
 
 
 def _read_table_map(name: str) -> tuple[dict[str, str], str | None]:
-    """(mapping, problem). Only well-formed `{"entity": "query"}` string pairs come back
-    as mapping; anything else is reported as `problem` instead of being passed on.
-
-    This file can be hand-edited outside the panel, and the shapes that mistake produces
-    used to crash the scaffold step: a JSON list reached `table_map.get(...)`
-    (AttributeError), and a numeric value reached `.strip()`. Silently returning {} is
-    no better — the person's mapping appears to have vanished with no explanation, and
-    the next scaffold quietly writes TODO stubs instead of their queries."""
-    path = _table_map_path(name)
-    if not path.exists():
-        return {}, None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as e:
-        return {}, f"metrics/{path.name} isn't readable as JSON ({e}). Fix or delete it."
-    if not isinstance(data, dict):
-        return {}, f"metrics/{path.name} should be a JSON object of \"table\": \"query\" pairs."
-    bad = sorted(k for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str))
-    clean = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
-    if bad:
-        return clean, (f"metrics/{path.name}: ignored {len(bad)} entry/entries that aren't "
-                       f"text queries ({', '.join(map(str, bad[:3]))}).")
-    return clean, None
+    return semantic.read_table_map(name)
 
 
 def _load_table_map(name: str) -> dict[str, str]:
@@ -847,7 +826,7 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                 raise ValueError(f"role '{role}' isn't defined in metrics/{name}.yaml")
             proxy_user = r.get("proxy_user")
 
-        data = None
+        data = slicer_data = None
         hah_base = None
         if mode == "hah":
             # ADR-004: the HAH platform fetches each visual's SQL itself, client-side —
@@ -866,8 +845,10 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
                     "or check the demo box to preview the design."
                 )
             data = run_report(spec, values, backend, proxy_user=proxy_user)
+            slicer_data = run_slicers(spec, backend, proxy_user=proxy_user)
 
-        html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base)
+        html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base,
+                           slicer_data=slicer_data)
         # Both halves go through safe_name(): `role` is a yaml key, and a role called
         # "../../x" (or just "Sales/North", which is a plausible thing to type) would
         # otherwise steer this write outside out/ entirely. save_edit() rejects such

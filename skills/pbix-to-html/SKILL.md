@@ -57,6 +57,15 @@ print(model_summary_markdown(json.load(open("out/R/model.json")), "R"))
 That gives each measure's DAX, the relationships, the RLS rules and each table's Power
 Query source as readable Markdown — useful on its own even if the user never wants HTML.
 
+**Filters change the numbers.** `layout.json` has the filter-pane filters at three levels: report
+(`layout["filters"]`), page (`page["filters"]`) and visual (`visual["filters"]`). Each has `target`
+(`Table.column`), `type` (`Categorical`, `Advanced`, `TopN`, `RelativeDate`), the raw `definition` and, when
+present, `how_created` (5 = drill-through, ignore its saved value) and `aggregation` (a filter on `Sum(x)`,
+not on rows). Any that carries a condition must be reproduced in the SQL you write, or the number won't match
+Power BI; a filter with no `definition` only lists a field. See "Filter-pane filters" in
+`reference/dax-to-sql.md`. The layout also carries `bookmarks`, `slicer` descriptions (saved selections) and
+`model.json → table_modes` (Import / DirectQuery / Dual per table).
+
 ### 3. Getting the numbers in
 
 Pick one with the user; don't guess:
@@ -119,7 +128,8 @@ unless they host a local copy (`--echarts <url>`).
 - **Row-level security does not come along.** If the original filtered by role, the HTML
   shows whatever data you put in it. One file per role, or don't use it for restricted
   data — say this explicitly when `model.json` lists RLS roles.
-- **Slicers become nothing.** The renderer drops them; the values they filtered by are
+- **Slicers become nothing** in *this skill's* renderer (the full `pbix2html` package draws real widgets, action
+  buttons/bookmarks, tooltips and 100 % stacked charts; this one is a simplified, standard-library renderer). It drops them; the values they filtered by are
   baked into whatever data you supply. Mention it if the report leans on them.
 - **A visual with no border in Power BI gets no border here.** That's deliberate — don't
   "fix" it by adding one, it makes the report look like a grid the original isn't.

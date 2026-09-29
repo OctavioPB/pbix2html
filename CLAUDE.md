@@ -3,8 +3,8 @@
 Converts Power BI reports (`.pbix`, DirectQuery to Teradata) into self-contained HTML
 reports, one report at a time:
 
-    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode snapshot
-    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode live
+    pbix2html convert reports/Sales.pbix --html out/Sales.html --mode snapshot
+    pbix2html convert reports/Sales.pbix --html out/Sales.html --mode live
 
 Read `PLAN.md` to know what phase we're in and what's next. Read `docs/ARCHITECTURE.md`
 before touching more than one module.
@@ -14,7 +14,7 @@ before touching more than one module.
 | Stage | Module | Input → Output | Status |
 |---|---|---|---|
 | 1. extract | `extract.py` | `.pbix` → `layout.json` + `model.json` | done, with tests; both classic and PBIR format (`layout.json["format"]`) |
-| 2. semantic | `semantic.py` | `model.json` + DAX + DBQL capture → `metrics/<Report>.yaml` | scaffold; the SQL is written by a person (assisted) |
+| 2. semantic | `semantic.py` | `model.json` + DAX + DBQL capture → `metrics/<Report>.yaml` | scaffold + rule-based auto-draft (slicers, filter-pane filters, calendar, selection-dependent measures, multi-fact); a person reviews/finishes the rest |
 | 3. query | `query.py` | `metrics yaml` + parameters → data per visual (Teradata) | scaffold |
 | 4. render | `render.py` | `layout.json` + data + theme → `Report.html` | minimally functional |
 | 5. validate | `validate.py` | HTML vs. Power BI reference → diff report | scaffold |
@@ -43,6 +43,13 @@ git history if you ever need it.)
      Teradata applies row-level security. See skill `teradata-directquery`.
    - Model RLS rules (`model.json → rls`) are documented in the report's yaml;
      their replication in Teradata is tracked in `PLAN.md`.
+   - Slicers are widgets with page-scoped parameters (ADR-006); `snapshot` widgets are read-only, so
+     an interactive report needs `live` or `hah`.
+   - `metrics/<Report>.relationships.json` holds extra relationships (a proposed calendar → fact
+     date key); it is proposed automatically but must be reviewed like the table map.
+   - Filter-pane filters (report/page/visual) are applied to drafted SQL as fixed predicates
+     (ADR-008); what can't be applied is listed in `out/<Report>/mapping_report.md` and in the
+     visual's `notes`. Drill-through filters are skipped on purpose (saved value ≠ real context).
    - The panel's table-map step (`metrics/<Report>.table_map.json`) only accepts a
      single read-only `SELECT`/`WITH` query per Power BI table — enforced by
      `semantic.validate_read_only_sql` on save. It's a guardrail against a careless
@@ -51,6 +58,13 @@ git history if you ever need it.)
    custom palette; colors come from `dataColors`, background, and fonts from the theme.
 6. **Data contracts per visual type** live in the `html-renderer` skill. SQL in the
    yaml must return exactly the columns the renderer expects for that `kind`.
+8. **Read `mapping_report.md` before reviewing drafts** (`pbix2html mapping <pbix>`): visuals not drafted and
+   why, filters not applied, drill-through pages, hidden pages, storage modes, composite/unrelated tables. A
+   drafted visual with an unapplied filter will not match Power BI.
+9. **DAX filter context is modelled as SQL joins, not evaluated** (ADR-007): a few narrow idioms
+   (`FILTER(T, T[c] = MIN(T[c]))`, `MIN/MAX(T[c])` over the selection with `VAR`/`IF`, one measure over several
+   fact tables) are recognised; anything else stays manual. Never widen a pattern without a test and a
+   note in skill `dax-to-teradata-sql`.
 7. Before adding a new renderer, check `out/summary.md`: renderers are implemented by
    inventory frequency, not by preference.
 
@@ -59,7 +73,9 @@ git history if you ever need it.)
     pip install -e ".[dev]"            # install
     pytest -q                          # tests (use a synthetic .pbix; no Teradata)
     pbix2html extract <pbix|folder>    # inventory only → out/
-    pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v]
+    pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v] [--include-hidden]
+    pbix2html mapping <pbix>           # why each visual could / couldn't be drafted, filters not applied, drill-through/hidden pages → out/<Report>/mapping_report.md
+    pbix2html scaffold <pbix> [--overwrite]   # metrics yaml (--overwrite backs up the old one and re-drafts)
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
     python -m uvicorn pbix2html.serve:app --reload   # live mode (python -m: see README PATH note)

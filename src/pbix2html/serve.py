@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import semantic
-from .query import TeradataBackend, run_visual
+from .query import TeradataBackend, run_slicer_options, run_visual
 
 AUTH_HEADER = os.getenv("AUTH_HEADER", "X-Authenticated-User")
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() == "true"
@@ -110,6 +110,35 @@ def _backend() -> TeradataBackend:
     return app.state.backend
 
 
+def _param_values(spec, request: Request) -> dict:
+    """Parameter values from the query string. A multi-select parameter arrives as repeated keys
+    (`?org=A&org=B`, so a value may contain a comma); a single one as one key."""
+    overrides: dict = {}
+    for key in dict.fromkeys(request.query_params.keys()):
+        vals = request.query_params.getlist(key)
+        multi = ((spec.parameters.get(key) or {}).get("multi"))
+        overrides[key] = vals if multi else vals[-1]
+    try:
+        return semantic.resolve_params(spec, overrides)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/reports/{report}/slicers/{visual_id}")
+def slicer_options(report: str, visual_id: str, request: Request):
+    """Distinct values for a slicer widget (no parameters: a slicer lists all its values)."""
+    spec = _spec(report)
+    if visual_id not in (spec.raw.get("slicers") or {}):
+        raise HTTPException(404, "slicer not defined in the yaml")
+    user = request.headers.get(AUTH_HEADER)
+    if REQUIRE_AUTH and not user:
+        raise HTTPException(401, f"missing header {AUTH_HEADER} (SSO)")
+    try:
+        return run_slicer_options(spec, visual_id, _backend(), proxy_user=user, use_cache=True)
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}")
+
+
 @app.get("/reports/{report}/visuals/{visual_id}")
 def visual(report: str, visual_id: str, request: Request):
     spec = _spec(report)
@@ -119,10 +148,7 @@ def visual(report: str, visual_id: str, request: Request):
     user = request.headers.get(AUTH_HEADER)
     if REQUIRE_AUTH and not user:
         raise HTTPException(401, f"missing header {AUTH_HEADER} (SSO)")
-    try:
-        values = semantic.resolve_params(spec, dict(request.query_params))
-    except (KeyError, ValueError) as e:
-        raise HTTPException(400, str(e))
+    values = _param_values(spec, request)
     try:
         return run_visual(spec, v, values, _backend(), proxy_user=user, use_cache=True)
     except Exception as e:

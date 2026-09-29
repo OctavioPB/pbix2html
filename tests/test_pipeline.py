@@ -73,7 +73,7 @@ def test_entities_used_does_not_mangle_aggregated_fields():
 
 def test_sql_stub_uses_validated_table_map_as_subquery():
     sql = semantic._sql_stub(["Sales"], {"Sales": "SELECT * FROM sales_fact"})
-    assert "FROM (SELECT * FROM sales_fact) AS sales" in sql
+    assert "FROM (SELECT * FROM sales_fact\n) AS sales" in sql
 
 
 def test_sql_stub_skips_unsafe_table_map_entry():
@@ -232,7 +232,7 @@ def test_scaffold_auto_drafts_single_table_card(fake_pbix):
     L = ex.extract_layout(fake_pbix)
     sc = semantic.scaffold(L, MODEL, TABLE_MAP)
     v1 = sc["visuals"]["v1"]
-    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact) AS sales"
+    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact\n) AS sales"
     assert v1["params"] == []
     assert "Auto-drafted" in v1["notes"]
 
@@ -243,8 +243,8 @@ def test_scaffold_auto_drafts_joined_bar_chart_with_slicer_filter(fake_pbix):
     v2 = sc["visuals"]["v2"]
     assert v2["sql"] == (
         "SELECT region.name AS category, SUM(sales.marginamount) AS value\n"
-        "FROM (SELECT * FROM region_dim) AS region\n"
-        "JOIN (SELECT * FROM sales_fact) AS sales ON region.id = sales.regionid\n"
+        "FROM (SELECT * FROM region_dim\n) AS region\n"
+        "JOIN (SELECT * FROM sales_fact\n) AS sales ON region.id = sales.regionid\n"
         "GROUP BY 1"
     )
     assert v2["params"] == []  # the "year" slicer is on Calendar, not Sales/Region — correctly not attached
@@ -310,7 +310,7 @@ def test_draft_applies_slicer_filters_to_every_union_arm():
                                  "Y": ["Sales.Net Revenue", "Sales.Cost"]},
                          {"year": {"from_slicer": "Sales.Year"}})
     assert params == ["year"]
-    assert sql.count("sales.year IN (:year)") == 2       # not just the first arm
+    assert sql.count('sales."year" IN (:year)') == 2       # not just the first arm
 
 
 def test_draft_now_covers_kpi_gauge_and_matrix():
@@ -348,7 +348,7 @@ def test_snapshot_html(fake_pbix, tmp_path):
     assert data["v1"]["rows"][0][0] == 1234567.8
     assert be.calls[0][1] == [2025]
     html = render_html(L, spec, values, data, mode="snapshot")
-    assert 'id="v-v1"' in html and 'id="v-v2"' in html and 'id="v-v3"' not in html   # slicers aren't drawn
+    assert 'id="v-v1"' in html and 'id="v-v2"' in html and 'id="v-v3"' in html   # a slicer is a widget now
     assert "#0F2B46" in html                                                        # pbix theme
     assert '"kind": "column"' in html                                              # custom reinterpreted
     (tmp_path / "r.html").write_text(html)
@@ -439,3 +439,129 @@ def test_compare_tolerance():
     b = {"columns": ["category", "value"], "rows": [["N", 10.0000001], ["S", 6.0]]}
     diffs = compare(a, b, {"rel": 1e-6})
     assert len(diffs) == 1 and diffs[0].startswith("('S',)")
+
+
+def test_table_map_detects_connector_query_option():
+    """Real report shape: Teradata.Database(host, [.., Query="<SQL>"]) — not NativeQuery."""
+    from pbix2html import semantic
+
+    def m(query: str) -> str:
+        return ('let\n    Source = Teradata.Database("host", [HierarchicalNavigation=true, '
+                f'Query="{query}"])\nin\n    Source')
+
+    model = {"power_query": [
+        {"TableName": "A", "Expression": m('SELECT a, b#(lf)FROM db.t WHERE x = ""y""')},
+        {"TableName": "B", "Expression": m("SEL d#(lf)FROM cal.days")},          # Teradata SEL
+        {"TableName": "C", "Expression": m('SELECT 1" & "x')},                   # concatenated: skipped
+        {"TableName": "D", "Expression": 'let Source = Table.FromRows({}) in Source'},
+    ]}
+    got = semantic.detect_table_map_from_power_query(model)
+    assert got["A"] == 'SELECT a, b\nFROM db.t WHERE x = "y"'
+    assert got["B"].startswith("SEL d")
+    assert "C" not in got and "D" not in got
+
+
+def test_group_chain_lists_ancestors_nearest_first():
+    from pbix2html.render import _group_chain
+
+    vs = [
+        {"id": "g1", "is_group": True, "parent_group": None},
+        {"id": "g2", "is_group": True, "parent_group": "g1"},
+        {"id": "a", "parent_group": "g2"},
+        {"id": "b", "parent_group": None},
+        {"id": "loop1", "is_group": True, "parent_group": "loop2"},
+        {"id": "loop2", "is_group": True, "parent_group": "loop1"},
+    ]
+    by_id = {v["id"]: v for v in vs}
+    assert _group_chain(by_id["a"], by_id) == ["g2", "g1"]
+    assert _group_chain(by_id["b"], by_id) == []
+    assert len(_group_chain(by_id["loop1"], by_id)) <= 2               # a cycle terminates
+
+
+def test_visual_link_parsing():
+    from pbix2html.extract import _visual_link
+
+    def link(**props):
+        return {"visualLink": [{"properties": {
+            k: {"expr": {"Literal": {"Value": v}}} for k, v in props.items()}}]}
+
+    assert _visual_link(link(type="'PageNavigation'", navigationSection="'p2'", show="true")) == \
+        {"type": "page", "page": "p2", "enabled": True}
+    assert _visual_link(link(type="'Bookmark'", bookmark="'b1'", show="false")) == \
+        {"type": "bookmark", "bookmark": "b1", "enabled": False}
+    assert _visual_link(link(type="'WebUrl'")) is None and _visual_link({}) is None
+
+
+def test_hidden_page_reachable_by_a_button_is_rendered_and_wired(fake_pbix):
+    """A visible page's button targets a hidden page ("Historic Data" view): that page is
+    rendered without a tab and the button navigates; unlinked hidden pages stay out."""
+    L = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    base = L["pages"][0]
+    hist = {**base, "name": "histId", "display_name": "HST", "hidden": True,
+            "visuals": [{**base["visuals"][0], "id": "h1", "action": {"type": "page", "page": base["name"], "enabled": True}}]}
+    tooltip = {**base, "name": "tipId", "display_name": "Tip", "hidden": True, "visuals": []}
+    button = {**base["visuals"][0], "id": "btn", "type": "actionButton",
+              "action": {"type": "page", "page": "histId", "enabled": True}}
+    dead = {**base["visuals"][0], "id": "dead", "type": "actionButton",
+            "action": {"type": "page", "page": "missing", "enabled": True}}
+    L2 = {**L, "pages": [{**base, "visuals": base["visuals"] + [button, dead]}, hist, tooltip]}
+    html = render_html(L2, spec, {"year": 2025}, None, mode="live")
+    assert 'id="page-1"' in html and 'class="page navonly"' in html   # reachable hidden page
+    assert 'id="page-2"' not in html                                   # tooltip-style page: not linked
+    assert 'data-nav="page-1"' in html and 'data-nav="page-0"' in html  # button + way back
+    assert html.count("data-nav=") == 2                                # dangling target stays inert
+    assert html.count('role="tab"') == 0                                # one visible page: no tab bar
+
+
+def _bm_pages():
+    def g(i, title, hidden=False):
+        return {"id": i, "is_group": True, "title": title, "hidden": hidden, "parent_group": None}
+    hist = {"name": "H", "display_name": "HST", "visuals": [g("h_org", "Org"), g("h_l1", "Lvl 1"), g("h_mod", "Model")]}
+    cur = {"name": "C", "display_name": "Cur", "visuals": [g("c_org", "Org"), g("c_l1", "Lvl 1", True), g("c_mod", "Model")]}
+    bm = {"id": "b1", "name": "By Lvl 1", "page": "H",
+          "groups": {"h_org": True, "h_l1": False, "h_mod": True},
+          "targets": ["h_org", "h_l1"], "apply_only_to_targets": True}
+    return hist, cur, {"b1": bm}
+
+
+def test_bookmark_action_targets_and_direct_ids():
+    from pbix2html.render import _bookmark_action
+
+    hist, cur, bms = _bm_pages()
+    warns: list[str] = []
+    act = {"type": "bookmark", "bookmark": "b1", "enabled": True}
+    got = _bookmark_action(act, bms, hist, [hist, cur], warns)
+    # only the targeted groups change (h_mod is not a target), ids used as they are
+    assert got == {"type": "bookmark", "set": {"h_org": True, "h_l1": False}} and warns == []
+
+
+def test_bookmark_action_remaps_a_cloned_page_by_group_name_and_warns():
+    from pbix2html.render import _bookmark_action
+
+    hist, cur, bms = _bm_pages()
+    warns: list[str] = []
+    got = _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, cur, [hist, cur], warns)
+    assert got == {"type": "bookmark", "set": {"c_org": True, "c_l1": False}}
+    assert len(warns) == 1 and "applied by group name" in warns[0]
+    # ambiguous name on the clone -> that group is not mapped; nothing mappable -> inert
+    cur["visuals"].append({"id": "c_org2", "is_group": True, "title": "Org", "parent_group": None})
+    got = _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, cur, [hist, cur], [])
+    assert got == {"type": "bookmark", "set": {"c_l1": False}}
+    other = {"name": "X", "display_name": "X", "visuals": [{"id": "z", "is_group": True, "title": "Other"}]}
+    assert _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": True}, bms, other, [hist, other], []) is None
+    assert _bookmark_action({"type": "bookmark", "bookmark": "nope", "enabled": True}, bms, cur, [hist, cur], []) is None
+    assert _bookmark_action({"type": "bookmark", "bookmark": "b1", "enabled": False}, bms, cur, [hist, cur], []) is None
+
+
+def test_parse_bookmarks_reads_group_state_and_targets():
+    from pbix2html.extract import parse_bookmarks
+
+    cfg = {"bookmarks": [{"name": "b1", "displayName": "By Org", "options": {
+        "targetVisualNames": ["g1"], "applyOnlyToTargetVisuals": True},
+        "explorationState": {"activeSection": "s1", "sections": {"s1": {"visualContainerGroups": {
+            "g1": {"isHidden": False}, "g2": {"isHidden": True}}}}}}]}
+    assert parse_bookmarks(cfg) == [{"id": "b1", "name": "By Org", "page": "s1",
+                                     "groups": {"g1": False, "g2": True}, "targets": ["g1"],
+                                     "apply_only_to_targets": True}]
+    assert parse_bookmarks({}) == []
