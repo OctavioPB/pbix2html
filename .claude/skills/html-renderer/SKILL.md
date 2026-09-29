@@ -94,6 +94,18 @@ the same as for a plain stacked chart (absolute values). Both templates (`report
 Fields in a chart's `Tooltips` role are **not** drafted as SQL columns (they used to become extra series);
 if the tooltip must show them, add them to the SQL by hand.
 
+## Table style
+
+A table/matrix's own header and row-banding colours are read from `objects.columnHeaders`
+(`backColor`, `fontColor`) and `objects.values` (`backColorPrimary`, `backColorSecondary`,
+`fontColorPrimary`) — what a Power BI table style preset actually sets (extract.py's
+`_table_style`, table/tableEx/matrix/pivotTable only) — into `style.table_header_bg`,
+`table_header_fg`, `table_row_bg`, `table_row_bg_alt`, `table_row_fg`. The template's
+`R.table` turns these into CSS custom properties (`--th-bg`, `--tr-bg-alt`, ...) scoped to
+the visual's `.tablewrap`; absent keys keep the theme-neutral default (no banding). Like
+other visual colours these can be `ThemeDataColor` references and are resolved by
+`resolve_theme_markers` once the theme is known.
+
 ## Theme
 
 `layout.json → theme.custom_json`: `dataColors` → series palette; `background`/`foreground`

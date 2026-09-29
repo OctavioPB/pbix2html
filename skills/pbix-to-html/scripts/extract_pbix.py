@@ -218,6 +218,11 @@ def resolve_theme_markers(layout: dict) -> None:
                 fix(style, "background")
                 fix(style, "border_color")
                 fix(style, "title_color")
+                fix(style, "table_header_bg")
+                fix(style, "table_header_fg")
+                fix(style, "table_row_bg")
+                fix(style, "table_row_bg_alt")
+                fix(style, "table_row_fg")
             if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
                 fix(v["slicer"]["style"], "color")
                 fix(v["slicer"]["style"], "background")
@@ -354,6 +359,35 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     if border_colour:
         style["border_color"] = border_colour
         style.setdefault("border", True)
+    return style
+
+
+_TABLE_KINDS = {"table", "tableEx", "matrix", "pivotTable"}
+
+
+def _table_style(objects: dict) -> dict:
+    """A table/matrix's own header and row-banding colours
+    (`objects.columnHeaders.backColor/fontColor`, `objects.values.backColorPrimary/
+    backColorSecondary/fontColorPrimary/fontColorSecondary`) — what a Power BI table
+    style preset (e.g. a themed alternating-row style) actually sets, as opposed to the
+    plain theme background every other visual falls back to. Keys are omitted when the
+    report doesn't set them, so the renderer keeps its neutral default (no banding)."""
+    style: dict[str, Any] = {}
+    header_bg = _object_color(objects, "columnHeaders", "backColor")
+    if header_bg:
+        style["table_header_bg"] = header_bg
+    header_fg = _object_color(objects, "columnHeaders", "fontColor")
+    if header_fg:
+        style["table_header_fg"] = header_fg
+    row_bg = _object_color(objects, "values", "backColorPrimary")
+    if row_bg:
+        style["table_row_bg"] = row_bg
+    row_bg_alt = _object_color(objects, "values", "backColorSecondary")
+    if row_bg_alt:
+        style["table_row_bg_alt"] = row_bg_alt
+    row_fg = _object_color(objects, "values", "fontColorPrimary")
+    if row_fg:
+        style["table_row_fg"] = row_fg
     return style
 
 
@@ -727,7 +761,8 @@ def _parse_visual(vc: dict) -> dict:
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
-        "style": _style_with_fill(container_style(vco), sv.get("objects") or {}),
+        "style": {**_style_with_fill(container_style(vco), sv.get("objects") or {}),
+                  **(_table_style(sv.get("objects") or {}) if vtype in _TABLE_KINDS else {})},
         "texts": texts,
         "action": _visual_link(vco),
         "sort": _proto_sort(sv),
@@ -1233,7 +1268,8 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
             "texts": _pbir_texts(vco, vis),
-            "style": _style_with_fill(container_style(vco), vis.get("objects") or {}),
+            "style": {**_style_with_fill(container_style(vco), vis.get("objects") or {}),
+                      **(_table_style(vis.get("objects") or {}) if vtype in _TABLE_KINDS else {})},
             "action": _visual_link(vco),
             "sort": _pbir_sort(vis),
             **({"button": parse_button(vis)} if vtype == "actionButton" else {}),

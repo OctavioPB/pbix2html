@@ -107,7 +107,7 @@
 </div>
 
 <div class="card">
-  <div class="step"><span class="n">2b</span><h2>Map Power BI tables to Teradata (optional)</h2></div>
+  <div class="step"><span class="n">2b</span><h2>Map Power BI tables to Teradata</h2><span class="badge optional">Optional</span></div>
   <p class="muted">Power BI uses logical table names that don't exist as such in Teradata. Give each
      one a read-only Teradata query once here and step 2 will pre-fill the SQL's <code>FROM</code>
      instead of leaving it empty.</p>
@@ -115,7 +115,7 @@
 </div>
 
 <div class="card">
-  <div class="step"><span class="n">2c</span><h2>Custom theme (optional)</h2></div>
+  <div class="step"><span class="n">2c</span><h2>Custom theme</h2><span class="badge optional">Optional</span></div>
   <p class="muted">Many reports' extracted theme is just a built-in Power BI theme name with no
      actual color values in it — colors, background, and font then fall back to a generic
      default instead of matching the original. Set them by hand here if that's the case.</p>
@@ -204,11 +204,18 @@
     </select>
     {% endif %}
 
-    {% for pname, p in spec.parameters.items() %}
-    <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separate multiple values with commas){% endif %}</label>
-    <input type="{{ 'number' if p.get('type') == 'int' else 'text' }}" id="param__{{ pname }}"
-           name="param__{{ pname }}" value="{{ p.get('default') if p.get('default') is not none else '' }}">
-    {% endfor %}
+    {% if spec.parameters %}
+    <details style="margin:10px 0">
+      <summary style="cursor:pointer">Filter parameters ({{ spec.parameters|length }}) — leave closed to use the defaults</summary>
+      <div style="margin-top:4px">
+      {% for pname, p in spec.parameters.items() %}
+      <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separate multiple values with commas){% endif %}</label>
+      <input type="{{ 'number' if p.get('type') == 'int' else 'text' }}" id="param__{{ pname }}"
+             name="param__{{ pname }}" value="{{ p.get('default') if p.get('default') is not none else '' }}">
+      {% endfor %}
+      </div>
+    </details>
+    {% endif %}
 
     {% if not has_teradata and demo_available %}
     <div class="checkbox-row">

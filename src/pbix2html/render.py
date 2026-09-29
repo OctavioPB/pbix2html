@@ -48,7 +48,11 @@ def resolve_theme(layout_theme: dict | None) -> dict:
     face = cj.get("fontFamily") \
         or ((cj.get("textClasses") or {}).get("title") or {}).get("fontFace") \
         or ((cj.get("textClasses") or {}).get("label") or {}).get("fontFace")
-    if face and not face.lower().startswith("segoe"):
+    # A theme exported from Power BI Desktop with no font override carries this literal
+    # internal alias (its own per-language Segoe UI stack), not a real, installable font
+    # name — using it as a CSS font-family resolves to nothing and silently falls back
+    # to the browser's serif default instead of Segoe UI. Treat it the same as "segoe".
+    if face and not face.lower().startswith(("segoe", "wf_standard-font")):
         t["font_family"] = f"'{face}', system-ui, sans-serif"
     return t
 
