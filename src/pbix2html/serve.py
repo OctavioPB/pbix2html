@@ -143,6 +143,7 @@ def slicer_options(report: str, visual_id: str, request: Request):
     try:
         return run_slicer_options(spec, visual_id, _backend(), proxy_user=user, use_cache=True)
     except Exception as e:
+        log.exception("slicer %s of %s failed", visual_id, report)
         raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 

@@ -16,7 +16,7 @@ derived tables) as **fixed predicates**, next to the slicer parameters.
 
 - Supported: `In`/`Not In` (blanks kept when negated, as Power BI), `= <> > >= < <=`, `IS NULL`, `And`/`Or`,
   `Contains/StartsWith/EndsWith` (`LIKE … ESCAPE`), and Top N
-  (`col IN (SELECT k FROM (… GROUP BY) QUALIFY RANK() OVER (ORDER BY agg dir) <= N)` over the rows the slicers
+  (`col IN (SELECT t.k FROM (… GROUP BY) t WHERE (SELECT COUNT(*) FROM (… GROUP BY) u WHERE u.a <better> t.a) < N)`, i.e. RANK() <= N without a window function: Teradata error 3706 forbids ordered analytics in a subquery; over the rows the slicers
   leave, ties kept).
 - On a table the visual doesn't read: a semi-join through a direct relationship (like a slicer); with no
   relationship path the filter has no effect in Power BI either and is ignored.

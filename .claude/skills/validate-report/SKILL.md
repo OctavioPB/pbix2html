@@ -37,7 +37,9 @@ For every visual with `sql` in the yaml:
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
-| `Error 3707 … between the 'AS' keyword and the 'value' keyword` | `AS value` unquoted (reserved word) | write `AS "value"`; fixed in the drafter and at run time |
+| `Error 3707 … between the 'AS' keyword and the 'value'/'rename' keyword` | a reserved word used as a name | fixed in the drafter and at run time (skill `dax-to-teradata-sql`, *Teradata rejections*) |
+| `Error 3706` ordered analytical functions in a subquery | Top N written with a window function | counted instead of windowed |
+| `Error 2621` `Bad character in format or data of CALDATES.cdate` | a multi default saved as the text `[2026]` | edit page fixed; open the yaml and make it a list (`[2026]`) |
 | Every value × k | A JOIN duplicates rows | relationships in `model.json`; add `DISTINCT` on the dimension |
 | Missing categories | Power BI shows "(Blank)" or filters nulls differently | `HAVING`, `COALESCE` |
 | Extra/missing period | date filter `<` vs `<=`; timezone | `reference_sql` |

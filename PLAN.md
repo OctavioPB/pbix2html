@@ -211,6 +211,8 @@ Teradata/HAH, which is the actual gate for every "implemented" line above.
 - A table with no relationship path to its visual's tables (`Open Reqs` + `Workday codes`) needs a decision
   from the report owner.
 
+- Teradata run findings: reserved words as names (3707), window function in a subquery (3706), multi default saved as text (2621); see skill `dax-to-teradata-sql`. More expected until every draft has run on a real system.
+
 ## Open risks
 
 - Measures with complex time intelligence (nested SAMEPERIODLASTYEAR, TOTALYTD with filters) need windowed SQL; estimate separately.

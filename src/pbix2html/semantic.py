@@ -1035,36 +1035,86 @@ def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
     return merged, sorted(new)
 
 
-# Teradata reserved words a Power BI column is commonly named after (a calendar's Date / Year /
-# Month...). Unquoted they are a syntax error as an identifier, so they are always double-quoted.
-# `value` is the renderer's own column contract and is reserved too: `SELECT SUM(x) AS value` is a
-# Teradata syntax error (3707, "expected a name ... between AS and value"), which sqlglot's Teradata
-# dialect does not catch. Over-quoting is harmless in a Teradata-mode session (names are case-insensitive).
-_TERADATA_RESERVED_COLS = frozenset({
-    "date", "day", "month", "year", "hour", "minute", "second", "time", "timestamp", "zone",
-    "value", "values", "min", "max", "sum", "avg", "count", "user", "percent", "rank", "format",
-    "title", "index", "order", "group", "default", "current", "session", "role", "size", "top",
-    "comment", "end", "over", "range", "row", "rows", "precision", "public"})
+# Teradata reserved words (Teradata SQL "Reserved Words and Keywords"), lower-cased, plus `value`, the
+# renderer's own column contract. Unquoted, one of these as a name is a syntax error (error 3707, e.g.
+# `SELECT SUM(x) AS value` or a Power BI column called Rename), which sqlglot's Teradata dialect does not
+# catch. Every generated column name and table alias is checked against this list. Quoting is harmless in a
+# Teradata-mode session (names are case-insensitive); an ANSI-mode session would make quoted names
+# case-sensitive. The list is from the documentation as remembered: a word missing here shows up as a 3707 at
+# run time and just needs adding.
+_TERADATA_RESERVED = frozenset("""
+abort abortsession abs access_lock account acos acosh add add_months admin after aggregate all alter amp and
+ansidate any are array as asc asin asinh at atan atan2 atanh atomic authorization ave average avg before begin
+between bigint binary blob both bt but by byte byteint bytes call case case_n casespecific cast cd char
+char_length char2hexint character character_length characters chars check checkpoint class clob close cluster
+cm coalesce collation collect column comment commit compress condition connect constraint constructor contains
+continue convert_table_header corr cos cosh count covar_pop covar_samp create cross cs csum ct cube current
+current_date current_role current_time current_timestamp current_user cursor cv cycle data database datablocksize
+date dateform day deallocate dec decimal declare default deferred degrees del delete dense_rank depth deref desc
+describe descriptor deterministic diagnostic disabled distinct do domain double drop dual dump dynamic each echo
+element else elseif enabled end eq equals error errorfiles errortables escape et except exception exec execute
+exists exit exp explain external extract fallback fastexport fetch first float for foreign format found
+freespace from full function ge general generated get give global go goto grant graphic group grouping gt
+handler hash hashamp hashbakamp hashbucket hashrow having help hour identity if immediate in inconsistent index
+indicator initially initiate inner inout input ins insert instance instead int integer integerdate intersect
+interval into is iterate join journal key kurtosis le leading leave left like limit ln loading local localtime
+localtimestamp locator lock locking log logging logon long loop lower lt macro map mavg max maximum mcharacters
+mdiff member merge method min mindex minimum minus minute mlinreg mload mod mode modifies modify monitor
+monresource monsession month msubstr msum multiset named names national natural nchar nclob ne new new_table
+next no none normalize not nowait null nullif nullifzero numeric object objects octet_length of off old
+old_table on only open option or order ordering out outer output over overlaps override pad parameter
+parameters partial partition password path percent percent_rank perm permanent pivot position precision prepare
+preserve primary prior privileges procedure profile proportional protection public qualified qualify quantile
+queue query query_band radians random range_n rank reads real recursive ref references referencing relative
+release rename repeat replace replacement replcontrol replication request resignal restart restore result
+resume ret retrieve return returns revalidate revoke right rights role rollback rollforward rollup row
+row_number rowid rows sample sampleid scroll sel select session set setresrate sets setsessrate show signal sin
+sinh size skew smallint some soundex specific spool sql sqlexception sqlstate sqltext sqlwarning sqrt ss start
+startup state statement static statistics stddev_pop stddev_samp stepinfo string_cs structure subscriber substr
+substring sum summary suspend table tablesample tan tanh tbl_cs temporary terminate then threshold time
+timestamp timezone_hour timezone_minute title to top topn trace trailing transaction translate translate_chk
+translation treat trigger trim true type uc undefined under undo union unique unknown unnest until upd update
+upper uppercase user using value values var_pop var_samp varbyte varchar vargraphic varying view volatile when
+whenever where while width_bucket with without work year zeroifnull zone
+""".split())
+# names that follow AS in a CAST and are never an alias: leave them alone when rewriting legacy SQL
+_SQL_TYPE_WORDS = frozenset("""
+date time timestamp integer int smallint bigint byteint decimal dec numeric float real double char character
+varchar clob blob byte varbyte interval graphic vargraphic number
+""".split())
+_TERADATA_RESERVED_COLS = _TERADATA_RESERVED          # kept under its old name
 
-_ALIAS_TO_QUOTE_RE = re.compile(r"(?i)\bAS\s+(value|min|max)\b(?!\s*[.(])")
+_ALIAS_TO_QUOTE_RE = re.compile(r"(?i)\bAS\s+([A-Za-z_]\w*)\b(?!\s*[.(])")
+_QUALIFIED_NAME_RE = re.compile(r"\b[A-Za-z_]\w*\s*\.\s*([A-Za-z_]\w*)\b(?!\s*\()")
 
 
 def quote_reserved_aliases(sql: str) -> str:
-    """`... AS value` → `... AS "value"` (also min / max, the optional gauge columns) in the code part of
-    `sql`, for SQL written before the drafter quoted them, hand-written SQL and `metrics/_template.yaml`.
-    Literals, quoted identifiers and comments are left alone."""
+    """`... AS value` → `... AS "value"` for every reserved word used as an output alias, in the code part
+    of `sql` (and `alias.rename` after a dot), for SQL and table maps written before the drafter quoted them,
+    hand-written SQL and `metrics/_template.yaml`. Literals, quoted identifiers and comments are left alone,
+    and so are type names after AS (`CAST(x AS DATE)`)."""
     code, pos = _sql_scan(sql)
-    edits = [(pos[m.start(1)], pos[m.end(1) - 1] + 1) for m in _ALIAS_TO_QUOTE_RE.finditer(code)]
-    for start, end in reversed(edits):
+    edits = [(pos[m.start(1)], pos[m.end(1) - 1] + 1) for m in _ALIAS_TO_QUOTE_RE.finditer(code)
+             if m.group(1).lower() in _TERADATA_RESERVED and m.group(1).lower() not in _SQL_TYPE_WORDS]
+    # `alias.rename`: after a dot a word is a name, never a type, so any reserved one is quoted
+    edits += [(pos[m.start(1)], pos[m.end(1) - 1] + 1) for m in _QUALIFIED_NAME_RE.finditer(code)
+              if m.group(1).lower() in _TERADATA_RESERVED]
+    for start, end in sorted(set(edits), reverse=True):
         sql = f'{sql[:start]}"{sql[start:end].lower()}"{sql[end:]}'
     return sql
+
+
+def _ident(name: str) -> str:
+    """A Power BI name as a plain lower-case SQL identifier."""
+    alias = re.sub(r"\W+", "_", name).strip("_").lower()
+    return alias or "t"
 
 
 def _sql_col(name: str) -> str:
     """A Power BI column name as a Teradata identifier (see `_sql_alias`), quoted when it is
     a reserved word."""
-    alias = _sql_alias(name)
-    return f'"{alias}"' if alias in _TERADATA_RESERVED_COLS else alias
+    alias = _ident(name)
+    return f'"{alias}"' if alias in _TERADATA_RESERVED else alias
 
 
 def _subquery(sql: str, alias: str) -> str:
@@ -1074,8 +1124,11 @@ def _subquery(sql: str, alias: str) -> str:
 
 
 def _sql_alias(entity: str) -> str:
-    alias = re.sub(r"\W+", "_", entity).strip("_").lower()
-    return alias or "t"
+    """A table alias for a Power BI table. A reserved word (a table called Date, Index, Rename...) gets a
+    `_t` suffix: an alias can't be quoted just at its definition, every `alias.column` reference would
+    have to be too."""
+    alias = _ident(entity)
+    return f"{alias}_t" if alias in _TERADATA_RESERVED else alias
 
 
 def _entities_used(v: dict) -> list[str]:
@@ -1872,7 +1925,7 @@ def _topn_sql(f: dict, parameters: dict[str, dict] | None, table_map: dict[str, 
     Power BI keeps the rows whose x is among the N best x values, ranked by an aggregate of y over the
     rows the report's slicers leave in T; ties are all kept (DAX TOPN). Built as
     `_COL IN (SELECT k FROM (SELECT x AS k, AGG(y) AS a FROM T WHERE <slicers on T> GROUP BY 1) t
-    QUALIFY RANK() OVER (ORDER BY a) <= N)`. Direction 1 = ascending, 2 = descending; aggregate
+    WHERE <count of better values> < N)`. Direction 1 = ascending, 2 = descending; aggregate
     codes per `_AGG_FUNCTION`. Anything else in the subquery → None. UNVERIFIED against Power BI."""
     definition, target = f.get("definition"), f.get("target") or ""
     if not isinstance(definition, dict) or "." not in target or table_map is None:
@@ -1903,8 +1956,12 @@ def _topn_sql(f: dict, parameters: dict[str, dict] | None, table_map: dict[str, 
     w = "\nWHERE " + " AND ".join(where) if where else ""
     inner = (f"SELECT h.{_sql_col(x)} AS k, {template.format(c='h.' + _sql_col(y))} AS a\n"
              f"FROM {_subquery(source, 'h')}{w}\nGROUP BY 1")
+    # rank = 1 + the number of strictly better values, so `count(better) < N` is RANK() <= N (ties kept) without
+    # a window function: Teradata rejects ordered analytical functions inside a subquery (error 3706)
+    better = "<" if direction == "ASC" else ">"
     return (table, prop,
-            f"{_COL} IN (SELECT k FROM (\n{inner}\n) AS t QUALIFY RANK() OVER (ORDER BY a {direction}) <= {top})",
+            f"{_COL} IN (SELECT t.k FROM (\n{inner}\n) AS t WHERE (SELECT COUNT(*) FROM (\n{inner}\n) AS u "
+            f"WHERE u.a {better} t.a) < {top})",
             used)
 
 
@@ -3067,14 +3124,38 @@ def load(report: str) -> ReportSpec:
     )
 
 
+def multi_values(val: Any) -> list:
+    """A multi-value parameter as a list. Accepts a list, `a, b`, or the text of a list (`[2026]`,
+    `['a', 'b']`) - what a yaml default looked like after a form round-trip that wrote `str(list)` (the panel's
+    edit page did, and the live report then sent `year=[2026]`, which Teradata could not convert)."""
+    import ast
+
+    def unwrap(x: Any) -> list:
+        if isinstance(x, str) and x.strip().startswith("[") and x.strip().endswith("]"):
+            try:
+                parsed = ast.literal_eval(x.strip())
+            except (ValueError, SyntaxError):
+                return [x.strip()[1:-1].strip("'\" ")]
+            return list(parsed) if isinstance(parsed, (list, tuple)) else [parsed]
+        return [x]
+
+    if val is None:
+        return []
+    if isinstance(val, str):
+        if val.strip().startswith("["):
+            return unwrap(val)
+        return [x.strip() for x in val.split(",") if x.strip()]
+    return [y for x in val for y in unwrap(x)]
+
+
 def resolve_params(spec: ReportSpec, overrides: dict[str, str]) -> dict[str, Any]:
     """Final parameter values: yaml default overridden by --params k=v."""
     values: dict[str, Any] = {}
     for name, p in spec.parameters.items():
         p = p or {}  # a parameter written as "year:" with nothing under it parses as None
         val = overrides.get(name, p.get("default"))
-        if p.get("multi") and isinstance(val, str):
-            val = [x.strip() for x in val.split(",") if x.strip()]
+        if p.get("multi") and val is not None:
+            val = multi_values(val)
         if p.get("type") == "int" and val is not None and not isinstance(val, list):
             val = int(val)
         values[name] = val

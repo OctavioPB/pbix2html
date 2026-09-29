@@ -217,6 +217,7 @@ def resolve_theme_markers(layout: dict) -> None:
             if isinstance(style, dict):
                 fix(style, "background")
                 fix(style, "border_color")
+                fix(style, "title_color")
             if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
                 fix(v["slicer"]["style"], "color")
                 fix(v["slicer"]["style"], "background")
@@ -329,6 +330,23 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     background = _object_color(vc_objects, "background", theme_colors=theme_colors)
     if background:
         style["background"] = background
+    transparency = _object_text(vc_objects, "background", "transparency")
+    if transparency and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", transparency):
+        style["transparency"] = float(transparency.strip().rstrip("DL"))          # 0-100: 100 means the fill is invisible
+    # the title's own look: a slicer on a dark panel usually has a white title, which the theme's
+    # foreground would otherwise replace with dark text on dark
+    title_color = _object_color(vc_objects, "title", "fontColor", theme_colors=theme_colors)
+    if title_color:
+        style["title_color"] = title_color
+    size = _object_text(vc_objects, "title", "fontSize")
+    if size and re.fullmatch(r"\s*\d+(\.\d+)?[DL]?\s*", size):
+        style["title_size"] = float(size.strip().rstrip("DL"))                    # points
+    bold = _object_flag(vc_objects, "title", "bold")
+    if bold is not None:
+        style["title_bold"] = bold
+    align = (_object_text(vc_objects, "title", "alignment") or "").strip().lower()
+    if align in ("left", "center", "right"):
+        style["title_align"] = align
     border = _object_flag(vc_objects, "border")
     if border is not None:
         style["border"] = border
