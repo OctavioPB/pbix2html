@@ -147,8 +147,9 @@ Filters with a condition are added to every drafted query as fixed WHERE predica
 (`semantic.effective_filters`, `filter_sql`, `_filter_where`): `In` / `Not In` (blanks kept when negated,
 as Power BI does), comparisons (`=`, `<>`, `>`, `>=`, `<`, `<=`, `IS NULL`), `And`/`Or` ranges,
 `Contains`/`StartsWith`/`EndsWith` (`LIKE` with `ESCAPE`), and **Top N** (`col IN (SELECT k FROM
-(… GROUP BY) QUALIFY RANK() OVER (ORDER BY agg dir) <= N)`, ranked over the rows the slicers leave; ties
-kept). A filter on a table the visual doesn't read is a semi-join through a direct relationship (like
+(… GROUP BY) t WHERE (SELECT COUNT(*) FROM (… GROUP BY) u WHERE u.a <better> t.a) < N)`, i.e. RANK() <= N
+counted, not windowed (Teradata error 3706 forbids ordered analytics in a subquery), ranked over the rows the
+slicers leave; ties kept). A filter on a table the visual doesn't read is a semi-join through a direct relationship (like
 a slicer); on a table no relationship reaches it has no effect, as in Power BI. Report + page + visual
 filters all apply. Values come from the .pbix and are quoted by `_filter_literal`.
 
@@ -167,13 +168,16 @@ published JSON schemas (see ADR-008). Unverified: Top N tie handling (`RANK` kee
 `INTERVAL 'hh:mm:ss' HOUR TO SECOND`. `NOW()` → `CURRENT_TIMESTAMP(0)` (keeps the time), `TODAY()` → `CURRENT_DATE`.
 Time zone: Power BI's `NOW()` is UTC in the service and local in Desktop; the Teradata session zone decides here.
 
-## Reserved words used as names (found on a real Teradata, 2026-09-29)
+## Teradata rejections found on a real system (2026-09-29)
 
-`AS value` → Teradata error 3707; the drafted SQL passed sqlglot's Teradata parser, so **parsing with sqlglot is
-not proof the SQL runs**. Output aliases and any Power BI column named like a reserved word are double-quoted
-(`_TERADATA_RESERVED_COLS`, extended with value, values, min, max, sum, avg, count, user, percent, rank, format,
-title, index, order, group, default, current, session, role, size, top, comment, end, over, range, row, rows,
-precision, public, zone, and the date/time words); `quote_reserved_aliases` fixes a bare `AS value|min|max` at run
-time. Quoting is harmless in a Teradata-mode session (names are case-insensitive); an ANSI-mode session would
-make quoted names case-sensitive. Expect further Teradata-only rejections until the drafts are run against a real
-system: send the error text back so the pattern can be fixed and tested.
+Each of these passed sqlglot's Teradata parser, so **parsing with sqlglot is not proof the SQL runs**.
+
+| Error | Cause | Fix |
+|---|---|---|
+| 3707 `... between AS and value` (also `rename`) | a reserved word used as an alias or column name: the renderer's own `value`, or a Power BI column/table called Rename, Date, Index... | every generated name is checked against `_TERADATA_RESERVED` (columns are double-quoted, table aliases get `_t`); `quote_reserved_aliases` quotes `AS <reserved>` and `alias.<reserved>` in SQL and table maps written earlier (type names after AS are left alone) |
+| 3706 ordered analytical functions not allowed in subqueries | `IN (SELECT ... QUALIFY RANK() OVER ...)` for a Top N filter | count of strictly better values `< N` (same as RANK() <= N); windows are only safe in a derived table joined in FROM (`MIN(x) OVER ()` in the selection-min join) |
+| 2621 `Bad character in format or data of CALDATES.cdate` | a multi-value parameter default saved as the text `[2026]` (the edit page wrote `str(list)`), compared with an INTEGER year | the page shows a list as `a, b` and saves a list; `multi_values` also heals `[2026]`, `['a','b']` coming from a yaml or a URL |
+
+Reserved words: `_TERADATA_RESERVED` (documentation list as remembered; a missing word shows as a 3707 and is added).
+Quoting is harmless in a Teradata-mode session (names are case-insensitive); an ANSI-mode session would make
+quoted names case-sensitive. Send the error text back for anything new so the pattern is fixed and tested.

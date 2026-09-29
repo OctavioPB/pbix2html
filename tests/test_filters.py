@@ -91,7 +91,8 @@ def test_top_n_filter_ranks_the_values_by_an_aggregate_over_the_slicer_selection
         "From": [sub], "Where": [{"Condition": {"In": {"Expressions": [COL("name")], "Table": {}}}}]}}
     params = {"names": {"from_slicer": "Dim.name", "multi": True}}
     sql, used = S._draft_visual_sql(V, "card", {}, TM, RELS, params, [f])
-    assert "QUALIFY RANK() OVER (ORDER BY a DESC) <= 2" in sql and "SUM(h.k) AS a" in sql
+    assert "OVER" not in sql and "QUALIFY" not in sql                # Teradata 3706: no ordered analytics in a subquery
+    assert "WHERE u.a > t.a) < 2" in sql and "SUM(h.k) AS a" in sql   # DESC, Top 2: fewer than 2 strictly better
     assert "h.name IN (:names)" in sql and used == ["names"]          # the slicer narrows what is ranked
     assert bind(sql, used, {"names": []})[0].count("1=1") >= 1
     sqlglot = pytest.importorskip("sqlglot")

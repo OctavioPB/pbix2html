@@ -263,3 +263,39 @@ def test_teradata_backend_sends_the_quoted_alias(monkeypatch):
     monkeypatch.setattr(b, "_connect", lambda: FakeCon(log))
     b.execute("SELECT 1 AS value", [], None)
     assert log[-1][2] == 'SELECT 1 AS "value"'
+
+
+# ---- more Teradata rejections found on a real system (TestReport2 / TestReport3 runs) ----------------
+
+def test_a_power_bi_column_or_table_named_like_a_reserved_word_is_never_emitted_bare():
+    assert S._sql_col("Rename") == '"rename"' and S._sql_col("Value") == '"value"'      # error 3707 ... 'rename'
+    assert S._sql_col("Region") == "region"
+    assert S._sql_alias("Date") == "date_t" and S._sql_alias("Index") == "index_t"       # an alias can't be quoted once
+    assert S._sql_alias("Sales") == "sales"
+    q = S.quote_reserved_aliases
+    assert q("SELECT a AS rename, CAST(b AS DATE) AS d FROM t") == 'SELECT a AS "rename", CAST(b AS DATE) AS d FROM t'
+
+
+def test_multi_value_parameters_survive_a_round_trip_through_a_text_field():
+    assert S.multi_values("[2026]") == [2026] and S.multi_values("2026, 2027") == ["2026", "2027"]
+    assert S.multi_values(["[2026]", 2027]) == [2026, 2027]
+    assert S.multi_values("['a', 'b']") == ["a", "b"] and S.multi_values(None) == []
+    from types import SimpleNamespace
+    spec = SimpleNamespace(parameters={"year": {"multi": True, "default": "[2026]"}})    # a yaml damaged that way
+    assert S.resolve_params(spec, {})["year"] == [2026]
+    assert S.resolve_params(spec, {"year": ["[2026]"]})["year"] == [2026]                 # ?year=%5B2026%5D
+
+
+def test_gui_saves_a_multi_default_as_a_list_not_as_the_text_of_a_list():
+    from pbix2html.gui import _default_value
+    assert _default_value("2026", True, "number", [2026]) == [2026]
+    assert _default_value("A, B", True, "text", None) == ["A", "B"]
+    assert _default_value("", True, None, [2026]) is None and _default_value("x", False, None, None) == "x"
+
+
+def test_legacy_sql_with_reserved_names_after_a_dot_is_quoted_too():
+    q = S.quote_reserved_aliases
+    old = "SELECT lvl.rename, lvl.date, COUNT(*) FROM (SELECT 1 AS lvl, 'x' AS rename) AS lvl"
+    assert q(old) == 'SELECT lvl."rename", lvl."date", COUNT(*) FROM (SELECT 1 AS lvl, \'x\' AS "rename") AS lvl'
+    assert q("SELECT 'a.value' FROM t -- x.value\nWHERE t.region = 1 AND f(t.k) > 2.5") == \
+        "SELECT 'a.value' FROM t -- x.value\nWHERE t.region = 1 AND f(t.k) > 2.5"
