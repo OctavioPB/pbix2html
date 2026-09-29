@@ -60,6 +60,20 @@ def cmd_scaffold(args):
     cmd_mapping(args)
 
 
+def cmd_verify(args):
+    from . import verify
+    res = verify.verify_html(Path(args.html), Path(args.out) if args.out else None, static_only=args.static_only,
+                             width=args.width, echarts=args.echarts, browser=args.browser)
+    print(f"{args.html}: {res.count('error')} error(s), {res.count('warn')} warning(s), {res.count('info')} note(s)  "
+          f"[rendered checks: {res.browser}]")
+    for f in res.findings:
+        if f.severity != "info":
+            print(f"  {f.severity.upper():5} {f.page} / {f.title or f.kind or ''} [{f.rule}] {f.message}")
+    print(f"report: {res.report}")
+    if res.count("error") or (args.strict and res.count("warn")):
+        sys.exit(1)
+
+
 def cmd_mapping(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
     table_map = semantic.preview_table_map(layout["report"], model)
@@ -175,6 +189,16 @@ def main(argv=None) -> int:
     p.add_argument("--params", nargs="*")
     p.add_argument("--fake-data")
     p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("verify", help="look for what is wrong in a generated HTML: overlaps, unreadable text, failed visuals...")
+    p.add_argument("html")
+    p.add_argument("--out", help="folder for verify_report.md and the annotated page screenshots")
+    p.add_argument("--static-only", action="store_true", help="skip the browser checks")
+    p.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
+    p.add_argument("--width", type=int, default=1440, help="browser width in px (default 1440)")
+    p.add_argument("--echarts", help="local echarts.min.js to use when the CDN isn't reachable")
+    p.add_argument("--browser", help="path to a Chrome/Edge/Chromium executable")
+    p.set_defaults(fn=cmd_verify)
 
     p = sub.add_parser("gui", help="local web panel (extract/scaffold/convert/validate without a terminal)")
     p.add_argument("--host", default="127.0.0.1")

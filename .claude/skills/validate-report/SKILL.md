@@ -33,6 +33,13 @@ For every visual with `sql` in the yaml:
 3. Compare with the same slicer state on both sides. Drill-through pages have no navigation in the HTML, and
    their saved filter value is ignored, so compare them for the value you pass explicitly.
 
+## Visual check before comparing numbers
+
+Run `pbix2html verify out/<Report>.html`: it flags what is objectively wrong in the HTML (overlapping visuals, text the
+same colour as its background, text hidden under another visual or a picture, clipped text, failed visuals, chart labels
+that don't fit) with numbered screenshots per page. Fix or accept each finding first; a chart that is blank or covered
+cannot be validated numerically.
+
 ## Diagnosing differences
 
 | Symptom | Likely cause | Where to look |

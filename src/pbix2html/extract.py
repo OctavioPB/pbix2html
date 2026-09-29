@@ -128,8 +128,10 @@ def extract_textbox_text(objects: dict) -> str | None:
                 css.append(f"font-size:{size}")
             escaped = html.escape(value)
             runs.append(f'<span style="{";".join(css)}">{escaped}</span>' if css else escaped)
-        lines.append("".join(runs))
-    return "<p>" + "</p><p>".join(lines) + "</p>" if any(lines) else None
+        align = str(para.get("horizontalTextAlignment") or "").lower()
+        attr = f' style="text-align:{align}"' if align in ("left", "center", "right", "justify") else ""
+        lines.append(f"<p{attr}>" + "".join(runs) + "</p>")
+    return "".join(lines) if any(re.sub(r"<[^>]*>", "", ln).strip() for ln in lines) else None
 
 
 # Power BI visualType → Content-Type, for the handful of raster/vector formats an
@@ -141,16 +143,20 @@ _IMAGE_MIME = {
 }
 
 
+_PBI_DEFAULT_DATA_COLORS = ["#118DFF", "#12239E", "#E66C37", "#6B007B", "#E044A7", "#744EC2", "#D9B300", "#D64550"]
+
+
 def theme_palette(theme: dict | None) -> list[str] | None:
     """The palette `ThemeDataColor.ColorId` indexes into: 0 = background, 1 = foreground,
     then the theme's `dataColors` from index 2 (verified against a real report: a fill of
-    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). None
-    when the report's theme JSON isn't available, in which case theme references are dropped
-    rather than guessed."""
+    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). With no custom theme, Power BI's default palette."""
     cj = (theme or {}).get("custom_json") or {}
     colors = cj.get("dataColors")
     if not colors:
-        return None
+        # A report without a custom theme uses Power BI's default one, whose palette is fixed: white, black and
+        # these eight colours. Dropping the reference (as this used to) turned a title set to "background
+        # colour" (white, on a dark panel) into the theme's dark text: dark on dark.
+        colors = _PBI_DEFAULT_DATA_COLORS
     return [cj.get("background") or "#FFFFFF", cj.get("foreground") or "#000000", *colors]
 
 
@@ -218,6 +224,7 @@ def resolve_theme_markers(layout: dict) -> None:
                 fix(style, "background")
                 fix(style, "border_color")
                 fix(style, "title_color")
+                fix(style, "value_color")
                 fix(style, "table_header_bg")
                 fix(style, "table_header_fg")
                 fix(style, "table_row_bg")
@@ -508,6 +515,12 @@ def _style_with_fill(style: dict, objects: dict) -> dict:
     """A shape/button's own fill is its background unless the container sets one."""
     if "background" not in style and (fill := _fill_color(objects)):
         style["background"] = fill
+    # a card's number: its own colour (objects.labels, older; objects.calloutValue, newer)
+    for name in ("labels", "calloutValue"):
+        color = _object_color(objects, name, "color")
+        if color:
+            style["value_color"] = color
+            break
     return style
 
 

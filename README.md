@@ -272,6 +272,7 @@ pbix2html convert reports/X.pbix --mode snapshot --params year=2026 [--role Sale
 pbix2html convert reports/X.pbix --mode live
 pbix2html convert reports/X.pbix --include-hidden  # also render pages hidden in Power BI
 pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
+pbix2html verify out/X.html         # check the HTML for overlaps, unreadable text, failed visuals (needs: pip install '.[verify]')
 pbix2html validate X
 pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat
 python -m uvicorn pbix2html.serve:app   # live mode (needs SSO in front; see serve.py)

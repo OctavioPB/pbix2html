@@ -61,7 +61,9 @@ git history if you ever need it.)
 8. **Read `mapping_report.md` before reviewing drafts** (`pbix2html mapping <pbix>`): visuals not drafted and
    why, filters not applied, drill-through pages, hidden pages, storage modes, composite/unrelated tables. A
    drafted visual with an unapplied filter will not match Power BI.
-9. **DAX filter context is modelled as SQL joins, not evaluated** (ADR-007): a few narrow idioms
+9. **Run `pbix2html verify` on every converted HTML** and look at the numbered screenshots before calling a report done: it finds
+   overlaps, text the same colour as its background, hidden or clipped text and chart labels that don't fit (ADR-009).
+10. **DAX filter context is modelled as SQL joins, not evaluated** (ADR-007): a few narrow idioms
    (`FILTER(T, T[c] = MIN(T[c]))`, `MIN/MAX(T[c])` over the selection with `VAR`/`IF`, one measure over several
    fact tables) are recognised; anything else stays manual. Never widen a pattern without a test and a
    note in skill `dax-to-teradata-sql`.
@@ -76,6 +78,7 @@ git history if you ever need it.)
     pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v] [--include-hidden]
     pbix2html mapping <pbix>           # why each visual could / couldn't be drafted, filters not applied, drill-through/hidden pages → out/<Report>/mapping_report.md
     pbix2html scaffold <pbix> [--overwrite]   # metrics yaml (--overwrite backs up the old one and re-drafts)
+    pbix2html verify <html> [--out D] [--strict]   # HTML verifier: overlaps, unreadable text, failed visuals, chart labels (ADR-009; needs `pip install .[verify]` for the rendered checks)
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
     python -m uvicorn pbix2html.serve:app --reload   # live mode (python -m: see README PATH note)

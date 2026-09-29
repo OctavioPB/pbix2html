@@ -118,25 +118,43 @@ def _contrast(a: str, b: str) -> float | None:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict) -> str:
-    """The colour a visual's text actually sits on: its own opaque fill, else the fill of the highest
-    visual under its centre (a dark panel drawn behind a slicer), else the page, else the theme."""
-    def opaque(style: dict) -> str | None:
-        c = style.get("background")
-        return c if c and (style.get("transparency") or 0) < 50 and _rgb(c) else None
+def _fill_rgba(v: dict) -> tuple[int, int, int, float] | None:
+    """The fill a visual really paints: a button's translucent fill (`--bg0` in its CSS) or its container
+    background with the transparency applied. None when it paints nothing."""
+    m = re.search(r"--bg0:\s*(rgba?\([^)]*\)|#[0-9a-fA-F]{6})", v.get("btn_css") or "")
+    if m:
+        rgb = _rgb(m.group(1))
+        return rgb if rgb and rgb[3] > 0.02 else None
+    st = v.get("style") or {}
+    rgb = _rgb(st.get("background"))
+    if not rgb:
+        return None
+    alpha = 1 - min(max(st.get("transparency") or 0, 0), 100) / 100
+    return (rgb[0], rgb[1], rgb[2], alpha) if alpha > 0.02 else None
 
-    own = opaque(v.get("style") or {})
-    if own:
-        return own
+
+def _blend(top: tuple[int, int, int, float], under_hex: str) -> str:
+    u = _rgb(under_hex) or (255, 255, 255, 1.0)
+    a = top[3]
+    return "#%02X%02X%02X" % tuple(round(top[i] * a + u[i] * (1 - a)) for i in range(3))
+
+
+def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict, _depth: int = 0) -> str:
+    """The colour a visual's text actually sits on: its own fill (blended with what is under it when it is
+    translucent, as a button's is), else the fill of the highest visual under its centre (a dark panel drawn
+    behind a slicer), else the page, else the theme."""
     cx, cy = (v.get("x") or 0) + (v.get("width") or 0) / 2, (v.get("y") or 0) + (v.get("height") or 0) / 2
     z = v.get("z") or 0
-    under = [w for w in visuals if w is not v and not w.get("is_group") and (w.get("z") or 0) <= z
+    under = [w for w in visuals if w is not v and (w.get("id") is None or w.get("id") != v.get("id")) and not w.get("is_group") and (w.get("z") or 0) <= z
              and w.get("x") is not None and w["x"] <= cx <= w["x"] + (w.get("width") or 0)
              and w.get("y") is not None and w["y"] <= cy <= w["y"] + (w.get("height") or 0)
-             and opaque(w.get("style") or {})]
-    if under:
-        return opaque(max(under, key=lambda w: w.get("z") or 0)["style"])       # type: ignore[arg-type]
-    return page_bg if page_bg and _rgb(page_bg) else theme["background"]
+             and ((_fill_rgba(w) or (0, 0, 0, 0.0))[3] >= 0.5)]
+    if under and _depth < 6:
+        below = _backdrop(max(under, key=lambda w: w.get("z") or 0), visuals, page_bg, theme, _depth + 1)
+    else:
+        below = page_bg if page_bg and _rgb(page_bg) else theme["background"]
+    own = _fill_rgba(v)
+    return _blend(own, below) if own else below
 
 
 def _readable_fg(backdrop: str, theme: dict) -> str | None:
@@ -359,6 +377,14 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
         # Groups that start hidden; their descendants are kept in the page (a bookmark
         # button can reveal them) and shown/hidden client-side by group chain.
         hidden_groups = [v["id"] for v in p["visuals"] if v.get("is_group") and v.get("hidden")]
+        # what each visual paints, for working out what text sits on: a rectangle/shape with no fill object is filled
+        # with the theme's first colour in Power BI, which the extractor (rightly) doesn't record as a fill
+        painted = [{**w, "style": {**(w.get("style") or {}), "background": theme["data_colors"][0]}}
+                   if (w["type"] in ("shape", "basicShape") and "fill" not in (w.get("objects_keys") or [])
+                       and not (w.get("style") or {}).get("background") and (w.get("style") or {}).get("transparency") is None)
+                   else w for w in p["visuals"]]
+        default_fill = {w["id"]: w["style"]["background"] for w in painted if w is not None and w.get("style", {}).get("background")
+                        and not next((o for o in p["visuals"] if o["id"] == w["id"]), {}).get("style", {}).get("background")}
         for v in p["visuals"]:
             if v.get("is_group") or v.get("hidden"):
                 continue
@@ -399,13 +425,19 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             }
             # a fill Power BI shows at 100 % transparency is not drawn; a partly transparent one is rgba
             st = dict(entry["style"])
+            if v["id"] in default_fill:
+                st["background"] = default_fill[v["id"]]
             if st.get("background") and st.get("transparency") is not None:
                 st["background"] = _rgba(st["background"], st["transparency"]) if st["transparency"] < 100 else None
                 if not st["background"]:
                     st.pop("background")
             entry["style"] = st
-            readable = _readable_fg(_backdrop(v, p["visuals"], p.get("background"), theme), theme)
+            readable = _readable_fg(_backdrop({**v, "btn_css": entry.get("btn_css")}, painted, p.get("background"), theme), theme)
+            if entry.get("btn_css") and readable and "--fg:" not in entry["btn_css"]:
+                entry["btn_css"] += f";--fg:{readable}"       # the report names no text colour: one that reads
             entry["title_css"] = _title_css(v.get("style") or {}, readable)
+            value_color = (v.get("style") or {}).get("value_color") or readable       # a card's number
+            entry["value_css"] = f"color:{value_color}" if value_color and _rgb(value_color) else ''
             entry["fg"] = readable                      # default text colour of the visual's own content (slicer widget)
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses

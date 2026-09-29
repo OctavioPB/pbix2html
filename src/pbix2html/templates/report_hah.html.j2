@@ -69,6 +69,7 @@
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
   .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
   .sl-btn:disabled { cursor: default; opacity: .8; }
+  .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
   .sl-range { display: flex; gap: .3rem; align-items: center; }
   .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
   .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
@@ -238,13 +239,13 @@
   const R = {
     card(el, v, b) {
       const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
-      el.innerHTML = `<div class="card"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
         (li >= 0 && r[li] ? `<div class="label">${r[li]}</div>` : '') + `</div>`;
     },
     kpi(el, v, b) {
       const r = b.rows[0] || []; const vi = col(b, 'value'), ti = col(b, 'target');
       const delta = (ti >= 0 && r[ti]) ? (r[vi] - r[ti]) / r[ti] : null;
-      el.innerHTML = `<div class="card kpi"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card kpi"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
         (ti >= 0 ? `<div class="target">Target ${fmt(r[ti], v.format.value)}${delta !== null ? ' · ' + fmt(delta, '%') : ''}</div>` : '') + `</div>`;
     },
     multicard(el, v, b) {
