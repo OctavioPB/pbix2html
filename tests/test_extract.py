@@ -186,3 +186,47 @@ def test_classic_group_has_same_keys_and_bundled_custom_visuals(tmp_path):
     g = lay["pages"][0]["visuals"][0]
     assert g["is_group"] and g["hidden"] is False and g["filters"] == []
     assert lay["custom_visual_packages"] == ["MyViz123"]
+
+
+def test_page_background_image_is_embedded_and_rendered(tmp_path):
+    """Real report: a page whose whole canvas is a picture (white text sits on it)."""
+    import base64
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+    from pbix2html.render import _background_image_css
+
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+    bg = {"background": [{"properties": {"image": {"image": {
+        "name": {"expr": {"Literal": {"Value": "'bg.png'"}}},
+        "url": {"expr": {"ResourcePackageItem": {"PackageName": "RegisteredResources", "ItemName": "bg1.png"}}},
+        "scaling": {"expr": {"Literal": {"Value": "'Fit'"}}}}}}}]}
+    layout = {"sections": [{"name": "s", "displayName": "S", "config": json.dumps({"objects": bg}),
+                            "visualContainers": []}]}
+    pbix = tmp_path / "B.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/StaticResources/RegisteredResources/bg1.png", png)
+    page = extract_layout(pbix)["pages"][0]
+    assert page["background_image"]["scaling"] == "Fit"
+    assert page["background_image"]["data_uri"].startswith("data:image/png;base64,")
+    css = _background_image_css(page["background_image"])
+    assert css.startswith("url(data:image/png;base64,") and css.endswith("100% 100% no-repeat")
+    assert _background_image_css({"data_uri": 'data:image/png;base64,x");evil', "scaling": "Fit"}) is None
+
+
+def test_group_children_positions_become_absolute():
+    """Classic Layout: children are relative to their (possibly nested) group."""
+    from pbix2html.extract import absolutize_group_children
+
+    vs = [
+        {"id": "g1", "x": 100, "y": 200, "parent_group": None},
+        {"id": "g2", "x": 10, "y": 20, "parent_group": "g1"},     # nested group
+        {"id": "a", "x": 1, "y": 2, "parent_group": "g2"},
+        {"id": "b", "x": 5, "y": 5, "parent_group": None},         # top-level: untouched
+        {"id": "c", "x": 7, "y": 7, "parent_group": "missing"},    # unknown parent: untouched
+    ]
+    absolutize_group_children(vs)
+    pos = {v["id"]: (v["x"], v["y"]) for v in vs}
+    assert pos == {"g1": (100, 200), "g2": (110, 220), "a": (111, 222), "b": (5, 5), "c": (7, 7)}

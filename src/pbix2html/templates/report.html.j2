@@ -75,7 +75,7 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background %}; background: {{ p.background }}{% endif %}" {% if not loop.first %}hidden{% endif %}>
+<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not loop.first %}hidden{% endif %}>
   {% for v in p.visuals %}
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —

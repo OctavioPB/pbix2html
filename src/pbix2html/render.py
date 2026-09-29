@@ -7,6 +7,7 @@ with ECharts from `spec` + `data`. That way the same HTML works for both snapsho
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,20 @@ def resolve_theme(layout_theme: dict | None) -> dict:
 def _text_of(visual: dict) -> str | None:
     """Text of a textbox (objects.general.paragraphs) if available in the layout."""
     return visual.get("text")
+
+
+# Power BI's page-image scaling → CSS. "Normal" is assumed to keep the aspect ratio
+# (contain), "Fit" to stretch to the canvas and "Fill" to cover it; identical when the
+# picture has the page's own aspect ratio, which designed backgrounds normally do.
+_BG_SIZE = {"Normal": "contain", "Fit": "100% 100%", "Fill": "cover"}
+
+
+def _background_image_css(bg: dict | None) -> str | None:
+    uri = (bg or {}).get("data_uri")
+    if not uri or not re.fullmatch(r"data:image/[\w.+-]+;base64,[A-Za-z0-9+/=]+", uri):
+        return None
+    size = _BG_SIZE.get(bg.get("scaling"), "contain")
+    return f"url({uri}) center / {size} no-repeat"
 
 
 def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_hidden: bool = False,
@@ -100,6 +115,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             visuals.append(entry)
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "background": p.get("background"),
+                      "background_image": _background_image_css(p.get("background_image")),
                       "visuals": visuals})
     parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
                   for name, p in spec.parameters.items()}

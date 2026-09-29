@@ -287,6 +287,20 @@ def _image_ref(objects: dict) -> dict | None:
     return None
 
 
+def _page_background_image(objects: dict) -> dict | None:
+    """{'package', 'item', 'scaling'} for a page's background *image*
+    (objects.background[*].properties.image.image), or None. Many designed reports put
+    their whole layout (panels, banners, a pale title area) in this picture, so ignoring
+    it can leave white text on a white canvas. Resolved to bytes by embed_image_resources."""
+    for b in (objects or {}).get("background") or []:
+        img = (((b or {}).get("properties") or {}).get("image") or {}).get("image") or {}
+        item = ((img.get("url") or {}).get("expr") or {}).get("ResourcePackageItem") or {}
+        if item.get("ItemName"):
+            return {"package": item.get("PackageName"), "item": item["ItemName"],
+                    "scaling": (literal_to_text((img.get("scaling") or {}).get("expr") or {}) or "Normal")}
+    return None
+
+
 def _read_image_data_uri(z: zipfile.ZipFile, names: set[str], ref: dict) -> str | None:
     item = ref.get("item")
     if not item:
@@ -319,16 +333,21 @@ def embed_image_resources(z: zipfile.ZipFile, layout: dict) -> None:
     to the rest of the report."""
     names = set(z.namelist())
     cache: dict[tuple, str | None] = {}
+
+    def resolve(ref: dict) -> str | None:
+        key = (ref.get("package"), ref.get("item"))
+        if key not in cache:
+            cache[key] = _read_image_data_uri(z, names, ref)
+        return cache[key]
+
     for page in layout.get("pages", []):
+        bg = page.get("background_image")
+        if bg and (uri := resolve(bg)):
+            bg["data_uri"] = uri
         for v in page.get("visuals", []):
             ref = v.get("image_ref")
-            if not ref:
-                continue
-            key = (ref.get("package"), ref.get("item"))
-            if key not in cache:
-                cache[key] = _read_image_data_uri(z, names, ref)
-            if cache[key]:
-                v["image_data_uri"] = cache[key]
+            if ref and (uri := resolve(ref)):
+                v["image_data_uri"] = uri
 
 
 def safe_name(s: str) -> str:
@@ -490,6 +509,29 @@ def _parse_visual(vc: dict) -> dict:
     return visual
 
 
+def absolutize_group_children(visuals: list[dict]) -> None:
+    """Classic Layout stores a grouped visual's x/y *relative to its group* (a child
+    that fills its group is at 0,0 with the group's width/height), and nested groups
+    are relative to their parent. Rendering them as-is piles every grouped visual into
+    the page's top-left corner, so add the ancestors' offsets in place. Seen on a real
+    report where half the visuals were grouped. Cycles / unknown parents are ignored."""
+    by_id = {v.get("id"): v for v in visuals if v.get("id")}
+    done: set[str] = set()
+
+    def shift(v: dict, seen: frozenset = frozenset()) -> None:
+        vid = v.get("id")
+        parent = by_id.get(v.get("parent_group"))
+        if vid in done or parent is None or vid in seen:
+            return
+        shift(parent, seen | {vid})
+        v["x"] = (v.get("x") or 0) + (parent.get("x") or 0)
+        v["y"] = (v.get("y") or 0) + (parent.get("y") or 0)
+        done.add(vid)
+
+    for v in visuals:
+        shift(v)
+
+
 def parse_page(section: dict) -> dict:
     cfg = loads_maybe(section.get("config", "{}")) or {}
     objects = cfg.get("objects") or {}
@@ -499,6 +541,8 @@ def parse_page(section: dict) -> dict:
     # so either one is better than falling back to the theme default.
     page_background = (_object_color(objects, "background")
                        or _object_color(objects, "outspace"))
+    visuals = [parse_visual(vc) for vc in section.get("visualContainers", [])]
+    absolutize_group_children(visuals)
     return {
         "name": section.get("name"),
         "display_name": section.get("displayName"),
@@ -507,8 +551,9 @@ def parse_page(section: dict) -> dict:
         "height": section.get("height"),
         "hidden": cfg.get("visibility") == 1,
         "background": page_background,
+        "background_image": _page_background_image(objects),
         "filters": parse_filters(section.get("filters")),
-        "visuals": [parse_visual(vc) for vc in section.get("visualContainers", [])],
+        "visuals": visuals,
     }
 
 

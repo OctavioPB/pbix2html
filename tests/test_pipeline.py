@@ -439,3 +439,23 @@ def test_compare_tolerance():
     b = {"columns": ["category", "value"], "rows": [["N", 10.0000001], ["S", 6.0]]}
     diffs = compare(a, b, {"rel": 1e-6})
     assert len(diffs) == 1 and diffs[0].startswith("('S',)")
+
+
+def test_table_map_detects_connector_query_option():
+    """Real report shape: Teradata.Database(host, [.., Query="<SQL>"]) — not NativeQuery."""
+    from pbix2html import semantic
+
+    def m(query: str) -> str:
+        return ('let\n    Source = Teradata.Database("host", [HierarchicalNavigation=true, '
+                f'Query="{query}"])\nin\n    Source')
+
+    model = {"power_query": [
+        {"TableName": "A", "Expression": m('SELECT a, b#(lf)FROM db.t WHERE x = ""y""')},
+        {"TableName": "B", "Expression": m("SEL d#(lf)FROM cal.days")},          # Teradata SEL
+        {"TableName": "C", "Expression": m('SELECT 1" & "x')},                   # concatenated: skipped
+        {"TableName": "D", "Expression": 'let Source = Table.FromRows({}) in Source'},
+    ]}
+    got = semantic.detect_table_map_from_power_query(model)
+    assert got["A"] == 'SELECT a, b\nFROM db.t WHERE x = "y"'
+    assert got["B"].startswith("SEL d")
+    assert "C" not in got and "D" not in got

@@ -84,7 +84,7 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}" {% if not loop.first %}hidden{% endif %}>
+<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not loop.first %}hidden{% endif %}>
   {% for v in p.visuals %}
   <div class="visual {{ v.kind }} {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">

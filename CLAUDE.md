@@ -3,8 +3,8 @@
 Converts Power BI reports (`.pbix`, DirectQuery to Teradata) into self-contained HTML
 reports, one report at a time:
 
-    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode snapshot
-    pbix2html convert reports/Sales.pbix --out out/Sales.html --mode live
+    pbix2html convert reports/Sales.pbix --html out/Sales.html --mode snapshot
+    pbix2html convert reports/Sales.pbix --html out/Sales.html --mode live
 
 Read `PLAN.md` to know what phase we're in and what's next. Read `docs/ARCHITECTURE.md`
 before touching more than one module.

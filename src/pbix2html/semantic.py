@@ -202,7 +202,7 @@ _SQL_SINGLE_STATEMENT_FORBIDDEN = (
     "GRANT", "REVOKE", "EXEC", "EXECUTE", "CALL", "COMMIT", "ROLLBACK", "SET", "INTO",
 )
 _SQL_FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_SQL_SINGLE_STATEMENT_FORBIDDEN) + r")\b", re.IGNORECASE)
-_SQL_LEADING_RE = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+_SQL_LEADING_RE = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.IGNORECASE)
 _SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
@@ -227,7 +227,7 @@ def validate_read_only_sql(sql: str) -> str:
         raise ValueError("only a single SELECT statement is allowed (found a second ';')")
     uncommented = _SQL_BLOCK_COMMENT_RE.sub(" ", _SQL_LINE_COMMENT_RE.sub(" ", raw)).strip()
     if not _SQL_LEADING_RE.match(uncommented):
-        raise ValueError("must start with SELECT (or WITH ... SELECT)")
+        raise ValueError("must start with SELECT/SEL (or WITH ... SELECT)")
     m = _SQL_FORBIDDEN_RE.search(uncommented)
     if m:
         raise ValueError(f"'{m.group(1).upper()}' isn't allowed here — read-only queries only")
@@ -273,6 +273,10 @@ def is_unwritten_sql(sql: str) -> bool:
 # ----------------------------------------------------------------------------
 
 _M_NATIVE_QUERY_RE = re.compile(r"Value\.NativeQuery\s*\(", re.IGNORECASE)
+# `Teradata.Database("host", [HierarchicalNavigation=true, Query="select ..."])`: the
+# connector's own `Query` option (what the "SQL statement" box in Get Data produces).
+_M_DATABASE_CALL_RE = re.compile(r"\b\w+\.Database\s*\(", re.IGNORECASE)
+_M_QUERY_OPTION_RE = re.compile(r"\bQuery\s*=\s*", re.IGNORECASE)
 _M_LET_IN_RE = re.compile(r"^\s*let\b(.*?)\bin\b(.*)$", re.IGNORECASE | re.DOTALL)
 _M_ACCESSOR_STEP_RE = re.compile(
     r'^\w+\s*=\s*\w+\s*\{\s*\[\s*(?:Schema\s*=\s*"([^"]*)"\s*,\s*)?'
@@ -324,6 +328,23 @@ def _m_split_args(text: str) -> list[str]:
     return [a.strip() for a in args]
 
 
+def _m_string_literal_end(text: str) -> int | None:
+    """Index just past the closing quote of the M string literal that starts `text`, or
+    None if `text` doesn't start with one or the literal is followed by `&` (concatenation)."""
+    if not text.startswith('"'):
+        return None
+    i, n = 1, len(text)
+    while i < n:
+        if text[i] == '"':
+            if i + 1 < n and text[i + 1] == '"':
+                i += 2
+                continue
+            tail = text[i + 1:].lstrip()
+            return None if tail.startswith("&") else i + 1
+        i += 1
+    return None
+
+
 def _m_unescape_string(literal: str) -> str | None:
     """A quoted M string literal (including the surrounding quotes) → its real
     value: "" is an escaped quote, #(lf)/#(cr,lf)/#(cr)/#(tab) are M's escape
@@ -360,6 +381,18 @@ def _detect_table_query(expression: str) -> str | None:
     """
     if not expression:
         return None
+    dm = _M_DATABASE_CALL_RE.search(expression)
+    if dm and not _M_NATIVE_QUERY_RE.search(expression):
+        args = _m_split_args(expression[dm.end():])
+        # options record is the 2nd argument; the SQL must be a plain string literal
+        # (a `&`-concatenated or parameterized Query is not evaluated: left blank).
+        qm = _M_QUERY_OPTION_RE.search(args[1]) if len(args) >= 2 else None
+        if qm:
+            rest = args[1][qm.end():]
+            end = _m_string_literal_end(rest)
+            sql = _m_unescape_string(rest[:end]) if end is not None else None
+            return sql.strip() if sql and sql.strip() else None
+        # no Query option: plain table-accessor shape, handled below
     m = _M_NATIVE_QUERY_RE.search(expression)
     if m:
         args = _m_split_args(expression[m.end():])

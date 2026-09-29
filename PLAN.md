@@ -24,6 +24,32 @@ Status: **Phase 0 done, Phase 1 in progress.** Update this file when you close o
 - [ ] Confirm access to `DBC.DBQLSqlTbl` for the Power BI gateway user.
       **Pending coordination with the Teradata DBA** (outside this repo).
 
+## Findings from a real classic-format report (2026-09-29)
+
+First real `.pbix` run through extract → scaffold → convert (11 pages, 232 visuals, mixed
+Import/DirectQuery/Dual model, custom visuals, no RLS). Fixed in the repo: textbox runs bound
+to a field crashed the visual; bundled custom visuals were not listed; group children were
+drawn at the page's top-left (their x/y are relative to the group); page background
+*images* were ignored (white title text on a white canvas); the table-map detector missed
+`Teradata.Database(host, [Query="..."])` and `SEL`. **Still open** (design work, in priority order):
+
+- [ ] **Bookmarks and action buttons.** 7 bookmarks, 49 of 52 buttons are `Bookmark` /
+      `PageNavigation` actions. Bookmarks act as view switchers (stacked visuals, one visible
+      at a time), so the HTML currently draws all of them on top of each other. Needs: read
+      `config.bookmarks` + each button's `visualLink`, render buttons as toggles, and pick the
+      initially visible view. `PageNavigation` buttons could map to the tab bar.
+- [ ] Slicers reference an entity (`Table.models`) that isn't in `model.json["tables"]`
+      (only its hidden `H$Table` hierarchy partitions are); warn on unresolved entities.
+- [ ] Two tables are inline data (`Table.FromRows(...)`, no Teradata source): embed or ask.
+- [ ] CLI `--mode` doesn't accept `hah` (docs and `render_html` do); `hah_base` has no CLI flag.
+- [ ] `storage_modes` are raw codes (`0` Import, `1` DirectQuery, `2` Dual): show names.
+- [ ] Rendered HTML loads ECharts from a CDN, not fully self-contained; blocked networks
+      need `ECHARTS_CDN` pointed at an internal copy (or an inline option).
+- [ ] Hidden pages are a mix of tooltip pages and stale duplicates; a report-level note.
+- [ ] PBIR keys (`isHidden`, `filterConfig`, `parentGroupName`, group-relative positions)
+      still unconfirmed: this sample was classic. Group children in PBIR are probably
+      relative too; `absolutize_group_children` is only applied to classic.
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`
