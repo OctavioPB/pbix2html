@@ -79,6 +79,7 @@ git history if you ever need it.)
     pbix2html mapping <pbix>           # why each visual could / couldn't be drafted, filters not applied, drill-through/hidden pages → out/<Report>/mapping_report.md
     pbix2html scaffold <pbix> [--overwrite]   # metrics yaml (--overwrite backs up the old one and re-drafts)
     pbix2html verify <html> [--out D] [--strict]   # HTML verifier: overlaps, unreadable text, failed visuals, chart labels (ADR-009; needs `pip install .[verify]` for the rendered checks)
+    pbix2html redraft <pbix>           # redo the queries the tool drafted earlier (backup first; hand-written SQL untouched)
     pbix2html validate <Report>
     pbix2html gui                          # local web panel (extract/scaffold/convert/validate without a CLI)
     python -m uvicorn pbix2html.serve:app --reload   # live mode (python -m: see README PATH note)

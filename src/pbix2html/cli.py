@@ -74,6 +74,20 @@ def cmd_verify(args):
         sys.exit(1)
 
 
+def cmd_redraft(args):
+    layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
+    name = layout["report"]
+    table_map, _ = semantic.sync_table_map(name, model)
+    spec = semantic.load(name)
+    outcome = semantic.autofill(spec.raw, layout, model, table_map, redraft=True)
+    if outcome["filled"] or outcome["slicers_added"] or outcome["parameters_added"]:
+        backup = semantic.backup_yaml(name)
+        semantic.save_raw(name, outcome["raw"])
+        print(f"backup: {backup}")
+    print(f"{name}: {len(outcome['filled'])} visual(s) drafted again, {len(outcome['already'])} left as they were "
+          f"(written by a person), {len(outcome['still_todo'])} still need SQL by hand")
+
+
 def cmd_mapping(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
     table_map = semantic.preview_table_map(layout["report"], model)
@@ -199,6 +213,11 @@ def main(argv=None) -> int:
     p.add_argument("--echarts", help="local echarts.min.js to use when the CDN isn't reachable")
     p.add_argument("--browser", help="path to a Chrome/Edge/Chromium executable")
     p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("redraft", help="redo the queries the tool drafted earlier (backs the yaml up first)")
+    p.add_argument("pbix")
+    p.add_argument("--out", default="out")
+    p.set_defaults(fn=cmd_redraft)
 
     p = sub.add_parser("gui", help="local web panel (extract/scaffold/convert/validate without a terminal)")
     p.add_argument("--host", default="127.0.0.1")
