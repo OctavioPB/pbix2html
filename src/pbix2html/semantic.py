@@ -1827,6 +1827,9 @@ def _filter_condition_sql(cond: Any, prop: str) -> str | None:
         if op is None or lit is None or not is_col(body.get("Left")):
             return None
         return f"{_COL} IS NULL" if lit == "NULL" and op == "=" else f"{_COL} {op} {lit}"
+    if kind == "Between" and is_col(body.get("Expression")):
+        lo, hi = _filter_literal(body.get("LowerBound")), _filter_literal(body.get("UpperBound"))
+        return f"{_COL} BETWEEN {lo} AND {hi}" if lo and hi and "NULL" not in (lo, hi) else None
     if kind in ("And", "Or"):
         left, right = (_filter_condition_sql(body.get(k), prop) for k in ("Left", "Right"))
         return f"({left} {kind.upper()} {right})" if left and right else None
@@ -1891,7 +1894,7 @@ def filter_sql(f: dict, parameters: dict[str, dict] | None = None, table_map: di
     """(table, column, SQL over `_COL`) for a filter-pane filter that constrains rows, or None:
     it has no condition (a field merely listed in the pane), it targets a measure, or it isn't a
     supported shape (see `_filter_condition_sql`). Every `Where` entry is ANDed."""
-    if f.get("type") == "TopN":
+    if f.get("type") in ("TopN", "VisualTopN"):        # VisualTopN: PBIR's name; same subquery shape assumed
         return _topn_sql(f, parameters, table_map, relationships)
     target, definition = f.get("target") or "", f.get("definition")
     if (not isinstance(definition, dict) or "." not in target or f.get("aggregation") is not None

@@ -110,11 +110,14 @@ aggregation, is_hidden, is_locked}`: report (`layout["filters"]`: classic `Layou
   `Not` of any of them), `TopN` (an `In` whose table is a `Subquery` with `Top`, `OrderBy`),
   `RelativeDate`. A negated condition is `{"Not": {"Expression": <cond>}}` in `Where`.
 - `aggregation` is set when the pane field is an aggregate (`Aggregation.Function`: 0 Sum, 1 Avg,
-  2 Count distinct, 3 Min, 4 Max, 5 Count; from Power BI's enum): the condition is on the aggregate, not the
-  rows. `target` is still `Table.column`.
-- `how_created`: 0 auto, 1 user, 2 drill, 3 include, 4 exclude, **5 drill-through** (from Power BI's enum,
-  not confirmed against Microsoft docs here). A drill-through filter's saved value is only the last one the
-  author tried.
+  2 Distinct count, 3 Min, 4 Max, 5 Count non-null, 6 Median, 7 StdDev, 8 Variance; Microsoft's semanticQuery
+  schema): the condition is on the aggregate, not the rows. `target` is still `Table.column`.
+- `how_created`: 0 Auto, 1 User, 2 Drill, 3 Include, 4 Exclude, **5 Drillthrough** (filterConfiguration
+  schema; PBIR stores the name, classic the position: `parse_filters` returns the number for both). A
+  drill-through filter's saved value is only the last one the author tried.
+- Other schema facts: `SortDirection` 1 ascending / 2 descending; `ComparisonKind` 0 =, 1 >, 2 >=, 3 <, 4 <=;
+  conditions And/Or/Not/Comparison/Between/In/Contains/StartsWith/Exists; PBIR filter `type` also has `Range`,
+  `Passthrough`, `Include`, `Exclude`, `Tuple`, `RelativeTime` and `VisualTopN`.
 - A filter on a **measure** has target `Table.Measure` and `expression.Measure`.
 
 Applying them to SQL is `semantic.effective_filters` / `filter_sql` (see skill `dax-to-teradata-sql`,

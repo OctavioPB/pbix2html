@@ -156,8 +156,9 @@ Not applied (listed in the mapping report and in the visual's `notes`): filters 
 (`Sum(T.c) < 100`, needs HAVING), on a measure, booleans, relative-date, multi-column `In`, and filters
 through more than one relationship hop. Drill-through filters (`howCreated` 5) are skipped on purpose:
 their saved value is only the last one the author tried, and the HTML has no drill-through navigation yet.
-Unverified against Power BI: the Top N ranking direction/tie handling and the aggregate-function codes
-(0 Sum, 1 Avg, 2 Count distinct, 3 Min, 4 Max, 5 Count), taken from Power BI's enums.
+Aggregate-function codes, sort direction, comparison kinds and `howCreated` were checked against Microsoft's
+published JSON schemas (see ADR-008). Unverified: Top N tie handling (`RANK` keeps ties), and whether PBIR's
+`VisualTopN` has the same shape as `TopN`. Also handled: `Between`.
 
 ## FORMAT with time, TIME(), NOW()
 

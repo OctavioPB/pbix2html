@@ -96,3 +96,15 @@ def test_top_n_filter_ranks_the_values_by_an_aggregate_over_the_slicer_selection
     assert bind(sql, used, {"names": []})[0].count("1=1") >= 1
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse_one(bind(sql, used, {"names": ["a"]})[0].replace("?", "'x'"), read="teradata")
+
+
+def test_between_condition_and_pbir_how_created_names():
+    b = {"Between": {"Expression": COL("c"), "LowerBound": L("1L"), "UpperBound": L("9L")}}
+    assert sql_of(flt("T.c", b, "Advanced")) == "x BETWEEN 1 AND 9"
+    from pbix2html import extract as ex
+    # PBIR names how a filter was created; the classic Layout numbers it. Both must read as drill-through = 5.
+    parsed = ex.parse_filters([{"name": "a", "howCreated": "Drillthrough", "field": {"Column": {
+        "Expression": {"SourceRef": {"Entity": "T"}}, "Property": "c"}}}])
+    assert parsed[0]["how_created"] == 5
+    layout = {"filters": [], "pages": []}
+    assert S.effective_filters(layout, {"filters": [{**flt("T.c", IN("c", "'a'")), "how_created": 5}]}, None) == []

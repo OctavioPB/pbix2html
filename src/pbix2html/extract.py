@@ -561,6 +561,11 @@ STANDARD_VISUALS = {
 }
 
 
+# filterConfiguration schema (microsoft/json-schemas): PBIR writes the name, the classic Layout the
+# position in this list
+_HOW_CREATED = {"Auto": 0, "User": 1, "Drill": 2, "Include": 3, "Exclude": 4, "Drillthrough": 5}
+
+
 def parse_filters(raw: Any) -> list[dict]:
     """Normalizes page/visual filters: entity.property + type + raw definition."""
     filters = loads_maybe(raw)
@@ -597,7 +602,7 @@ def parse_filters(raw: Any) -> list[dict]:
                 "is_locked": bool(f.get("isLockedInViewMode")),
                 "definition": f.get("filter"),   # raw; contains Where/Condition
                 # howCreated: 0 auto, 1 user, 2 drill, 3 include, 4 exclude, 5 drill-through
-                "how_created": f.get("howCreated"),
+                "how_created": _HOW_CREATED.get(f.get("howCreated"), f.get("howCreated")),
                 # a filter on an aggregate (`Sum(T.c) < 100`), not on the column's rows
                 "aggregation": ((f.get("expression") or f.get("field") or {}).get("Aggregation") or {}).get("Function"),
             })

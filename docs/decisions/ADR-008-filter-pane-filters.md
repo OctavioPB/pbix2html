@@ -31,6 +31,16 @@ derived tables) as **fixed predicates**, next to the slicer parameters.
 ## Consequences
 
 - Drafts made before this change lack the filters; regenerate (`scaffold --overwrite`) before validating.
-- Unverified assumptions taken from Power BI's enums: aggregate codes (0 Sum … 5 Count), Top N direction
-  (1 asc, 2 desc) and tie handling, and `howCreated` 5 = drill-through.
+- Checked (2026-09-29) against Microsoft's published schemas (`microsoft/json-schemas`, `fabric/item/report/
+  definition/semanticQuery/1.4.0` and `filterConfiguration/1.3.0`): aggregate `Function` codes (0 Sum,
+  1 Average, 2 Distinct count, 3 Min, 4 Max, 5 Count of non-null, 6 Median, 7 StdDev, 8 Variance), `SortDirection`
+  (1 ascending, 2 descending), `ComparisonKind` (0 =, 1 >, 2 >=, 3 <, 4 <=), the condition kinds (And, Or, Not,
+  Comparison, Between, In, Contains, StartsWith, Exists) and the `howCreated` names (Auto, User, Drill, Include,
+  Exclude, Drillthrough). PBIR writes `howCreated` as that name and the classic Layout as its position in
+  the list (Drillthrough = 5, consistent with the real reports); `parse_filters` normalizes both to the number.
+- Still **not** verified: Top N tie handling (`RANK` keeps ties, as DAX `TOPN` documents from memory: the docs
+  page was unreachable from the sandbox), that PBIR's `VisualTopN` filter type has the same subquery shape as
+  `TopN` (its structure is delegated to the semanticQuery schema; the code accepts it only if the shape matches),
+  and the PBIR types `Range`, `Passthrough`, `Include`, `Exclude`, `Tuple`, `RelativeTime` (reported as not
+  applied).
 - Comparison filters on blanks: DAX treats blank as 0 in `<`; SQL drops NULLs. Left as SQL; validate.

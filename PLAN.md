@@ -198,7 +198,8 @@ Teradata/HAH, which is the actual gate for every "implemented" line above.
 
 - Validation: no reference values yet for cards drafted with filter-pane filters, Top N, selection-dependent
   (`MIN/MAX`, `FILTER … = MIN`) or multi-fact measures (ADR-007, ADR-008).
-- Enum assumptions taken from memory (verify): filter aggregate codes, Top N direction/ties, `howCreated` 5.
+- Filter enums checked against Microsoft's JSON schemas (ADR-008); still open: Top N ties, PBIR `VisualTopN` shape,
+  PBIR filter types `Range/Passthrough/Include/Exclude/Tuple/RelativeTime`.
 - Filters not applied: on an aggregate or a measure, relative date, booleans, multi-column `In`, multi-hop.
 - Drill-through navigation with a value from the source page; hidden pages reachable only via `--include-hidden`.
 - Slicers: relative-date and tile modes, cascading options, pair-accurate hierarchy selection (ADR-006).
