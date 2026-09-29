@@ -583,6 +583,10 @@ def parse_filters(raw: Any) -> list[dict]:
                     entity = (inner.get("SourceRef") or {}).get("Entity") \
                         or (((inner.get("Column") or {}).get("Expression") or {}).get("SourceRef") or {}).get("Entity")
                     prop = node.get("Property") or node.get("Level")
+                    if kind == "Aggregation":      # `Sum(T.c)`: the column is one level down
+                        col = (inner.get("Column") or {})
+                        entity = (((col.get("Expression") or {}).get("SourceRef") or {}).get("Entity")) or entity
+                        prop = col.get("Property") or prop
                     target = f"{entity}.{prop}" if entity or prop else kind
                     break
             out.append({
@@ -592,6 +596,10 @@ def parse_filters(raw: Any) -> list[dict]:
                 "is_hidden": bool(f.get("isHiddenInViewMode")),
                 "is_locked": bool(f.get("isLockedInViewMode")),
                 "definition": f.get("filter"),   # raw; contains Where/Condition
+                # howCreated: 0 auto, 1 user, 2 drill, 3 include, 4 exclude, 5 drill-through
+                "how_created": f.get("howCreated"),
+                # a filter on an aggregate (`Sum(T.c) < 100`), not on the column's rows
+                "aggregation": ((f.get("expression") or f.get("field") or {}).get("Aggregation") or {}).get("Function"),
             })
         except Exception as e:
             # A filter with an unexpected shape must not take down the rest of the visual/page.
@@ -1014,6 +1022,7 @@ def extract_layout(pbix: Path) -> dict:
             "custom_visual_packages": list(dict.fromkeys(
                 [c for c in custom_packages if c] + _zip_custom_visuals(names))),
             "pages": [parse_page(s) for s in layout.get("sections", [])],
+            "filters": parse_filters(layout.get("filters")),      # report-level filter pane
             "format": "classic",
             "bookmarks": parse_bookmarks(loads_maybe(layout.get("config", "{}")) or {}),
         }
@@ -1299,6 +1308,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "custom_visual_packages": list(dict.fromkeys(
             _pbir_custom_packages(report_meta) + _zip_custom_visuals(names))),
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
+        "filters": parse_filters((report_meta.get("filterConfig") or {}).get("filters")),
         "format": "pbir",
     }
     resolve_theme_markers(result)
@@ -1397,6 +1407,8 @@ def extract_model(pbix: Path) -> dict:
     parts = out.get("partitions")
     if isinstance(parts, list):
         for p in parts:
+            if re.match(r"^[HRU]\$", str(p.get("TableName") or "")):
+                continue
             mode = p.get("Mode") if "Mode" in p else p.get("mode")
             modes[str(mode)] += 1
     out["storage_modes"] = dict(modes)   # '1' = DirectQuery in TMSCHEMA
@@ -1405,7 +1417,8 @@ def extract_model(pbix: Path) -> dict:
     table_modes: dict[str, str] = {}
     for p in parts if isinstance(parts, list) else []:
         t, mode = p.get("TableName"), p.get("Mode") if "Mode" in p else p.get("mode")
-        if t and not _AUTO_DATE_TABLE_RE.match(t) and mode in mode_names:
+        # H$/R$/U$ entries are the engine's internal column-hierarchy/relationship storage, not tables
+        if t and not _AUTO_DATE_TABLE_RE.match(t) and not re.match(r"^[HRU]\$", t) and mode in mode_names:
             table_modes[t] = mode_names[mode]
     out["table_modes"] = table_modes
     try:

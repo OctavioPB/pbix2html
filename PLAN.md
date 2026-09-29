@@ -127,6 +127,21 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - `FILTER(T, T[c] = MIN(T[c]))` (selection-dependent "top level") is now drafted as a DISTINCT-key LEFT JOIN; unverified against real numbers. `MIN/MAX(T[c])` + `VAR` + month-comparison measures are drafted for card context (mapping 44 → 49 of 54). Grouped visuals evaluate MIN/MAX per group (calendar-column category, own-fact category, or whole selection when the category doesn't filter T); `Tooltips`-role fields are no longer drafted. A measure over several fact tables (`Headcount Ending`) is split into one derived table per fact (`multi_fact`). TestReport3 mapping: 53 of 54; only `Open Reqs`+`Workday codes` (no relationship) is left.
 - Not yet verified: 100%-stacked charts in the renderer, MobileState (ignored), storage-mode info in the mapping report.
 
+## Findings from a fourth real report, Import model (2026-09-29)
+
+- **Filter-pane filters were never applied** to the drafted SQL (only listed in the yaml). All four real
+  reports carry report/page/visual filters with real conditions (In, Not In, comparisons, Top N).
+  Now applied as WHERE predicates (see skill `dax-to-teradata-sql`); the mapping report lists what
+  isn't (aggregate/measure filters, relative date, multi-hop). Numbers of earlier drafts were
+  therefore not comparable with Power BI; re-validate.
+- All-Import model (34 partitions), every table from a Teradata custom query or inline data; calculated
+  calendar `CALENDAR("01/01/2022", TODAY())` (text date). 38 of 42 data visuals drafted; the rest point to
+  a table missing from the model (`Elastic Usage`) or aggregate a dimension next to a fact (fan-out guard).
+- `model.json → table_modes` was polluted by engine-internal partitions (`H$…`, `R$…`, `U$…`): filtered.
+- Drill-through pages (`howCreated` 5 filters): listed in the mapping report; navigation with a value
+  from the source page is not modelled.
+- `pbix2html mapping` now previews the table map from Power Query without saving it.
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`

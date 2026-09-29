@@ -989,6 +989,14 @@ def read_table_map(name: str) -> tuple[dict[str, str], str | None]:
     return clean, None
 
 
+def preview_table_map(name: str, model: dict) -> dict[str, str]:
+    """`sync_table_map` without saving: what the map would be after detection (read-only callers)."""
+    existing, _ = read_table_map(name)
+    detected = {t: info["sql"] for t, info in detect_calendar_tables(model).items()}
+    detected.update(detect_table_map_from_power_query(model))
+    return {**{k: v for k, v in detected.items() if k not in existing}, **existing}
+
+
 def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
     """The report's table map with every table auto-detected from Power Query added and saved
     (`detect_table_map_from_power_query`). Entries already there, i.e. mapped by hand, are never
@@ -1716,6 +1724,216 @@ def _filter_edges(relationships: list[dict]) -> list[tuple[str, str, str, str]]:
     return edges
 
 
+_COL = "\u00abCOL\u00bb"          # placeholder for the filtered column while a condition is translated
+_CMP_KIND = {0: "=", 1: ">", 2: ">=", 3: "<", 4: "<="}
+
+
+def _filter_literal(node: Any) -> str | None:
+    """A filter's literal as a SQL literal: numbers as they are, text quoted, `datetime'...'` as a
+    DATE/TIMESTAMP, null as NULL. Booleans (Teradata has none) and anything odd → None."""
+    raw = ((node or {}).get("Literal") or {}).get("Value") if isinstance(node, dict) else None
+    if not isinstance(raw, str):
+        return None
+    t = raw.strip()
+    m = re.fullmatch(r"datetime'(\d{4}-\d{2}-\d{2})(?:T([\d:.]*))?'", t)
+    if m:
+        time = (m.group(2) or "").rstrip("0:.") 
+        return f"DATE '{m.group(1)}'" if not time else f"TIMESTAMP '{m.group(1)} {m.group(2)}'"
+    if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
+        return t                                        # already SQL-quoted ('' is an escaped quote in both)
+    if t.lower() == "null":
+        return "NULL"
+    if re.fullmatch(r"-?\d+L", t):
+        return t[:-1]
+    if re.fullmatch(r"-?\d+(?:\.\d+)?[DM]", t):
+        return t[:-1]
+    return None
+
+
+def _like_pattern(lit: str, prefix: str, suffix: str) -> str | None:
+    if not (lit.startswith("'") and lit.endswith("'")):
+        return None
+    body = lit[1:-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{_COL} LIKE '{prefix}{body}{suffix}' ESCAPE '\\'"
+
+
+def _filter_condition_sql(cond: Any, prop: str) -> str | None:
+    """One filter-pane condition on column `prop` as SQL over `_COL`, or None when it isn't a shape
+    this translates (TopN's subquery, several columns in one In, booleans...). Blanks follow
+    Power BI: a negated condition keeps them."""
+    if not isinstance(cond, dict) or len(cond) != 1:
+        return None
+    kind, body = next(iter(cond.items()))
+
+    def is_col(node: Any) -> bool:
+        return isinstance(node, dict) and (node.get("Column") or {}).get("Property") == prop
+
+    if kind == "In":
+        exprs, rows = body.get("Expressions") or [], body.get("Values") or []
+        if len(exprs) != 1 or not is_col(exprs[0]) or not rows:
+            return None
+        lits = [_filter_literal(r[0]) if isinstance(r, list) and len(r) == 1 else None for r in rows]
+        if any(x is None for x in lits):
+            return None
+        vals = [x for x in lits if x != "NULL"]
+        parts = ([f"{_COL} IN ({', '.join(vals)})"] if vals else []) + ([f"{_COL} IS NULL"] if "NULL" in lits else [])
+        return "(" + " OR ".join(parts) + ")"
+    if kind == "Comparison":
+        op, lit = _CMP_KIND.get(body.get("ComparisonKind")), _filter_literal(body.get("Right"))
+        if op is None or lit is None or not is_col(body.get("Left")):
+            return None
+        return f"{_COL} IS NULL" if lit == "NULL" and op == "=" else f"{_COL} {op} {lit}"
+    if kind in ("And", "Or"):
+        left, right = (_filter_condition_sql(body.get(k), prop) for k in ("Left", "Right"))
+        return f"({left} {kind.upper()} {right})" if left and right else None
+    if kind == "Not":
+        inner = _filter_condition_sql(body.get("Expression"), prop)
+        return f"(NOT ({inner}) OR {_COL} IS NULL)" if inner else None
+    if kind in ("Contains", "StartsWith", "EndsWith") and is_col(body.get("Left")):
+        lit = _filter_literal(body.get("Right"))
+        pre, suf = {"Contains": ("%", "%"), "StartsWith": ("", "%"), "EndsWith": ("%", "")}[kind]
+        return _like_pattern(lit, pre, suf) if lit else None
+    return None
+
+
+_AGG_FUNCTION = {0: "SUM({c})", 1: "AVG({c})", 2: "COUNT(DISTINCT {c})", 3: "MIN({c})", 4: "MAX({c})", 5: "COUNT({c})"}
+
+
+def _topn_sql(f: dict, parameters: dict[str, dict] | None, table_map: dict[str, str] | None,
+              relationships: list[dict] | None) -> tuple[str, str, str, list[str]] | None:
+    """A Top N filter (`Top 1 of T[x] by Sum(T[y])`) as (table, column, SQL over `_COL`, slicer params).
+
+    Power BI keeps the rows whose x is among the N best x values, ranked by an aggregate of y over the
+    rows the report's slicers leave in T; ties are all kept (DAX TOPN). Built as
+    `_COL IN (SELECT k FROM (SELECT x AS k, AGG(y) AS a FROM T WHERE <slicers on T> GROUP BY 1) t
+    QUALIFY RANK() OVER (ORDER BY a) <= N)`. Direction 1 = ascending, 2 = descending; aggregate
+    codes per `_AGG_FUNCTION`. Anything else in the subquery → None. UNVERIFIED against Power BI."""
+    definition, target = f.get("definition"), f.get("target") or ""
+    if not isinstance(definition, dict) or "." not in target or table_map is None:
+        return None
+    table, prop = target.split(".", 1)
+    try:
+        sub = next(x for x in definition.get("From") or [] if (x.get("Expression") or {}).get("Subquery"))
+        q = sub["Expression"]["Subquery"]["Query"]
+        top = int(q["Top"])
+        x = q["Select"][0]["Column"]["Property"]
+        order = q["OrderBy"][0]
+        agg = order["Expression"]["Aggregation"]
+        y = agg["Expression"]["Column"]["Property"]
+        template = _AGG_FUNCTION[agg["Function"]]
+        direction = {1: "ASC", 2: "DESC"}[order["Direction"]]
+        entity = q["From"][0]["Entity"]
+        cond = definition["Where"][0]["Condition"]["In"]
+        outer = cond["Expressions"][0]["Column"]["Property"]
+    except (KeyError, IndexError, TypeError, ValueError, StopIteration):
+        return None
+    if entity != table or x != prop or outer != prop or top < 1 or table not in table_map:
+        return None
+    try:
+        source = validate_read_only_sql(table_map[table])
+    except ValueError:
+        return None
+    where, used = _draft_where(parameters or {}, {table: "h"}, table_map, relationships or [])
+    w = "\nWHERE " + " AND ".join(where) if where else ""
+    inner = (f"SELECT h.{_sql_col(x)} AS k, {template.format(c='h.' + _sql_col(y))} AS a\n"
+             f"FROM {_subquery(source, 'h')}{w}\nGROUP BY 1")
+    return (table, prop,
+            f"{_COL} IN (SELECT k FROM (\n{inner}\n) AS t QUALIFY RANK() OVER (ORDER BY a {direction}) <= {top})",
+            used)
+
+
+def filter_sql(f: dict, parameters: dict[str, dict] | None = None, table_map: dict[str, str] | None = None,
+               relationships: list[dict] | None = None) -> tuple[str, str, str, list[str]] | None:
+    """(table, column, SQL over `_COL`) for a filter-pane filter that constrains rows, or None:
+    it has no condition (a field merely listed in the pane), it targets a measure, or it isn't a
+    supported shape (see `_filter_condition_sql`). Every `Where` entry is ANDed."""
+    if f.get("type") == "TopN":
+        return _topn_sql(f, parameters, table_map, relationships)
+    target, definition = f.get("target") or "", f.get("definition")
+    if (not isinstance(definition, dict) or "." not in target or f.get("aggregation") is not None
+            or f.get("type") not in ("Categorical", "Advanced")):
+        return None
+    table, prop = target.split(".", 1)
+    parts = [_filter_condition_sql((w or {}).get("Condition"), prop) for w in definition.get("Where") or []]
+    if not parts or any(p is None for p in parts):
+        return None
+    return table, prop, " AND ".join(parts), []
+
+
+def effective_filters(layout: dict, page: dict | None, v: dict | None) -> list[dict]:
+    """The filter-pane filters that apply to one visual: report level, its page, the visual itself.
+    A drill-through filter (`howCreated` 5) is left out: its saved value is only the last one the
+    author tried; the real value comes from the page the user drilled through from, which the HTML
+    doesn't model yet (the mapping report lists those pages)."""
+    return [f for f in [*(layout.get("filters") or []), *((page or {}).get("filters") or []),
+                        *((v or {}).get("filters") or [])]
+            if f.get("definition") and f.get("how_created") != 5]      # 5: drill-through, see below
+
+
+def unapplied_filters(filters: list[dict], tables_read: set[str] | None, table_map: dict[str, str],
+                      relationships: list[dict], parameters: dict[str, dict] | None = None) -> list[str]:
+    """Filters that constrain the visual in Power BI but can't be added to its query, as
+    `Table.column (Type)`. A filter on a table the visual reads is a plain predicate; on another
+    table it needs a direct relationship into the visual and that table's source query. A filter on
+    a table no filter can reach (no relationship path) has no effect in Power BI either, so it is
+    not reported."""
+    edges = _filter_edges(relationships)
+    read = tables_read or set()
+    out = []
+    for f in filters or []:
+        t = (f.get("target") or "").split(".", 1)[0]
+        placeable = filter_sql(f, parameters, table_map, relationships) is not None
+        direct = t in read or (t in table_map and any(src == t and dst in read for src, _, dst, _ in edges))
+        reach, frontier = {t}, [t]
+        while frontier:                                   # can a filter on t reach what the visual reads?
+            cur = frontier.pop()
+            for src, _, dst, _ in edges:
+                if src == cur and dst not in reach:
+                    reach.add(dst)
+                    frontier.append(dst)
+        affects = bool(reach & read)
+        if affects and not (placeable and direct):
+            agg = ", on an aggregate" if f.get("aggregation") is not None else ""
+            out.append(f"{f.get('target')} ({f.get('type')}{agg})")
+    return out
+
+
+def _filter_where(filters: list[dict] | None, aliases: dict[str, str], table_map: dict[str, str],
+                  relationships: list[dict], parameters: dict[str, dict] | None = None
+                  ) -> tuple[list[str], list[str]]:
+    """WHERE predicates for the filter-pane filters (and the slicer parameters they read): on a column
+    of a table the query reads → a plain predicate; on another table → a semi-join through a
+    relationship, like a slicer. Filters that can't be placed are skipped (`unapplied_filters`
+    reports them). The values come from the report file itself (not from an end user), quoted by
+    `_filter_literal`."""
+    edges = _filter_edges(relationships or [])
+    out: list[str] = []
+    used: list[str] = []
+    for f in filters or []:
+        parsed = filter_sql(f, parameters, table_map, relationships)
+        if parsed is None:
+            continue
+        table, prop, cond, ps = parsed
+        if table in aliases:
+            out.append(cond.replace(_COL, f"{aliases[table]}.{_sql_col(prop)}"))
+            used += [p for p in ps if p not in used]
+            continue
+        if table not in table_map:
+            continue
+        try:
+            source = validate_read_only_sql(table_map[table])
+        except ValueError:
+            continue
+        for src, scol, dst, dcol in edges:
+            if src == table and dst in aliases:
+                inner = cond.replace(_COL, f"{_sql_alias(table)}.{_sql_col(prop)}")
+                out.append(f"{aliases[dst]}.{_sql_col(dcol)} IN (SELECT {_sql_col(scol)} FROM "
+                           f"{_subquery(source, _sql_alias(table))} WHERE {inner})")
+                used += [p for p in ps if p not in used]
+                break
+    return out, used
+
+
 def _param_predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str:
     """`col IN (:p)` for a value slicer; `col >= / <= CAST(:p AS DATE)` for a range bound,
     wrapped as optional (so `bind` drops it when that bound is empty) unless `wrap` is off
@@ -1737,7 +1955,7 @@ _CTX_RE = re.compile(r"\{CTX:(MIN|MAX)\|([^|}]+)\|([^}]+)\}")
 
 def _expand_ctxs(fields: list["_Field"], aliases: dict[str, str], sources: list[str], where_parts: list[str],
                  table_map: dict[str, str], parameters: dict[str, dict], categories: list["_Field"],
-                 relationships: list[dict]
+                 relationships: list[dict], filters: list[dict] | None = None
                  ) -> tuple[list[str], dict[str, str], list[str], list[str]] | None:
     """`MIN/MAX(T[c])` as a scalar: the value over the rows of T the report's filters leave, and, in
     a visual grouped by categories, over the rows of the current group. Returns (joins, {marker: sql},
@@ -1761,7 +1979,7 @@ def _expand_ctxs(fields: list["_Field"], aliases: dict[str, str], sources: list[
 
     def own_where(table: str) -> list[str] | None:
         """Predicates leaving T's rows as the slicers do (direct, or through a relationship)."""
-        parts, ps = _draft_where(parameters, {table: "ctx"}, table_map, relationships)
+        parts, ps = _draft_where(parameters, {table: "ctx"}, table_map, relationships, filters)
         used.extend(p for p in ps if p not in used)
         return parts
 
@@ -1852,7 +2070,8 @@ def _expand_selmins(fields: list["_Field"], aliases: dict[str, str], table_map: 
 
 def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
                  table_map: dict[str, str] | None = None,
-                 relationships: list[dict] | None = None) -> tuple[list[str], list[str]]:
+                 relationships: list[dict] | None = None,
+                 filters: list[dict] | None = None) -> tuple[list[str], list[str]]:
     """Slicer parameters that apply to the tables this visual reads.
 
     A slicer on a table the visual reads becomes `alias.col IN (:p)`. A slicer on a table it
@@ -1896,12 +2115,15 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
                 f"{_subquery(source, _sql_alias(ptable))} WHERE {inner}) /*fi {pname}*/")
             if pname not in params_used:
                 params_used.append(pname)
+    fw, fp = _filter_where(filters, aliases, table_map, relationships or [], parameters)
+    where_parts += fw
+    params_used += [p for p in fp if p not in params_used]
     return where_parts, params_used
 
 
 def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, sort: list[dict] | None, *,
                expand_fn, table_map: dict[str, str], relationships: list[dict],
-               parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
+               parameters: dict[str, dict], filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
     """One measure that aggregates several fact tables (`IF(cond, SUM(A[x]), CALCULATE(SUM(B[x]), ...))`).
 
     Power BI evaluates each aggregate on its own table for the current group; one SELECT over a join
@@ -1939,7 +2161,7 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
         if built is None:
             return None
         srcs, als = built
-        where, ps = _draft_where(parameters, als, table_map, relationships)
+        where, ps = _draft_where(parameters, als, table_map, relationships, filters)
         used += [p for p in ps if p not in used]
         pfs = [_Field("Y", True, f.label, f.out_name, text, {table}, f.key, set(),
                       present(f.ctxs, text, lambda c: f"{{CTX:{c[0]}|{c[1]}|{c[2]}}}"))
@@ -1965,7 +2187,7 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
         if built is None:
             return None
         msrcs, mals = built
-        mwhere, ps = _draft_where(parameters, mals, table_map, relationships)
+        mwhere, ps = _draft_where(parameters, mals, table_map, relationships, filters)
         used += [p for p in ps if p not in used]
         msrcs = msrcs + [f"LEFT JOIN {_subquery(sql, a)} ON {null_safe(a)}" for a, sql in derived]
     else:
@@ -1992,7 +2214,8 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
 
 
 def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
-                       relationships: list[dict], parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
+                       relationships: list[dict], parameters: dict[str, dict],
+                       filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
     """Auto-draft one visual's SQL, or None to leave it a TODO.
 
     Covers card, kpi, gauge, pie, bar/column/line, table/matrix/multicard, returning
@@ -2029,7 +2252,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             return srcs, [], []
         done = _expand_selmins(fs, als, table_map, relationships, parameters)
         ctx = _expand_ctxs(fs, als, srcs, arm_where if arm_where is not None else where_parts,
-                           table_map, parameters, categories if cats is None else cats, relationships)
+                           table_map, parameters, categories if cats is None else cats, relationships, filters)
         if done is None or ctx is None:
             return None
         joins, repl, used = done
@@ -2050,14 +2273,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     if len(value_tables(values)) > 1 and not (kind in _CHART_KINDS and len(values) > 1
                                               and all(len(f.tables) == 1 for f in values)):
         return multi_fact(values, categories, kind, sort, expand_fn=expand,
-                          table_map=table_map, relationships=relationships, parameters=parameters)
+                          table_map=table_map, relationships=relationships, parameters=parameters,
+                          filters=filters)
 
     tables_needed = list(dict.fromkeys(t for f in fields for t in f.tables))
     built = _draft_from_clause(tables_needed, table_map, relationships)
     if built is None:
         return None
     sources, aliases = built
-    where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
+    where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships, filters)
 
     # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
     single_extra: list[str] = []
@@ -2123,7 +2347,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             if arm_built is None:
                 return None
             arm_sources, arm_aliases = arm_built
-            arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships)
+            arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships, filters)
             all_params += [p for p in arm_params if p not in all_params]
             arm_field = replace(f)
             done = expand([arm_field], arm_sources, arm_aliases, arm_where, categories)
@@ -2154,7 +2378,8 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
 
 
 def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
-                    relationships: list[dict], model_tables: set[str], parameters: dict) -> list[str]:
+                    relationships: list[dict], model_tables: set[str], parameters: dict,
+                    filters: list[dict] | None = None) -> list[str]:
     """Why a data visual can (or cannot) be drafted into SQL, as reason codes: `ok`, or one or
     more of `kind:<kind>` (no drafter for it), `unknown_table:<t>` (visual points at a table the
     model doesn't have: renamed/deleted), `no_source:<t>` (no Teradata query for that table, e.g.
@@ -2181,7 +2406,7 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
         return sorted(set(reasons))
     if not fields:
         return ["shape"]
-    if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters):
+    if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters, filters):
         return ["ok"]
     tables = list(dict.fromkeys(t for f in fields for t in f.tables))
     missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins} | {c[1] for f in fields for c in f.ctxs})] if t not in table_map]
@@ -2205,6 +2430,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
     calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []
                    if not _AUTO_DATE_TABLE_RE.match(t.get("TableName") or "")}
     visuals: dict[str, list[str]] = {}
+    not_applied: dict[str, list[str]] = {}
     n_data = 0
     for page in layout["pages"]:
         for v in page["visuals"]:
@@ -2215,9 +2441,15 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
                 continue
             n_data += 1
             label = f"{page.get('display_name')} / {v.get('title') or v['type']}"
-            for reason in diagnose_visual(v, kind, measures, table_map, rels, set(tables),
-                                          _params_for_page(params, page.get("display_name"))):
+            vfilters = effective_filters(layout, page, v)
+            reasons = diagnose_visual(v, kind, measures, table_map, rels, set(tables),
+                                      _params_for_page(params, page.get("display_name")), vfilters)
+            for reason in reasons:
                 visuals.setdefault(reason, []).append(label)
+            if "ok" in reasons:
+                for f in unapplied_filters(vfilters, set(_entities_used(v)), table_map, rels,
+                                        _params_for_page(params, page.get("display_name"))):
+                    not_applied.setdefault(f, []).append(label)
     # hidden pages: reachable ones (a visible page's button navigates to them, transitively) are
     # rendered; the rest are left out (tooltip/drillthrough pages nobody links to)
     pages = layout["pages"]
@@ -2234,6 +2466,10 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
     hidden_pages = {"reachable": [p.get("display_name") for p in pages if p.get("hidden") and id(p) in seen],
                     "left_out": [p.get("display_name") for p in pages if p.get("hidden") and id(p) not in seen]}
     table_modes = {t: m for t, m in (model.get("table_modes") or {}).items() if t in tables}
+    drillthrough = {p.get("display_name"): [f"{f.get('target')}" + (" (saved value ignored)" if f.get("definition") else "")
+                                            for f in p.get("filters") or [] if f.get("how_created") == 5]
+                    for p in pages}
+    drillthrough = {k: v for k, v in drillthrough.items() if v}
     measure_names = {n for (_, n) in measures}
     composite = sorted(n for (_, n), dax in measures.items()
                        if any(ref in measure_names for ref in re.findall(r"(?<![\w'\]])\[([^\]]+)\]", dax or "")))
@@ -2248,6 +2484,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
                                    if not _AUTO_DATE_TABLE_RE.match(c.get("TableName") or "")],
             "relationships": len(rels),
             "storage_modes": table_modes,
+            "drillthrough_pages": drillthrough,
             "hidden_pages": hidden_pages,
             "many_to_many": [f"{e[0]} → {e[2]}" for r in rels if r.get("Cardinality") == "M:M"
                              and (e := _rel_ends(r))],
@@ -2260,7 +2497,8 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             "date_key_hint": sorted(_tables_with_date_key(model)),
         },
         "visuals": {"data_visuals": n_data, "drafted": len(visuals.get("ok", [])),
-                    "by_reason": {k: v for k, v in sorted(visuals.items()) if k != "ok"}},
+                    "by_reason": {k: v for k, v in sorted(visuals.items()) if k != "ok"},
+                    "filters_not_applied": {k: sorted(set(v)) for k, v in sorted(not_applied.items())}},
     }
 
 
@@ -2276,6 +2514,13 @@ def render_mapping_report(rep: dict) -> str:
         L += [f"- `{t}` = `{e}`" for t, e in m["calculated_tables"].items()]
         if m["calculated_columns"]:
             L += ["- calculated columns: " + ", ".join(f"`{c}`" for c in m["calculated_columns"])]
+        L += [""]
+    if m.get("drillthrough_pages"):
+        L += ["## Drill-through pages", "",
+              "Pages with drill-through fields (`howCreated` 5, taken from Power BI's enum: verify). Drilling through from another page passes the value of the "
+              "field below. The HTML has no such navigation yet, so these pages render for all values "
+              "(a saved value in the file is not applied: it was just the last one the author tried).", ""]
+        L += [f"- `{p}`: " + ", ".join(f"`{x}`" for x in fs) for p, fs in m["drillthrough_pages"].items()]
         L += [""]
     kinds = sorted(set(m["storage_modes"].values()))
     if len(kinds) > 1:
@@ -2315,6 +2560,14 @@ def render_mapping_report(rep: dict) -> str:
         L += ["## Why visuals were not drafted", ""]
         for reason, labels in v["by_reason"].items():
             L += [f"- `{reason}` × {len(labels)}: " + "; ".join(labels[:4]) + (" ..." if len(labels) > 4 else "")]
+        L += [""]
+    if v.get("filters_not_applied"):
+        L += ["## Filter-pane filters not applied to drafted SQL", "",
+              "These filters constrain visuals in Power BI but the draft can't express them (TopN, "
+              "relative date, an unsupported shape) or has no path to their table: the numbers will "
+              "differ until they are added by hand.", ""]
+        for f, labels in v["filters_not_applied"].items():
+            L += [f"- `{f}` × {len(labels)}: " + "; ".join(labels[:3]) + (" ..." if len(labels) > 3 else "")]
         L += [""]
     return "\n".join(L)
 
@@ -2377,11 +2630,17 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             notes = []
             if v.get("is_custom"):
                 notes.append(f"Custom visual '{v['type']}': pick a standard kind and document the differences.")
+            vfilters = effective_filters(layout, page, v)
             draft = _draft_visual_sql(v, kind, measures, table_map, relationships,
-                                      _params_for_page(parameters, page["display_name"]))
+                                      _params_for_page(parameters, page["display_name"]), vfilters)
             if draft:
                 entry["sql"], entry["params"] = draft
                 notes.append(AUTOFILL_NOTE)
+                skipped = unapplied_filters(vfilters, set(_entities_used(v)), table_map, relationships,
+                                            _params_for_page(parameters, page["display_name"]))
+                if skipped:
+                    notes.append("Filter-pane filters NOT applied to this SQL (unsupported shape, e.g. TopN, "
+                                 "or no path to the table): " + ", ".join(skipped) + ".")
             else:
                 entry["sql"] = _sql_stub(_entities_used(v), table_map)
                 entry["params"] = []
@@ -2594,6 +2853,7 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
 
     visuals = dict(raw.get("visuals") or {})
     by_id = {v["id"]: v for page in layout["pages"] for v in page["visuals"]}
+    page_of = {v["id"]: page for page in layout["pages"] for v in page["visuals"]}
     filled, already, still_todo = [], [], []
 
     for vid, entry in visuals.items():
@@ -2606,7 +2866,8 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
             continue
         source = by_id.get(vid)
         draft = (_draft_visual_sql(source, kind, measures, table_map, relationships,
-                                   _params_for_page(parameters, entry.get("page")))
+                                   _params_for_page(parameters, entry.get("page")),
+                                   effective_filters(layout, page_of.get(vid), source))
                  if source else None)
         if draft is None:
             still_todo.append(vid)

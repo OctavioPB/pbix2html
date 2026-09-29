@@ -61,7 +61,7 @@ implies `JOIN region r ON r.id = v.region_id` per that relationship.
 Each slicer in the layout becomes a yaml parameter (`parameters:`), and every SQL that
 uses it carries `WHERE col = ?` with the name in `params: [year]`. A multi-select slicer
 is modeled as a list and expands to `IN (?,?,?)` in `query.py`. Page/visual filters with
-`isLockedInViewMode` are written as fixed values in the SQL, not as a parameter.
+`isLockedInViewMode` are written as fixed values in the SQL, not as a parameter (see *Filter-pane filters* below).
 
 ## Column contract
 
@@ -140,3 +140,21 @@ slicers reaching it), and the expression is evaluated on a query whose FROM is j
 Left manual: an aggregate that filters on another table, a `Promotions-Slicer`-style marker mixed in,
 table/matrix visuals, several such values in one visual. Every fact table must relate to every category table.
 Note the category domain is the category table's rows (after slicers on it), not "values that have facts".
+
+## Filter-pane filters (report / page / visual level)
+
+Filters with a condition are added to every drafted query as fixed WHERE predicates
+(`semantic.effective_filters`, `filter_sql`, `_filter_where`): `In` / `Not In` (blanks kept when negated,
+as Power BI does), comparisons (`=`, `<>`, `>`, `>=`, `<`, `<=`, `IS NULL`), `And`/`Or` ranges,
+`Contains`/`StartsWith`/`EndsWith` (`LIKE` with `ESCAPE`), and **Top N** (`col IN (SELECT k FROM
+(… GROUP BY) QUALIFY RANK() OVER (ORDER BY agg dir) <= N)`, ranked over the rows the slicers leave; ties
+kept). A filter on a table the visual doesn't read is a semi-join through a direct relationship (like
+a slicer); on a table no relationship reaches it has no effect, as in Power BI. Report + page + visual
+filters all apply. Values come from the .pbix and are quoted by `_filter_literal`.
+
+Not applied (listed in the mapping report and in the visual's `notes`): filters on an aggregate
+(`Sum(T.c) < 100`, needs HAVING), on a measure, booleans, relative-date, multi-column `In`, and filters
+through more than one relationship hop. Drill-through filters (`howCreated` 5) are skipped on purpose:
+their saved value is only the last one the author tried, and the HTML has no drill-through navigation yet.
+Unverified against Power BI: the Top N ranking direction/tie handling and the aggregate-function codes
+(0 Sum, 1 Avg, 2 Count distinct, 3 Min, 4 Max, 5 Count), taken from Power BI's enums.

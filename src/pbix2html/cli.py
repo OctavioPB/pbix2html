@@ -62,7 +62,7 @@ def cmd_scaffold(args):
 
 def cmd_mapping(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
-    table_map, _ = semantic.read_table_map(layout["report"])
+    table_map = semantic.preview_table_map(layout["report"], model)
     rep = semantic.mapping_report(layout, model, table_map)
     path = Path(args.out) / layout["report"] / "mapping_report.md"
     path.write_text(semantic.render_mapping_report(rep), encoding="utf-8")
