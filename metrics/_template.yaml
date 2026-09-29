@@ -25,7 +25,7 @@ visuals:
     fields:                         # documentation only (filled in by scaffold)
       - "Values: Sales.Net Revenue  -- DAX: SUM(Sales[Amount])"
     sql: |
-      SELECT SUM(v.amount) AS value
+      SELECT SUM(v.amount) AS "value"
       FROM sec.v_sales v
       JOIN dim_calendar c ON c.date = v.date
       WHERE c.year = :year
@@ -39,7 +39,7 @@ visuals:
     kind: bar
     title: Margin by Region
     sql: |
-      SELECT r.name AS category, SUM(v.margin) / NULLIFZERO(SUM(v.amount)) AS value
+      SELECT r.name AS category, SUM(v.margin) / NULLIFZERO(SUM(v.amount)) AS "value"
       FROM sec.v_sales v JOIN dim_region r ON r.id = v.region_id
       JOIN dim_calendar c ON c.date = v.date
       WHERE c.year = :year

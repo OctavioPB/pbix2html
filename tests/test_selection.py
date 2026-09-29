@@ -1,6 +1,7 @@
 """Selection-dependent DAX: FILTER(T, T[c] = MIN(T[c])) (a hierarchy slicer's top level)."""
 import pytest
 
+from pbix2html import query
 from pbix2html import semantic as S
 from pbix2html.query import bind
 
@@ -192,7 +193,7 @@ def mf(kind, categories=()):
 def test_measure_over_two_fact_tables_is_split_into_one_derived_table_per_table():
     sql, params = mf("card")
     assert sql.startswith("SELECT (CASE WHEN EXTRACT(MONTH FROM ctx1.v) = EXTRACT(MONTH FROM CURRENT_DATE) "
-                          "THEN arm1.a0 ELSE arm2.a1 END) AS value")
+                          "THEN arm1.a0 ELSE arm2.a1 END) AS \"value\"")
     assert "CROSS JOIN" in sql and sql.count("SUM(") == 2
     arm1 = sql.split(") AS arm1", 1)[0]
     assert "db.b" not in arm1 and "db.a" in arm1            # each arm reads only its own fact
@@ -240,3 +241,25 @@ def test_now_keeps_the_time_and_unsupported_formats_stay_manual():
     assert _translate("NOW()") == "CURRENT_TIMESTAMP(0)" or "CURRENT_TIMESTAMP(0)" in (_translate("MAX(T[ts]) - NOW()") or "")
     assert _translate('FORMAT(MAX(T[ts]), "hh:mm AM/PM")') is None          # 12-hour clock: not translated
     assert _translate("TIME(a, 0, 0)") is None
+
+
+# ---- `value` is a reserved word on Teradata (error 3707 on `AS value`) -----------------------------
+
+def test_drafted_sql_quotes_the_value_alias_and_legacy_sql_is_rewritten_at_run_time():
+    sql, _ = card("Top")
+    assert 'AS "value"' in sql and "AS value" not in sql
+    q = S.quote_reserved_aliases
+    assert q("SELECT SUM(x) AS value FROM t") == 'SELECT SUM(x) AS "value" FROM t'
+    assert q("SELECT a AS Value, b AS MAX FROM t") == 'SELECT a AS "value", b AS "max" FROM t'
+    assert q("SELECT 'x AS value' AS s, y AS category FROM t -- AS value") == "SELECT 'x AS value' AS s, y AS category FROM t -- AS value"
+    assert q('SELECT a AS "value" FROM t') == 'SELECT a AS "value" FROM t'          # already quoted
+    assert q("SELECT CAST(a AS DATE), b AS values2 FROM t") == "SELECT CAST(a AS DATE), b AS values2 FROM t"
+
+
+def test_teradata_backend_sends_the_quoted_alias(monkeypatch):
+    from tests.test_backend_pool import FakeCon
+    log = []
+    b = query.TeradataBackend()
+    monkeypatch.setattr(b, "_connect", lambda: FakeCon(log))
+    b.execute("SELECT 1 AS value", [], None)
+    assert log[-1][2] == 'SELECT 1 AS "value"'

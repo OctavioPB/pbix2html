@@ -144,4 +144,6 @@ def test_slicer_options_endpoint(tmp_path, monkeypatch):
     assert be.calls[-1][0].startswith("SELECT DISTINCT org AS level1")
     # a slicer with no options query is reported as skipped (its widget takes typed values)
     assert c.get("/reports/S/slicers/s2", headers={"X-Authenticated-User": "u"}).json()["skipped"] is True
-    assert c.get("/reports/S/slicers/nope", headers={"X-Authenticated-User": "u"}).status_code == 404
+    # an id the yaml doesn't list (a yaml older than the HTML): skipped with a reason, not "HTTP 404"
+    r = c.get("/reports/S/slicers/nope", headers={"X-Authenticated-User": "u"})
+    assert r.status_code == 200 and r.json()["skipped"] is True and "slicers:" in r.json()["note"]

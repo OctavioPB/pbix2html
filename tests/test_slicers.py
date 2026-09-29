@@ -178,3 +178,17 @@ def test_text_literals_unescape_doubled_quotes_and_z_index_is_an_integer(fake_pb
     layout["pages"][0]["visuals"][0]["z"] = 3000.0
     html = render_html(layout, semantic.load("Executive_Dashboard"), {"year": 2025}, {}, mode="snapshot")
     assert "z-index:3000" in html and "3000.0" not in html
+
+
+def test_autofill_adds_the_slicers_section_an_old_yaml_lacks(fake_pbix):
+    layout = ex.extract_layout(fake_pbix)
+    layout["pages"][0]["visuals"].append({
+        "id": "sl1", "type": "slicer", "x": 0, "y": 0, "width": 100, "height": 40, "z": 0, "title": "Year",
+        "projections": {"Values": ["Calendar.Year"]}, "filters": [], "groups": [], "is_group": False,
+        "slicer": {"mode": "dropdown", "fields": ["Calendar.Year"], "single": False, "select_all": True,
+                   "initial": {}, "style": {}}})
+    old = {"report": "R", "parameters": {}, "visuals": {}}          # no `slicers:`, as before ADR-006
+    out = semantic.autofill(old, layout, {"tables": ["Calendar"]}, {})
+    assert "sl1" in out["slicers_added"] and "sl1" in out["raw"]["slicers"]
+    again = semantic.autofill(out["raw"], layout, {"tables": ["Calendar"]}, {})
+    assert again["slicers_added"] == []                             # never touches an existing entry
