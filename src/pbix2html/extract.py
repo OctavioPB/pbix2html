@@ -107,7 +107,10 @@ def extract_textbox_text(objects: dict) -> str | None:
         runs = []
         for run in para.get("textRuns") or []:
             value = run.get("value") or ""
-            if not value:
+            # A run bound to a field/measure carries a dict (propertyIdentifier/selector)
+            # instead of literal text; there's nothing static to render, so skip it
+            # rather than losing the whole textbox (seen in a real report).
+            if not value or not isinstance(value, str):
                 continue
             style = run.get("textStyle") or {}
             css = []
@@ -450,7 +453,8 @@ def _parse_visual(vc: dict) -> dict:
     if group is not None:
         visual.update({"type": "__group__", "is_group": True, "is_custom": False,
                        "title": group.get("displayName"), "projections": {}, "fields": [],
-                       "text": None, "image_ref": None})
+                       "text": None, "image_ref": None, "hidden": False, "filters": [],
+                       "has_drill_other_visuals": False, "objects_keys": []})
         return visual
 
     sv = sv or {}
@@ -559,7 +563,8 @@ def extract_layout(pbix: Path) -> dict:
             "layout_version": (loads_maybe(layout.get("config", "{}")) or {}).get("version"),
             "has_embedded_datamodel": has_datamodel,
             "theme": theme,
-            "custom_visual_packages": [c for c in custom_packages if c],
+            "custom_visual_packages": list(dict.fromkeys(
+                [c for c in custom_packages if c] + _zip_custom_visuals(names))),
             "pages": [parse_page(s) for s in layout.get("sections", [])],
             "format": "classic",
         }
@@ -693,6 +698,13 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
     }
 
 
+def _zip_custom_visuals(names: list[str]) -> list[str]:
+    """Custom visuals bundled inside the file: `Report/CustomVisuals/<visualType>/...`.
+    Real reports list them here rather than in `resourcePackages`."""
+    return sorted({n.split("/")[2] for n in names
+                   if n.startswith("Report/CustomVisuals/") and n.count("/") >= 3})
+
+
 def _pbir_custom_packages(report_meta: dict) -> list[str]:
     """Custom visual names declared in report.json: `publicCustomVisuals` (AppSource ids)
     plus `resourcePackages` entries of type CustomVisual."""
@@ -722,7 +734,8 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "layout_version": None,
         "has_embedded_datamodel": has_datamodel,
         "theme": theme,
-        "custom_visual_packages": _pbir_custom_packages(report_meta),
+        "custom_visual_packages": list(dict.fromkeys(
+            _pbir_custom_packages(report_meta) + _zip_custom_visuals(names))),
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
         "format": "pbir",
     }

@@ -155,3 +155,34 @@ def test_pbir_filters_hidden_and_custom_visuals(tmp_path):
     assert v["hidden"] is True and v["parent_group"] == "g1"
     assert v["filters"][0]["target"] == "Region.Name"
     assert lay["custom_visual_packages"] == ["Sankey1.0", "Acme"]
+
+
+def test_textbox_with_field_bound_run_is_not_lost():
+    """Real report: a textbox run whose `value` is a dict (field reference)."""
+    from pbix2html.extract import extract_textbox_text
+
+    objs = {"general": [{"properties": {"paragraphs": [{"textRuns": [
+        {"value": "Last Data Available "},
+        {"value": {"propertyIdentifier": {"objectName": "values"}, "selector": {"id": "lu"}}},
+    ]}]}}]}
+    assert extract_textbox_text(objs) == "<p>Last Data Available </p>"
+
+
+def test_classic_group_has_same_keys_and_bundled_custom_visuals(tmp_path):
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    cfg = json.dumps({"name": "g1", "singleVisualGroup": {"displayName": "G"}})
+    layout = {"sections": [{"name": "s", "displayName": "S", "visualContainers": [
+        {"config": cfg, "x": 0, "y": 0, "width": 1, "height": 1}]}], "resourcePackages": []}
+    pbix = tmp_path / "C.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/Layout", json.dumps(layout).encode("utf-16-le"))
+        z.writestr("Report/CustomVisuals/MyViz123/package.json", "{}")
+        z.writestr("Report/CustomVisuals/MyViz123/resources/MyViz123.pbiviz.json", "{}")
+    lay = extract_layout(pbix)
+    g = lay["pages"][0]["visuals"][0]
+    assert g["is_group"] and g["hidden"] is False and g["filters"] == []
+    assert lay["custom_visual_packages"] == ["MyViz123"]
