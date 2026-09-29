@@ -105,7 +105,7 @@ class FakeBackend:
             return self.fixtures[key]
         if self.default is not None:
             return self.default
-        raise KeyError(f"FakeBackend sin fixture para: {key[:80]}")
+        raise KeyError(f"FakeBackend has no fixture for: {key[:80]}")
 
 
 def _safe_ident(s: str) -> str:

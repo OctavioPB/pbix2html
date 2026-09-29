@@ -112,6 +112,23 @@ fields: `dataColors[]`, `background`, `foreground`, `tableAccent`,
 `tmschema_partitions` (`Mode`: 1 = DirectQuery), `tmschema_datasources`, `power_query`.
 `get_table()` will fail or return empty: don't use it.
 
+### If PBIXRay can't open the file (known gap, not yet implemented)
+
+`PBIXRay` raises `NoEmbeddedModelError` on a report with no local model, and then
+`model.json` is just `{"error": ...}` — so `detect_table_map_from_power_query()` has
+nothing to work with and the table mapping falls back to manual entry.
+
+There is a second, independent copy of the Power Query M in the file that would still
+work in that case: the **`DataMashup`** part is a binary envelope wrapping a **zip**,
+whose `Formulas/Section1.m` is the raw M for every query. (Confirmed by reading
+pbi-tools' `Legacy/MashupSerializer.cs` + `MashupParts.cs`, which extract exactly that.)
+
+Not implemented here on purpose: it needs parsing the binary framing around the zip, and
+there's no real `.pbix` in this repo with a `DataMashup` but no `DataModel` to verify
+against — writing that parser against a self-made fixture would only prove it matches
+our own guess at the format. Pick this up when a real file of that shape shows up; it's
+an hour's work with one, and it would make table-map auto-detection work on thin reports.
+
 ## When you find a new structure
 
 1. Isolate the `config` fragment that fails.

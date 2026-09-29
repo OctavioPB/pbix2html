@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a class="link" href="/reports/{{ name }}">&larr; {{ name }}</a></p>
+<h1>Custom theme — {{ name }}</h1>
+<p class="muted">{{ pbix }}</p>
+
+{% if result %}
+<div class="banner {{ 'ok' if result.ok else 'err' }}">
+  <strong>{{ result.title }}</strong><br>{{ result.message }}
+  {% if result.detail %}<ul>{% for d in result.detail %}<li>{{ d }}</li>{% endfor %}</ul>{% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <p class="muted">This overrides the theme extracted from the .pbix when generating HTML — every
+     mode (snapshot, live, hah) picks it up automatically once saved, no flag needed. It only
+     affects colors and font, nothing else (layout, data, and text are untouched).</p>
+  <p class="muted">Many reports' extracted theme is just the <em>name</em> of one of Power BI's
+     built-in themes (e.g. <code>CY18SU07</code>), with no actual color values stored in the
+     .pbix at all — there's nothing to recover automatically in that case. Two ways to fill
+     this in: paste a full theme JSON exported from Power BI Desktop (<code>View → Themes →
+     Customize current theme → Export</code>), or just set the fields below by eye.
+     {% if has_override %}<strong>An override is currently saved</strong> for this report.{% endif %}</p>
+
+  <form method="post" action="/reports/{{ name }}/theme">
+    <label for="dataColors">Chart colors (comma-separated hex, in the order charts should use them)</label>
+    <input type="text" id="dataColors" name="dataColors" placeholder="#D85A30, #1D9E75, #378ADD, #EF9F27"
+           value="{{ theme.get('dataColors', [])|join(', ') if theme.get('dataColors') else '' }}">
+
+    <div class="radios" style="align-items:flex-start; gap:24px">
+      <div>
+        <label for="background">Background</label>
+        <input type="text" id="background" name="background" placeholder="#FFFFFF"
+               value="{{ theme.get('background', '') }}" style="width:140px">
+      </div>
+      <div>
+        <label for="foreground">Text color</label>
+        <input type="text" id="foreground" name="foreground" placeholder="#252423"
+               value="{{ theme.get('foreground', '') }}" style="width:140px">
+      </div>
+      <div>
+        <label for="foregroundNeutralSecondary">Secondary text</label>
+        <input type="text" id="foregroundNeutralSecondary" name="foregroundNeutralSecondary" placeholder="#605E5C"
+               value="{{ theme.get('foregroundNeutralSecondary', '') }}" style="width:140px">
+      </div>
+      <div>
+        <label for="backgroundNeutral">Borders</label>
+        <input type="text" id="backgroundNeutral" name="backgroundNeutral" placeholder="#E1DFDD"
+               value="{{ theme.get('backgroundNeutral', '') }}" style="width:140px">
+      </div>
+    </div>
+
+    <label for="fontFamily">Font family (optional — leave blank to keep the default)</label>
+    <input type="text" id="fontFamily" name="fontFamily" placeholder="e.g. Georgia, serif"
+           value="{{ theme.get('fontFamily', '') }}">
+
+    <div id="preview" style="margin-top:16px; padding:14px; border:1px solid var(--border); border-radius:8px;">
+      <div id="preview-text" style="margin-bottom:10px; font-size:14px;">Sample title text</div>
+      <div id="preview-swatches" style="display:flex; gap:6px;"></div>
+    </div>
+
+    <label for="pasted_json">Or paste a full theme JSON here instead (takes precedence over the fields above)</label>
+    <textarea id="pasted_json" name="pasted_json" rows="4"
+              placeholder='{"name": "Custom", "dataColors": ["#D85A30", "#1D9E75"], "background": "#FFFFFF"}'></textarea>
+
+    <button type="submit">Save theme</button>
+  </form>
+
+  {% if has_override %}
+  <form method="post" action="/reports/{{ name }}/theme/reset"
+        onsubmit="return confirm('Remove the theme override? Conversions will go back to the report\'s extracted theme.');">
+    <button type="submit" class="secondary">Reset to extracted theme</button>
+  </form>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+  var ids = ['dataColors', 'background', 'foreground', 'foregroundNeutralSecondary', 'backgroundNeutral', 'fontFamily'];
+  var text = document.getElementById('preview-text');
+  var swatches = document.getElementById('preview-swatches');
+
+  function refresh() {
+    var bg = document.getElementById('background').value.trim() || '#FFFFFF';
+    var fg = document.getElementById('foreground').value.trim() || '#252423';
+    var font = document.getElementById('fontFamily').value.trim();
+    text.style.background = bg;
+    text.style.color = fg;
+    text.style.padding = '8px 10px';
+    text.style.borderRadius = '4px';
+    text.style.fontFamily = font || "'Segoe UI', system-ui, sans-serif";
+
+    var colors = document.getElementById('dataColors').value.split(',')
+      .map(function (c) { return c.trim(); }).filter(Boolean);
+    swatches.innerHTML = '';
+    colors.forEach(function (c) {
+      var sw = document.createElement('div');
+      sw.style.width = '28px'; sw.style.height = '28px'; sw.style.borderRadius = '4px';
+      sw.style.background = c; sw.style.border = '1px solid var(--border)';
+      swatches.appendChild(sw);
+    });
+  }
+
+  ids.forEach(function (id) {
+    document.getElementById(id).addEventListener('input', refresh);
+  });
+  refresh();
+})();
+</script>
+{% endblock %}

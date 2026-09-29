@@ -1,6 +1,8 @@
 """Live endpoint with a fake backend (no Teradata)."""
+import os
+
 from fastapi.testclient import TestClient
-from pbix2html import serve
+from pbix2html import semantic, serve
 from pbix2html.query import FakeBackend
 
 
@@ -46,9 +48,7 @@ def test_backend_error_still_carries_cors_headers():
 
     serve.app.state.backend = BrokenBackend()
     c = TestClient(serve.app)
-    # A distinct year avoids colliding with another test's cached result under cache/
-    # (query.py's on-disk cache isn't test-isolated — a known separate issue).
-    r = c.get("/reports/Executive_Dashboard/visuals/v1?year=2099",
+    r = c.get("/reports/Executive_Dashboard/visuals/v1?year=2024",
               headers={"X-Authenticated-User": "alice", "Origin": "null"})
     assert r.status_code == 500
     assert r.headers.get("access-control-allow-origin") == "*"
@@ -66,6 +66,31 @@ def test_report_info_endpoint_confirms_report_without_running_a_query():
     assert body["ok"] is True and body["report"] == "Executive_Dashboard"
     assert "v1" in body["visuals"]
     assert c.get("/reports/NoSuchReport").status_code == 404
+
+
+def test_spec_reloads_when_yaml_file_changes_on_disk(tmp_path, monkeypatch):
+    """Regression: `_spec()` used to be a plain `lru_cache` keyed only by report name —
+    once a report's first request loaded it, saving a new sql to `metrics/<Report>.yaml`
+    (e.g. via the panel's edit page, step 2c) while serve.py kept running had no
+    effect until it was restarted by hand, which defeats the entire point of editing
+    everything from the UI without restarting scripts (a visual would look stuck on
+    "No query defined" forever even after being fixed). Reported as: a visual with
+    real, saved sql still showing skipped/no data with serve.py already running."""
+    monkeypatch.setattr(semantic, "METRICS_DIR", tmp_path)
+    serve._spec_cache.clear()
+    yaml_path = tmp_path / "R.yaml"
+    body = ("report: R\nconnection: teradata\ndelivery: snapshot\nparameters: {{}}\n"
+            "roles: {{default: {{proxy_user: null}}}}\nvisuals:\n  v1: {{kind: card, sql: '{sql}', params: []}}\n")
+    yaml_path.write_text(body.format(sql="TODO"), encoding="utf-8")
+    os.utime(yaml_path, (1_700_000_000, 1_700_000_000))
+    spec1 = serve._spec("R")
+    assert not spec1.visuals["v1"].has_data
+
+    yaml_path.write_text(body.format(sql="SELECT 1 AS value"), encoding="utf-8")
+    os.utime(yaml_path, (1_700_000_100, 1_700_000_100))  # distinct mtime, same as a real edit
+    spec2 = serve._spec("R")
+    assert spec2.visuals["v1"].has_data
+    assert spec2.visuals["v1"].sql == "SELECT 1 AS value"
 
 
 def test_missing_yaml_error_names_the_path_it_looked_for():

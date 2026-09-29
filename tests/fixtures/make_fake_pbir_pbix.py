@@ -29,11 +29,21 @@ with zipfile.ZipFile("Dashboard_PBIR.pbix", "w") as z:
                json.dumps({"displayName": "Executive Summary", "width": 1280, "height": 720}))
     z.writestr("Report/definition/pages/page1/visuals/v1/visual.json",
                visual_json("v1", "card", {"Values": ["Sales.Net Revenue"]}, "Revenue"))
+    z.writestr("Report/definition/pages/page1/visuals/v5/visual.json", json.dumps({
+        "position": {"x": 0, "y": 0, "z": 0, "width": 400, "height": 60},
+        "visual": {"visualType": "textbox", "objects": {"general": [{"properties": {"paragraphs": [
+            {"textRuns": [{"value": "Q3 Summary", "textStyle": {"fontWeight": "bold", "color": "#123456"}}]},
+        ]}}]}},
+    }))
     z.writestr("Report/definition/pages/page1/visuals/v2/visual.json",
                visual_json("v2", "clusteredBarChart",
                            {"Category": ["Region.Name"], "Y": ["Sales.Margin %"]}, "Margin by Region"))
     # malformed visual.json: must be skipped, not crash the whole extraction.
     z.writestr("Report/definition/pages/page1/visuals/v3/visual.json", "{not valid json")
+    # group container: PBIR has no "visual" key at all for these, just "visualGroup".
+    z.writestr("Report/definition/pages/page1/visuals/g1/visual.json",
+               json.dumps({"position": {"x": 0, "y": 0, "z": 9000, "width": 1280, "height": 720},
+                           "visualGroup": {"displayName": "Header group", "groupMode": "ScaleMode"}}))
     z.writestr("Report/StaticResources/SharedResources/BaseThemes/CY24SU10.json",
                json.dumps({"name": "CY24SU10", "dataColors": ["#0F2B46", "#C8102E"]}))
     z.writestr("Version", "5.0")

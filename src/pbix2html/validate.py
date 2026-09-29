@@ -89,7 +89,7 @@ def validate_report(spec: ReportSpec, values: dict[str, Any], backend: Backend, 
         elif csv_ref.exists():
             expected = _load_csv(csv_ref)
         if expected is None:
-            results[vid] = {"status": "SKIP", "detail": ["sin reference_sql ni CSV de referencia"]}
+            results[vid] = {"status": "SKIP", "detail": ["no reference_sql and no reference CSV"]}
             continue
         diffs = compare(actual, expected, v.tolerance)
         results[vid] = {"status": "OK" if not diffs else "DIFF", "detail": diffs[:50]}

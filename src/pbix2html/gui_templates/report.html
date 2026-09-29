@@ -4,11 +4,33 @@
 <h1>{{ name }}</h1>
 <p class="muted">{{ pbix }}</p>
 
+{% if readiness %}
+<div class="card" style="padding:14px 18px">
+  <strong>{{ readiness.ready }} of {{ readiness.needs_sql }} visuals ready</strong>
+  <span class="muted">({{ readiness.percent }}%)</span>
+  <div style="height:8px;background:var(--border);border-radius:4px;margin:8px 0 10px;overflow:hidden">
+    <div style="height:100%;width:{{ readiness.percent }}%;background:var(--ok, #2e7d32)"></div>
+  </div>
+  <p class="muted" style="margin:0">
+    {% if readiness.todo %}<strong>{{ readiness.todo }}</strong> still need SQL written by hand — that part
+      needs someone who writes Teradata SQL.{% else %}Every visual that needs a query has one.{% endif %}
+    {% if readiness.drafted %} <strong>{{ readiness.drafted }}</strong> were drafted automatically and
+      haven't been reviewed yet.{% endif %}
+    {% if readiness.decorative %} {{ readiness.decorative }} more are text/images and need no query.{% endif %}
+  </p>
+</div>
+{% endif %}
+
 {% if result %}
 <div class="banner {{ 'ok' if result.ok else 'err' }}">
   <strong>{{ result.title }}</strong><br>{{ result.message }}
   {% if result.detail %}<ul>{% for d in result.detail %}<li>{{ d }}</li>{% endfor %}</ul>{% endif %}
-  {% if result.html_link %}<div><a class="btn" href="{{ result.html_link }}" target="_blank">Open the generated HTML</a></div>{% endif %}
+  {% if result.html_link %}
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
+    <a class="btn" href="{{ result.html_link }}" target="_blank">Open the generated HTML</a>
+    <a class="btn secondary" href="{{ result.html_link }}?download=1">Download the file</a>
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 
@@ -23,6 +45,18 @@
   <form method="post" action="/reports/{{ name }}/extract">
     <button type="submit">Extract</button>
   </form>
+
+  {% if has_extract %}
+  <p class="muted" style="margin-top:14px">Download what it found — the measures and their DAX, how
+     the tables relate, the row-level security rules, and each table's original Power Query source:</p>
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    <a class="btn secondary" href="/reports/{{ name }}/model.md">Data model (readable)</a>
+    <a class="btn secondary" href="/reports/{{ name }}/model.json">Data model (JSON)</a>
+    <a class="btn secondary" href="/reports/{{ name }}/layout.json">Report layout (JSON)</a>
+  </div>
+  <p class="muted" style="margin-top:6px; font-size:.85em">The readable one is for sending to a
+     person or reading next to Power BI; the JSON is the same thing for tools.</p>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -32,13 +66,27 @@
        SQL lives — edit it below, right here in the panel (skill <code>dax-to-teradata-sql</code>
        has the DAX → SQL patterns).</p>
     <a class="btn" href="/reports/{{ name }}/edit">Edit SQL, parameters &amp; roles</a>
-    <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml and any SQL already written is lost. Are you sure?');">
+    <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml from the .pbix and any SQL already written is replaced.\n\nA copy of the current version is saved first, and you can put it back with “Restore a previous version” on this page.\n\nContinue?');">
       <div class="checkbox-row">
         <input type="checkbox" id="regenerate" name="regenerate">
-        <label for="regenerate" style="margin:0">Regenerate from scratch (loses the SQL already written)</label>
+        <label for="regenerate" style="margin:0">Regenerate from scratch (replaces the SQL already written — a backup is saved first)</label>
       </div>
       <button type="submit" class="secondary">Regenerate template</button>
     </form>
+
+    {% if backups %}
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer">Restore a previous version ({{ backups|length }} saved)</summary>
+      <p class="muted" style="margin:8px 0">Every time this file gets overwritten, the version before it is
+         kept here. Restoring is itself undoable — the current version gets saved too.</p>
+      <form method="post" action="/reports/{{ name }}/restore">
+        <select name="backup" aria-label="Version to restore">
+          {% for b in backups %}<option value="{{ b.name }}">{{ b.when }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="secondary">Restore this version</button>
+      </form>
+    </details>
+    {% endif %}
   {% else %}
     <p class="muted">Generates <code>metrics/{{ name }}.yaml</code> with a <code>TODO</code> per
        visual for someone to fill in the Teradata SQL.</p>
@@ -54,6 +102,14 @@
      one a read-only Teradata query once here and step 2 will pre-fill the SQL's <code>FROM</code>
      instead of leaving it empty.</p>
   <a class="btn secondary" href="/reports/{{ name }}/table-map">Map tables</a>
+</div>
+
+<div class="card">
+  <div class="step"><span class="n">2c</span><h2>Custom theme (optional)</h2></div>
+  <p class="muted">Many reports' extracted theme is just a built-in Power BI theme name with no
+     actual color values in it — colors, background, and font then fall back to a generic
+     default instead of matching the original. Set them by hand here if that's the case.</p>
+  <a class="btn secondary" href="/reports/{{ name }}/theme">Set theme</a>
 </div>
 
 <div class="card">
@@ -157,6 +213,29 @@
   </form>
   {% endif %}
 </div>
+
+{% if generated %}
+<div class="card">
+  <div class="step"><span class="n">3b</span><h2>Finished reports</h2></div>
+  <p class="muted">Every HTML generated for this report. <strong>Download</strong> gives you the
+     file to email or drop in a shared folder — that's the copy other people open, and it needs
+     nothing installed at their end.</p>
+  <table>
+    <tr><th>File</th><th>Generated</th><th>Size</th><th></th></tr>
+    {% for f in generated %}
+    <tr>
+      <td><code>{{ f.name }}</code></td>
+      <td class="muted">{{ f.when }}</td>
+      <td class="muted">{{ f.size }}</td>
+      <td style="white-space:nowrap">
+        <a class="btn secondary" href="/files/{{ f.name }}" target="_blank">Open</a>
+        <a class="btn" href="/files/{{ f.name }}?download=1">Download</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
 
 <div class="card">
   <div class="step"><span class="n">4</span><h2>Validate against Power BI</h2></div>

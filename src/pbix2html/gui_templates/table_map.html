@@ -18,6 +18,11 @@
      generated SQL will start from a <code>FROM (&lt;your query&gt;) AS ...</code> already built
      instead of an empty <code>TODO</code>. You'll still need to fill in columns and filters by
      hand (skill <code>dax-to-teradata-sql</code>).</p>
+  <p class="muted">Step 1 (Extract) already tries to detect this automatically from each table's
+     own Power Query source — rows marked <strong>detected automatically</strong> below were
+     filled in without you doing anything. Still review them: it's a mechanical pattern match
+     against the .pbix's own M code (a straight table reference, or a query Power BI itself was
+     already sending), not a guarantee — edit or replace any row that isn't right.</p>
   <p class="muted">⚠ Only a single <code>SELECT</code> (or <code>WITH ... SELECT</code>) statement
      is accepted — no <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>, no DDL, no
      stacked statements. This is a guardrail against a careless paste, not a security boundary:
@@ -33,7 +38,11 @@
       <tr><th>Power BI table</th><th>Teradata source query (read-only)</th></tr>
       {% for entity in entities %}
       <tr>
-        <td>{{ entity }}</td>
+        <td>{{ entity }}
+          {% if detected.get(entity) and detected.get(entity) == mapping.get(entity) %}
+          <br><span class="muted" style="font-size:.75em">✓ detected automatically</span>
+          {% endif %}
+        </td>
         <td><textarea name="td__{{ entity }}" rows="2"
                       placeholder="SELECT * FROM schema.table_or_view WHERE ...">{{ mapping.get(entity, '') }}</textarea></td>
       </tr>

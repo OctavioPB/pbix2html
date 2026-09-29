@@ -10,7 +10,6 @@ proxy/SSO, or a token validated here). NEVER from a URL parameter.
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -65,10 +64,31 @@ class _AllowPrivateNetworkAccess:
 app.add_middleware(_AllowPrivateNetworkAccess)
 
 
-@lru_cache(maxsize=64)
+_spec_cache: dict[str, tuple[float | None, semantic.ReportSpec]] = {}
+
+
 def _spec(report: str) -> semantic.ReportSpec:
+    """Reloads metrics/<report>.yaml when its mtime changes, not on every request.
+
+    A plain lru_cache here (the previous approach) would serve the report's *first*
+    load forever: the panel's edit page (step 2c) can save a new sql to this file at
+    any time while serve.py keeps running — that's the whole point of editing
+    everything from the UI without restarting scripts — and a cache with no
+    invalidation would silently keep answering with the old sql (or make an edited
+    visual look stuck on "No query defined" if it was still a TODO the first time
+    this ran). Checking mtime keeps the cheap-in-the-common-case behavior lru_cache
+    was there for, without the staleness.
+    """
+    path = semantic.yaml_path(report)
     try:
-        return semantic.load(report)
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    cached = _spec_cache.get(report)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        spec = semantic.load(report)
     except FileNotFoundError:
         # metrics/, reports/, out/ are all relative to serve.py's own working directory
         # — a very common way to land here is starting uvicorn from somewhere else
@@ -80,6 +100,8 @@ def _spec(report: str) -> semantic.ReportSpec:
             f"serve.py is running from {Path.cwd()} — start it from the project root "
             f"(the folder metrics/ and reports/ are in) instead."
         )
+    _spec_cache[report] = (mtime, spec)
+    return spec
 
 
 def _backend() -> TeradataBackend:

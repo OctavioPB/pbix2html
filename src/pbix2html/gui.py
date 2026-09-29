@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,12 +23,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from threading import Timer
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from jinja2 import Environment, FileSystemLoader
 
 from . import extract as ex
@@ -220,9 +222,41 @@ def _page(request: Request, pbix: Path, result: dict[str, Any] | None = None) ->
         "has_teradata": settings.has_teradata,
         "demo_available": DEMO_FIXTURE.exists(),
         "api_base": settings.api_base,   # cheap: a string read, no network call — see /live/status for that
+        "readiness": semantic.readiness(spec) if spec else None,
+        "backups": [{"name": b.name, "when": _backup_when(b.name)} for b in semantic.list_backups(name)[:10]],
+        "generated": _generated_files(name),
+        "has_extract": (OUT_DIR / ex.safe_name(name) / "model.json").exists(),
         "result": result,
     }
     return templates.TemplateResponse("report.html", ctx)
+
+
+def _generated_files(name: str) -> list[dict[str, Any]]:
+    """Every HTML already produced for this report, newest first. Without this the only
+    link to a finished report is the one-shot banner right after converting — navigate
+    away and there's no way back to it from the panel at all."""
+    if not OUT_DIR.exists():
+        return []
+    files = [p for p in OUT_DIR.glob(f"{ex.safe_name(name)}*.html") if p.is_file()]
+    rows = []
+    for p in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True):
+        stat = p.stat()
+        rows.append({
+            "name": p.name,
+            "when": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "size": f"{stat.st_size / 1024:,.0f} KB" if stat.st_size >= 1024 else f"{stat.st_size} B",
+        })
+    return rows
+
+
+def _backup_when(filename: str) -> str:
+    """'Executive_Dashboard.20260929-142530.yaml' → '2026-09-29 14:25' — a timestamp a
+    person can match against "the version from before lunch", not a filename to parse."""
+    m = re.search(r"\.(\d{8})-(\d{6})\.yaml$", filename)
+    if not m:
+        return filename
+    d, t = m.group(1), m.group(2)
+    return f"{d[:4]}-{d[4:6]}-{d[6:]} {t[:2]}:{t[2:4]}"
 
 
 # ----------------------------------------------------------------------------
@@ -236,10 +270,14 @@ def home(request: Request):
         name = pbix.stem
         yaml_path = semantic.yaml_path(name)
         html_files = sorted(OUT_DIR.glob(f"{name}*.html")) if OUT_DIR.exists() else []
+        spec, _ = _load_spec(name)
         rows.append({
             "name": name,
             "has_yaml": yaml_path.exists(),
             "n_html": len(html_files),
+            # How far along each report is, right on the list — so nobody has to open a
+            # report to find out whether it's nearly done or hasn't been started.
+            "readiness": semantic.readiness(spec) if spec else None,
         })
     return templates.TemplateResponse("index.html", {"request": request, "reports": rows})
 
@@ -251,9 +289,17 @@ def upload_pbix(file: UploadFile):
         raise HTTPException(400, "Upload a .pbix file with a simple name (letters, digits, spaces, - or _).")
     REPORTS_DIR.mkdir(exist_ok=True)
     destination = REPORTS_DIR / filename
-    destination.write_bytes(file.file.read())
+    # Replacing a .pbix that already has a metrics yaml is allowed (updating a report is
+    # a normal thing to do) but it's worth saying so: the SQL in that yaml was written
+    # against the old version and may no longer line up.
+    replaced = destination.exists() and semantic.yaml_path(destination.stem).exists()
+    # Streamed, not file.read(): a real .pbix runs to hundreds of MB and reading one
+    # wholly into memory is how the panel falls over on a big report.
+    with destination.open("wb") as out:
+        shutil.copyfileobj(file.file, out, length=1024 * 1024)
+    suffix = "?replaced=1" if replaced else ""
     return HTMLResponse(
-        f'<meta http-equiv="refresh" content="0; url=/reports/{destination.stem}">', status_code=303
+        f'<meta http-equiv="refresh" content="0; url=/reports/{destination.stem}{suffix}">', status_code=303
     )
 
 
@@ -262,9 +308,16 @@ def upload_pbix(file: UploadFile):
 # ----------------------------------------------------------------------------
 
 @app.get("/reports/{name}", response_class=HTMLResponse)
-def view_report(request: Request, name: str):
+def view_report(request: Request, name: str, replaced: int = 0):
     pbix = _find_pbix(name)
-    return _page(request, pbix)
+    result = None
+    if replaced:
+        result = {"ok": False, "title": "The .pbix was replaced, and this report already had SQL",
+                  "message": f"metrics/{name}.yaml was written against the previous version of this "
+                             f"file. Re-run Extract, then check the SQL still matches — visuals that "
+                             f"changed in Power BI won't line up on their own.",
+                  "detail": []}
+    return _page(request, pbix, result)
 
 
 @app.post("/reports/{name}/extract")
@@ -279,10 +332,26 @@ def action_extract(request: Request, name: str):
         (rdir / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         n_vis = sum(len(p["visuals"]) for p in layout["pages"])
         n_meas = len(model.get("measures") or []) if isinstance(model.get("measures"), list) else 0
+        detail = [f"Model warning: {model['error']}"] if model.get("error") else []
+
+        # Auto-fill the table mapping (step 2b) from each table's own Power Query M
+        # source where it's unambiguous (semantic.detect_table_map_from_power_query) —
+        # never touches an entity someone already mapped by hand.
+        detected = semantic.detect_table_map_from_power_query(model)
+        existing = _load_table_map(name)
+        new_entries = {k: v for k, v in detected.items() if k not in existing}
+        if new_entries:
+            merged = {**existing, **new_entries}
+            path = _table_map_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+            detail.append(f"Auto-mapped {len(new_entries)} Power BI table(s) to Teradata from their "
+                          f"Power Query source — review on the table-mapping page before trusting.")
+
         result = {
             "ok": True, "title": "Structure extracted",
             "message": f"{len(layout['pages'])} pages, {n_vis} visuals, {n_meas} measures.",
-            "detail": [f"Model warning: {model['error']}"] if model.get("error") else [],
+            "detail": detail,
         }
     except Exception as e:
         result = {"ok": False, "title": "Couldn't extract", "message": f"{type(e).__name__}: {e}", "detail": []}
@@ -296,16 +365,49 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
         layout = ex.extract_layout(pbix)
         model = ex.extract_model(pbix)
         table_map = _load_table_map(name)
+        had_previous = semantic.yaml_path(name).exists()
         path = semantic.write_scaffold(layout, model, overwrite=regenerate, table_map=table_map)
-        detail = ["Fill in the SQL by hand (look for \"TODO\" in the file) before converting."]
+        detail = []
         if table_map:
             detail.append(f"Used the {len(table_map)} Power BI → Teradata table mapping(s) to "
                           f"pre-fill the SQL (step 2b).")
+        spec, _ = _load_spec(name)
+        if spec:
+            r = semantic.readiness(spec)
+            detail.append(
+                f"{r['ready']} of {r['needs_sql']} visuals have working SQL "
+                f"({r['drafted']} written automatically — review those), {r['todo']} still need it "
+                f"written by hand. {r['decorative']} more are text/images and need no query."
+            )
+        if had_previous:
+            backups = semantic.list_backups(name)
+            if backups:
+                detail.append(f"Your previous version was saved as metrics/{semantic.BACKUP_DIR_NAME}/"
+                              f"{backups[0].name} — use “Restore previous version” below to get it back.")
         result = {"ok": True, "title": "Template generated", "message": f"Wrote {path}.", "detail": detail}
     except FileExistsError as e:
         result = {"ok": False, "title": "A template already exists", "message": str(e), "detail": []}
     except Exception as e:
         result = {"ok": False, "title": "Couldn't generate the template", "message": f"{type(e).__name__}: {e}", "detail": []}
+    return _page(request, pbix, result)
+
+
+@app.post("/reports/{name}/restore")
+def action_restore(request: Request, name: str, backup: str = Form(...)):
+    """Puts a previous version of metrics/<name>.yaml back. The panel keeps a copy every
+    time something overwrites that file, so "Regenerate template" (and a bad edit) stop
+    being one-way doors for someone with no git and no text editor."""
+    pbix = _find_pbix(name)
+    try:
+        chosen = semantic.yaml_path(name).parent / semantic.BACKUP_DIR_NAME / Path(backup).name
+        semantic.restore_backup(name, chosen)
+        result = {"ok": True, "title": "Previous version restored",
+                  "message": f"metrics/{name}.yaml is back to the version from {_backup_when(chosen.name)}.",
+                  "detail": ["The version you just replaced was itself saved as a backup, "
+                             "so this is undoable too."]}
+    except (ValueError, OSError) as e:
+        result = {"ok": False, "title": "Couldn't restore that version",
+                  "message": f"{type(e).__name__}: {e}", "detail": []}
     return _page(request, pbix, result)
 
 
@@ -384,10 +486,17 @@ async def save_edit(request: Request, name: str):
         roles[rname] = r
     new_rname = (form.get("newrole__name") or "").strip()
     if new_rname:
-        roles[new_rname] = {
-            "proxy_user": form.get("newrole__proxy_user") or None,
-            "where": form.get("newrole__where") or None,
-        }
+        # A role name becomes part of the generated HTML's filename (one file per role),
+        # so anything with a path separator in it — "Sales/North" by accident, "../.." on
+        # purpose — would steer that write out of out/. Names are a business label, so
+        # restricting them to letters/digits/space/_/-/. costs nothing real.
+        if not re.fullmatch(r"[\w .\-]+", new_rname):
+            errors.append(f"role '{new_rname}': use only letters, digits, spaces, '.', '-' or '_'")
+        else:
+            roles[new_rname] = {
+                "proxy_user": form.get("newrole__proxy_user") or None,
+                "where": form.get("newrole__where") or None,
+            }
     raw["roles"] = roles or {"default": {"proxy_user": None, "where": None}}
 
     # --- visuals: kind/title/sql/params/reference_sql/tolerance/notes per existing id ---
@@ -400,14 +509,14 @@ async def save_edit(request: Request, name: str):
         v["title"] = form.get(f"visual__{vid}__title") or None
 
         sql_in = (form.get(f"visual__{vid}__sql") or "").strip()
-        if sql_in and "TODO" not in sql_in:
+        if semantic.is_unwritten_sql(sql_in):
+            v["sql"] = sql_in or None
+        else:
             try:
                 v["sql"] = semantic.validate_read_only_sql(sql_in)
             except ValueError as e:
                 errors.append(f"{vid} — sql: {e}")
                 v["sql"] = sql_in
-        else:
-            v["sql"] = sql_in or None
 
         params_in = form.get(f"visual__{vid}__params", "")
         v["params"] = [p.strip() for p in params_in.split(",") if p.strip()]
@@ -434,8 +543,8 @@ async def save_edit(request: Request, name: str):
 
     if errors:
         result = {"ok": False, "title": "Not saved", "detail": errors,
-                   "message": "Only single, read-only SELECT queries are allowed for sql/reference_sql. "
-                              "Fix the entries below and save again."}
+                   "message": "Nothing was written — fix the entries listed below and save again. "
+                              "(sql/reference_sql must each be a single read-only SELECT.)"}
         return _edit_page(request, name, pbix, raw, result)
 
     semantic.save_raw(name, raw)
@@ -452,14 +561,34 @@ def _table_map_path(name: str) -> Path:
     return semantic.METRICS_DIR / f"{name}.table_map.json"
 
 
-def _load_table_map(name: str) -> dict[str, str]:
+def _read_table_map(name: str) -> tuple[dict[str, str], str | None]:
+    """(mapping, problem). Only well-formed `{"entity": "query"}` string pairs come back
+    as mapping; anything else is reported as `problem` instead of being passed on.
+
+    This file can be hand-edited outside the panel, and the shapes that mistake produces
+    used to crash the scaffold step: a JSON list reached `table_map.get(...)`
+    (AttributeError), and a numeric value reached `.strip()`. Silently returning {} is
+    no better — the person's mapping appears to have vanished with no explanation, and
+    the next scaffold quietly writes TODO stubs instead of their queries."""
     path = _table_map_path(name)
     if not path.exists():
-        return {}
+        return {}, None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        return {}, f"metrics/{path.name} isn't readable as JSON ({e}). Fix or delete it."
+    if not isinstance(data, dict):
+        return {}, f"metrics/{path.name} should be a JSON object of \"table\": \"query\" pairs."
+    bad = sorted(k for k, v in data.items() if not isinstance(k, str) or not isinstance(v, str))
+    clean = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+    if bad:
+        return clean, (f"metrics/{path.name}: ignored {len(bad)} entry/entries that aren't "
+                       f"text queries ({', '.join(map(str, bad[:3]))}).")
+    return clean, None
+
+
+def _load_table_map(name: str) -> dict[str, str]:
+    return _read_table_map(name)[0]
 
 
 def _pbi_entities(name: str) -> list[str]:
@@ -483,12 +612,31 @@ def _pbi_entities(name: str) -> list[str]:
     return sorted(entities)
 
 
+def _load_model(name: str) -> dict:
+    path = OUT_DIR / ex.safe_name(name) / "model.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _table_map_page(request: Request, name: str, pbix: Path, result: dict[str, Any] | None = None,
                      pending: dict[str, str] | None = None) -> HTMLResponse:
+    saved, problem = _read_table_map(name)
+    if problem and result is None:
+        result = {"ok": False, "title": "There's a problem with the saved mapping file",
+                  "message": problem, "detail": []}
     return templates.TemplateResponse("table_map.html", {
         "request": request, "name": name, "pbix": str(pbix),
         "entities": _pbi_entities(name),
-        "mapping": pending if pending is not None else _load_table_map(name),
+        "mapping": pending if pending is not None else saved,
+        # Re-derived fresh from model.json (not stored) so the "detected automatically"
+        # badge always reflects the current .pbix, and disappears the moment someone
+        # edits a value away from what detection would produce — see table_map.html.
+        "detected": semantic.detect_table_map_from_power_query(_load_model(name)),
         "result": result,
     })
 
@@ -529,6 +677,88 @@ async def save_table_map(request: Request, name: str):
     return _page(request, pbix, result)
 
 
+# ----------------------------------------------------------------------------
+# Step 2c: custom theme override (metrics/<Report>.theme.json)
+# ----------------------------------------------------------------------------
+
+def _load_theme_raw(name: str) -> dict:
+    """Unvalidated, for prefilling the edit form: if a hand-edited file has gone bad,
+    the person should still see what's there to fix it, not just an empty form."""
+    path = semantic.theme_path(name)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _theme_page(request: Request, name: str, pbix: Path, result: dict[str, Any] | None = None,
+                 pending: dict[str, Any] | None = None) -> HTMLResponse:
+    theme = pending if pending is not None else _load_theme_raw(name)
+    return templates.TemplateResponse("theme.html", {
+        "request": request, "name": name, "pbix": str(pbix),
+        "theme": theme, "has_override": semantic.theme_path(name).exists(), "result": result,
+    })
+
+
+@app.get("/reports/{name}/theme", response_class=HTMLResponse)
+def view_theme(request: Request, name: str):
+    pbix = _find_pbix(name)
+    return _theme_page(request, name, pbix)
+
+
+@app.post("/reports/{name}/theme")
+async def save_theme(request: Request, name: str):
+    pbix = _find_pbix(name)
+    form = await request.form()
+
+    pasted = (form.get("pasted_json") or "").strip()
+    candidate: dict[str, Any] = {}
+    try:
+        if pasted:
+            candidate = json.loads(pasted)
+            if not isinstance(candidate, dict):
+                raise ValueError("pasted theme JSON must be an object")
+        else:
+            colors_raw = (form.get("dataColors") or "").strip()
+            if colors_raw:
+                candidate["dataColors"] = [c.strip() for c in colors_raw.split(",") if c.strip()]
+            for key in ("background", "foreground", "foregroundNeutralSecondary", "backgroundNeutral"):
+                val = (form.get(key) or "").strip()
+                if val:
+                    candidate[key] = val
+            font = (form.get("fontFamily") or "").strip()
+            if font:
+                candidate["fontFamily"] = font
+        validated = semantic.validate_theme_override(candidate)
+    except (ValueError, json.JSONDecodeError) as e:
+        result = {"ok": False, "title": "Theme not saved", "detail": [str(e)],
+                  "message": "Fix the fields below and save again."}
+        return _theme_page(request, name, pbix, result, pending=candidate)
+
+    path = semantic.theme_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(validated, ensure_ascii=False, indent=2), encoding="utf-8")
+    result = {"ok": True, "title": "Theme saved",
+              "message": f"metrics/{name}.theme.json now overrides the report's extracted theme "
+                         "on every convert (snapshot, live, and hah) from here on.", "detail": []}
+    return _page(request, pbix, result)
+
+
+@app.post("/reports/{name}/theme/reset")
+async def reset_theme(request: Request, name: str):
+    pbix = _find_pbix(name)
+    path = semantic.theme_path(name)
+    if path.exists():
+        path.unlink()
+    result = {"ok": True, "title": "Theme reset",
+              "message": "Removed the override — conversions go back to the report's extracted theme.",
+              "detail": []}
+    return _page(request, pbix, result)
+
+
 @app.post("/reports/{name}/convert")
 async def action_convert(request: Request, name: str):
     pbix = _find_pbix(name)
@@ -556,6 +786,7 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
     name = pbix.stem
     try:
         layout = ex.extract_layout(pbix)
+        layout = semantic.apply_theme_override(layout, semantic.load_theme_override(name))
         values = semantic.resolve_params(spec, overrides)
 
         role = role_name or None
@@ -587,7 +818,11 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
             data = run_report(spec, values, backend, proxy_user=proxy_user)
 
         html = render_html(layout, spec, values, data, mode=mode, role=role, hah_base=hah_base)
-        out_name = f"{name}" + (f".{role}" if role else "") + ".html"
+        # Both halves go through safe_name(): `role` is a yaml key, and a role called
+        # "../../x" (or just "Sales/North", which is a plausible thing to type) would
+        # otherwise steer this write outside out/ entirely. save_edit() rejects such
+        # names at the door now, but a hand-edited yaml never went through that.
+        out_name = ex.safe_name(name) + (f".{ex.safe_name(role)}" if role else "") + ".html"
         OUT_DIR.mkdir(exist_ok=True)
         (OUT_DIR / out_name).write_text(html, encoding="utf-8")
 
@@ -664,13 +899,51 @@ def action_validate(request: Request, name: str):
 # Serve the generated HTML files
 # ----------------------------------------------------------------------------
 
+@app.get("/reports/{name}/model.{fmt}")
+def download_model(name: str, fmt: str):
+    """The extracted data model, both ways: `model.json` is the machine-readable copy
+    (what extract wrote), `model.md` is the same thing rendered for a person — the DAX
+    behind each measure, the relationships, the RLS rules, each table's Power Query
+    source. Neither leaves the machine unless someone saves it."""
+    _find_pbix(name)
+    if fmt not in ("json", "md"):
+        raise HTTPException(404, "use model.json or model.md")
+    path = OUT_DIR / ex.safe_name(name) / "model.json"
+    if not path.exists():
+        raise HTTPException(404, f"Run Extract on '{name}' first — there's no model.json yet.")
+    if fmt == "json":
+        return FileResponse(path, media_type="application/json", filename=f"{name}.model.json")
+    try:
+        model = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise HTTPException(500, f"out/{ex.safe_name(name)}/model.json isn't readable JSON: {e}")
+    return Response(ex.model_summary_markdown(model, name), media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.model.md"'})
+
+
+@app.get("/reports/{name}/layout.json")
+def download_layout(name: str):
+    """The extracted report structure: pages, visuals, positions, fields, theme."""
+    _find_pbix(name)
+    path = OUT_DIR / ex.safe_name(name) / "layout.json"
+    if not path.exists():
+        raise HTTPException(404, f"Run Extract on '{name}' first — there's no layout.json yet.")
+    return FileResponse(path, media_type="application/json", filename=f"{name}.layout.json")
+
+
 @app.get("/files/{filename}")
-def serve_file(filename: str):
+def serve_file(filename: str, download: int = 0):
+    """Serves a generated report. `?download=1` sends it as an attachment instead of
+    rendering it in the tab — that's the copy someone emails or drops in a shared
+    folder, which is how these reports actually reach their readers."""
     if "/" in filename or "\\" in filename or not filename.lower().endswith(".html"):
         raise HTTPException(400, "invalid file name")
     path = OUT_DIR / filename
     if not path.exists():
         raise HTTPException(404, "file not found")
+    if download:
+        # filename= is what sets Content-Disposition: attachment.
+        return FileResponse(path, media_type="text/html", filename=filename)
     return FileResponse(path, media_type="text/html")
 
 

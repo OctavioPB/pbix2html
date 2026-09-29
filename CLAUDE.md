@@ -21,8 +21,10 @@ before touching more than one module.
 | live | `serve.py` | FastAPI: runs the yaml on demand with a proxy user | scaffold |
 | hah (ADR-004) | `render.py --mode hah` + `templates/report_hah.html.j2` | alternative to `serve.py`: HTML fetches Teradata data itself via the teradata-report skill / HAH | implemented, **unverified** against a real HAH |
 
-`reference/pbix_extract.py` is the original extraction script; `extract.py` is its
-module version. If they differ, `src/` wins.
+`extract.py` is the only extractor. (An older standalone copy lived in
+`reference/pbix_extract.py`; it was deleted once it had drifted far enough — no PBIR
+support, no textbox or image extraction — to be misleading rather than useful. It's in
+git history if you ever need it.)
 
 ## Working rules
 

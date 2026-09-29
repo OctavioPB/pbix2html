@@ -200,7 +200,12 @@
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
-    static(el) { el.innerHTML = ''; },
+    static(el, v) {
+      // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
+      // for an `image`-kind visual. shape/basicShape/actionButton have no such resource —
+      // those still draw as an empty frame, there's nothing captured to draw for them.
+      el.innerHTML = v.image ? `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">` : '';
+    },
     bar(el, v, b) { chart(el, v, cartesian(v, b, 'bar', true)); },
     column(el, v, b) { chart(el, v, cartesian(v, b, 'bar', false)); },
     line(el, v, b) { chart(el, v, cartesian(v, b, 'line', false, v.area)); },

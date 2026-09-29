@@ -16,7 +16,15 @@ point to an internal copy), data in `<script id="data" type="application/json">`
 
 Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-ratio`, and
 visuals are absolutely positioned in **percentages** (`left = x/width*100`), which
-preserves the original layout and scales with width. Hidden pages (`hidden`) aren't
+preserves the original layout and scales with width.
+
+**Frames come from the report, not from us.** A visual's fill and border are read from its
+`vcObjects` (`extract.py`'s `container_style` → `v.style`), and the page's canvas colour
+from the section's `objects.background`/`outspace` (`page.background`). Power BI's own
+default is *no* border and *no* fill, so a visual that specifies neither gets neither —
+don't reintroduce a default box in CSS, it makes every report look like a grid it isn't.
+Palette references (`ThemeDataColor`) resolve against the report's `dataColors`; the
+`Percent` shade is ignored (base colour is closer than nothing). Hidden pages (`hidden`) aren't
 rendered unless `--include-hidden`. Groups (`__group__`) aren't drawn. Page navigation:
 tabs at the top. Slicers render as controls in a top bar per page (not in their original
 position) and trigger regeneration (live) or are informational with the snapshot's fixed
@@ -38,7 +46,7 @@ value.
 | pivotTable, matrix | matrix | rows × columns; v1 renders it as a flat table |
 | slicer, advancedSlicerVisual, listSlicer | slicer | becomes a parameter |
 | textbox | text | from `objects.general.paragraphs` |
-| image, shape, basicShape, actionButton | static | decorative; omitted or drawn as a frame |
+| image, shape, basicShape, actionButton | static | `image` draws the embedded picture (extract.py's `embed_image_resources`, a data: URI in `v.image`); shape/basicShape/actionButton have no such resource and still draw as an empty frame |
 | gauge | gauge | value, min, max, target |
 | waterfallChart, funnel, treemap, scatterChart, map… | pending | see `out/summary.md` for priority |
 | custom (is_custom) | reinterpreted | pick a standard `kind` manually in the yaml + `notes` |

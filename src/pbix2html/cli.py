@@ -53,6 +53,14 @@ def cmd_scaffold(args):
 def cmd_convert(args):
     pbix = Path(args.pbix)
     layout, model = _layout_and_model(pbix, Path(args.out))
+    theme_src = Path(args.theme) if args.theme else semantic.theme_path(layout["report"])
+    if theme_src.exists():
+        try:
+            override = semantic.validate_theme_override(json.loads(theme_src.read_text(encoding="utf-8")))
+        except (ValueError, json.JSONDecodeError) as e:
+            sys.exit(f"--theme {theme_src}: {e}")
+        layout = semantic.apply_theme_override(layout, override)
+        print(f"Theme override applied from {theme_src}")
     if not semantic.yaml_path(layout["report"]).exists():
         semantic.write_scaffold(layout, model)
         print(f"! metrics/{layout['report']}.yaml didn't exist: generated the scaffold. Fill in the SQL and convert again.")
@@ -104,27 +112,40 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("extract", help=".pbix or folder → out/ (layout, model, inventory)")
-    p.add_argument("path"); p.add_argument("--out", default="out"); p.add_argument("--no-model", action="store_true")
+    p.add_argument("path")
+    p.add_argument("--out", default="out")
+    p.add_argument("--no-model", action="store_true")
     p.set_defaults(fn=cmd_extract)
 
     p = sub.add_parser("scaffold", help="generates an initial metrics/<Report>.yaml")
-    p.add_argument("pbix"); p.add_argument("--out", default="out"); p.add_argument("--overwrite", action="store_true")
+    p.add_argument("pbix")
+    p.add_argument("--out", default="out")
+    p.add_argument("--overwrite", action="store_true")
     p.set_defaults(fn=cmd_scaffold)
 
     p = sub.add_parser("convert", help=".pbix → Report.html")
-    p.add_argument("pbix"); p.add_argument("--out", default="out"); p.add_argument("--html", help="explicit output path")
+    p.add_argument("pbix")
+    p.add_argument("--out", default="out")
+    p.add_argument("--html", help="explicit output path")
     p.add_argument("--mode", choices=["snapshot", "live"], default="snapshot")
-    p.add_argument("--role"); p.add_argument("--params", nargs="*", help="k=v (yaml parameters)")
+    p.add_argument("--role")
+    p.add_argument("--params", nargs="*", help="k=v (yaml parameters)")
     p.add_argument("--fake-data", help="json {columns,rows} for development without Teradata")
-    p.add_argument("--no-cache", action="store_true"); p.add_argument("--include-hidden", action="store_true")
+    p.add_argument("--theme", help="path to a theme JSON overriding the extracted one "
+                                    "(default: metrics/<report>.theme.json if it exists)")
+    p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--include-hidden", action="store_true")
     p.set_defaults(fn=cmd_convert)
 
     p = sub.add_parser("validate", help="compares sql vs reference_sql/CSV")
-    p.add_argument("report"); p.add_argument("--params", nargs="*"); p.add_argument("--fake-data")
+    p.add_argument("report")
+    p.add_argument("--params", nargs="*")
+    p.add_argument("--fake-data")
     p.set_defaults(fn=cmd_validate)
 
     p = sub.add_parser("gui", help="local web panel (extract/scaffold/convert/validate without a terminal)")
-    p.add_argument("--host", default="127.0.0.1"); p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true", help="don't open the browser automatically")
     p.set_defaults(fn=cmd_gui)
 

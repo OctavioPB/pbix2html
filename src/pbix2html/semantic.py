@@ -12,8 +12,10 @@ Semantic layer: metrics/<Report>.yaml.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +77,104 @@ def yaml_path(report: str) -> Path:
     return METRICS_DIR / f"{report}.yaml"
 
 
+def readiness(spec: "ReportSpec") -> dict[str, Any]:
+    """How much of this report is actually finished, as counts a non-technical person
+    can act on: {needs_sql, ready, drafted, todo, decorative, percent}.
+
+    `ready` is every visual with usable SQL; `drafted` is the subset of those the
+    auto-drafter wrote (so still unreviewed); `todo` is what a person still has to
+    write by hand. This is the number that answers "is this report a quick job or does
+    it need scheduling with engineering", which nothing in the tool used to say until
+    someone opened the yaml and counted TODOs themselves."""
+    decorative = sum(1 for v in spec.visuals.values() if v.kind in NO_DATA_KINDS)
+    needs_sql = [v for v in spec.visuals.values() if v.kind not in NO_DATA_KINDS]
+    ready = [v for v in needs_sql if v.has_data]
+    drafted = [v for v in ready if "Auto-drafted" in (v.notes or "")]
+    return {
+        "needs_sql": len(needs_sql),
+        "ready": len(ready),
+        "drafted": len(drafted),
+        "todo": len(needs_sql) - len(ready),
+        "decorative": decorative,
+        "percent": round(100 * len(ready) / len(needs_sql)) if needs_sql else 100,
+    }
+
+
+def theme_path(report: str) -> Path:
+    return METRICS_DIR / f"{report}.theme.json"
+
+
+# Keys render.py's resolve_theme() actually reads. A pasted/uploaded theme JSON may be a
+# full official Power BI theme export (which also carries deep `visualStyles` formatting
+# rules we have no renderer for) — those extra keys are silently dropped rather than
+# stored, so this file's purpose stays legible: it only ever affects colors and font,
+# nothing else. `fontFamily` is a flat convenience key for the panel's manual form; a
+# real Power BI export instead nests it under textClasses.title.fontFace, which
+# resolve_theme() also checks (see render.py).
+_THEME_COLOR_KEYS = ("background", "foreground", "foregroundNeutralSecondary", "backgroundNeutral")
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{3,8}$")
+
+
+def validate_theme_override(data: Any) -> dict:
+    """Validates a theme override — either a full Power BI theme export or just the
+    handful of fields the panel's manual form fills in. Raises ValueError with a
+    human-readable reason (surfaced directly in the panel); returns a cleaned dict
+    with only the recognized keys, same guardrail spirit as validate_read_only_sql.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("theme must be a JSON object")
+    out: dict[str, Any] = {}
+    if data.get("dataColors") is not None:
+        colors = data["dataColors"]
+        if not isinstance(colors, list) or not colors:
+            raise ValueError("dataColors must be a non-empty list of hex colors")
+        for c in colors:
+            if not isinstance(c, str) or not _HEX_RE.match(c):
+                raise ValueError(f"'{c}' in dataColors isn't a valid hex color (e.g. #D85A30)")
+        out["dataColors"] = list(colors)
+    for key in _THEME_COLOR_KEYS:
+        val = data.get(key)
+        if val:
+            if not isinstance(val, str) or not _HEX_RE.match(val):
+                raise ValueError(f"'{key}' must be a hex color (e.g. #FFFFFF), got {val!r}")
+            out[key] = val
+    if data.get("fontFamily"):
+        if not isinstance(data["fontFamily"], str):
+            raise ValueError("fontFamily must be a string")
+        out["fontFamily"] = data["fontFamily"]
+    if not out:
+        raise ValueError("no recognized fields found — expected one or more of: dataColors, "
+                          "background, foreground, foregroundNeutralSecondary, backgroundNeutral, fontFamily")
+    return out
+
+
+def load_theme_override(report: str) -> dict | None:
+    """None if there's no override file, or if it's gone stale/invalid — a broken
+    metrics/<report>.theme.json must not take down `convert`, same as a bad yaml
+    doesn't take down the panel's report page (see gui.py's _load_spec)."""
+    path = theme_path(report)
+    if not path.exists():
+        return None
+    try:
+        return validate_theme_override(json.loads(path.read_text(encoding="utf-8")))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def apply_theme_override(layout: dict, override: dict | None) -> dict:
+    """Merges an override on top of whatever theme the .pbix itself carries (override
+    wins field by field) — render.py's resolve_theme() doesn't change at all, it just
+    sees a richer custom_json than what the .pbix alone had. Returns a new layout dict;
+    doesn't mutate the caller's."""
+    if not override:
+        return layout
+    theme = dict(layout.get("theme") or {})
+    custom_json = dict(theme.get("custom_json") or {})
+    custom_json.update(override)
+    theme = {**theme, "custom_json": custom_json}
+    return {**layout, "theme": theme}
+
+
 def query_ref_parts(ref: str) -> tuple[str | None, str, str]:
     """'Sum(Sales.Amount)' → ('Sum', 'Sales', 'Amount'); 'Sales.Margin' → (None, 'Sales', 'Margin').
 
@@ -131,6 +231,180 @@ def validate_read_only_sql(sql: str) -> str:
     if m:
         raise ValueError(f"'{m.group(1).upper()}' isn't allowed here — read-only queries only")
     return raw
+
+
+_UNWRITTEN_SQL_PREFIXES = ("TODO", "LOCKING ROW FOR ACCESS")  # exactly what _sql_stub generates
+
+
+def is_unwritten_sql(sql: str) -> bool:
+    """True when `sql` is empty or is still exactly one of the placeholder shapes
+    `_sql_stub` itself generates (a bare "TODO ..." or the table-map-prefilled
+    "LOCKING ROW FOR ACCESS ..." skeleton). The panel's edit page (step 2c) uses this
+    to let a visual stay a work-in-progress without forcing `validate_read_only_sql`
+    to pass on every single save.
+
+    Two earlier, broader versions of this check were both exploitable and got tightened
+    here on review:
+    - "contains the word TODO anywhere" let any real, complete SQL with a stray review
+      comment mentioning it (e.g. "-- TODO: double-check this join", exactly what the
+      auto-drafter's own notes invite someone to add) skip validate_read_only_sql
+      entirely and get saved as-is.
+    - "doesn't start with SELECT/WITH" is just as wide open: a bare `DELETE FROM x`
+      doesn't start with SELECT either, so it would *also* get the free pass and be
+      saved unvalidated.
+    Both would then be executed as-is by query.py against a real Teradata connection —
+    a hole in the "guardrail against a careless paste" for precisely the case it
+    exists to catch. Matching only the exact, known stub prefixes closes both: nothing
+    that isn't literally what this project itself wrote gets to skip validation."""
+    raw = (sql or "").strip()
+    if not raw:
+        return True
+    return raw.startswith(_UNWRITTEN_SQL_PREFIXES)
+
+
+# ----------------------------------------------------------------------------
+# Table-map auto-detection from each table's own Power Query M source
+# (model.json["power_query"], captured by extract_model() via pbixray but otherwise
+# unused). Mechanical pattern matching, same spirit as the DAX auto-draft in
+# _draft_visual_sql: only the two M shapes below are recognized, anything else
+# (a merge, a filter step, a dynamically-built query string) still needs a person —
+# a wrong silent guess here is worse than an honest blank table-map entry.
+# ----------------------------------------------------------------------------
+
+_M_NATIVE_QUERY_RE = re.compile(r"Value\.NativeQuery\s*\(", re.IGNORECASE)
+_M_LET_IN_RE = re.compile(r"^\s*let\b(.*?)\bin\b(.*)$", re.IGNORECASE | re.DOTALL)
+_M_ACCESSOR_STEP_RE = re.compile(
+    r'^\w+\s*=\s*\w+\s*\{\s*\[\s*(?:Schema\s*=\s*"([^"]*)"\s*,\s*)?'
+    r'(?:Item|Name|Table)\s*=\s*"([^"]*)"\s*\]\s*\}\s*\[\s*Data\s*\]$',
+    re.IGNORECASE,
+)
+
+
+def _m_split_args(text: str) -> list[str]:
+    """Splits M function-call arguments at top-level commas, respecting nested
+    (), [], {} and "..." string literals (M's own "" escape for a literal quote
+    inside a string) — a plain split(",") breaks the moment a nested connector
+    expression or record literal has a comma of its own. `text` starts right
+    after the call's opening '(' ; stops at that call's matching ')'."""
+    args: list[str] = []
+    depth = 0
+    in_string = False
+    current: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    current.append('""')
+                    i += 2
+                    continue
+                in_string = False
+            current.append(ch)
+        elif ch == '"':
+            in_string = True
+            current.append(ch)
+        elif ch in "([{":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}":
+            if depth == 0:
+                break  # this call's own closing paren
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    if current:
+        args.append("".join(current))
+    return [a.strip() for a in args]
+
+
+def _m_unescape_string(literal: str) -> str | None:
+    """A quoted M string literal (including the surrounding quotes) → its real
+    value: "" is an escaped quote, #(lf)/#(cr,lf)/#(cr)/#(tab) are M's escape
+    sequences for the corresponding whitespace. Returns None if it isn't actually
+    a simple quoted literal (e.g. the query is built with & concatenation or a
+    parameter instead) — this deliberately doesn't evaluate M expressions."""
+    s = literal.strip()
+    if len(s) < 2 or not s.startswith('"') or not s.endswith('"'):
+        return None
+    inner = s[1:-1].replace('""', '"')
+    inner = re.sub(r"#\(cr,\s*lf\)", "\n", inner)
+    inner = inner.replace("#(lf)", "\n").replace("#(cr)", "\n").replace("#(tab)", "\t")
+    return inner
+
+
+def _detect_table_query(expression: str) -> str | None:
+    """Recognizes two M source shapes for a table backed by Teradata (or any
+    connector using the same accessor conventions) and returns a candidate
+    read-only SQL query, or None if the M is anything more involved:
+
+    1. `Value.NativeQuery(<connection>, "<SQL>", ...)` — the literal query Power
+       Query itself sends. Lifted verbatim (still goes through
+       validate_read_only_sql before being trusted anywhere) — matched anywhere
+       in the expression since later cosmetic M steps (renaming/retyping a
+       column) don't change what the query itself already selected.
+    2. `let Source = <connector>, X = Source{[Schema="A", Item="B"]}[Data] in X`
+       — a plain table reference with no further M transformation — turned into
+       `SELECT * FROM A.B`. Unlike (1), this one requires the accessor step to
+       be the *only* other step in the `let`: a table built by joining/merging
+       two source tables (`Table.NestedJoin`, an extra filter step, ...) also
+       contains a `Source{[Schema=...,Item=...]}[Data]` substring for one of its
+       inputs, and reporting just that one input as the whole table would be a
+       wrong, misleading answer — worse than leaving it blank.
+    """
+    if not expression:
+        return None
+    m = _M_NATIVE_QUERY_RE.search(expression)
+    if m:
+        args = _m_split_args(expression[m.end():])
+        if len(args) >= 2:
+            sql = _m_unescape_string(args[1])
+            if sql and sql.strip():
+                return sql.strip()
+        return None
+    m2 = _M_LET_IN_RE.match(expression.strip())
+    if m2:
+        steps = _m_split_args(m2.group(1))
+        if len(steps) == 2:
+            am = _M_ACCESSOR_STEP_RE.match(steps[1].strip())
+            if am:
+                schema, item = am.group(1), am.group(2)
+                if item:
+                    return f"SELECT * FROM {schema + '.' if schema else ''}{item}"
+    return None
+
+
+def detect_table_map_from_power_query(model: dict) -> dict[str, str]:
+    """Best-effort table_map entries auto-derived from each table's own Power
+    Query M source — see `_detect_table_query` for exactly what's recognized.
+    Only ever a suggestion, exactly like a hand-entered mapping: every value here
+    has already passed `validate_read_only_sql`, but a caller still has to choose
+    to save it (gui.py pre-fills the table-map form with these rather than
+    silently trusting them)."""
+    rows = model.get("power_query")
+    if not isinstance(rows, list):
+        return {}
+    out: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        table = row.get("TableName")
+        expr = row.get("Expression")
+        if not table or table in out or not isinstance(expr, str):
+            continue
+        candidate = _detect_table_query(expr)
+        if not candidate:
+            continue
+        try:
+            out[table] = validate_read_only_sql(candidate)
+        except ValueError:
+            continue
+    return out
 
 
 def _sql_alias(entity: str) -> str:
@@ -500,11 +774,69 @@ YAML_HEADER = ("# Report semantic layer. Edit by hand: this is where the migrate
                "# Column contracts per kind: .claude/skills/html-renderer/SKILL.md\n")
 
 
+BACKUP_DIR_NAME = "backups"
+
+
+def backup_yaml(report: str) -> Path | None:
+    """Copies the current metrics/<report>.yaml to metrics/backups/<report>.<stamp>.yaml
+    before something overwrites it. Returns the backup path, or None if there was
+    nothing to back up yet.
+
+    Regenerating the scaffold discards every hand-written SQL in the file, and the only
+    thing standing between a person and that loss used to be one browser confirm()
+    dialog — which anyone clicks through by habit. A copy on disk costs nothing and is
+    something a non-technical person can actually be pointed at ("your previous version
+    is in metrics/backups/"), unlike telling them to have used git."""
+    path = yaml_path(report)
+    if not path.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder = path.parent / BACKUP_DIR_NAME
+    folder.mkdir(parents=True, exist_ok=True)
+    # Never overwrite an existing backup: the stamp is only second-resolution, and two
+    # saves inside the same second are entirely normal (regenerate, then immediately
+    # restore). Silently replacing the older file would throw away the very version
+    # someone is about to reach for.
+    dest = folder / f"{report}.{stamp}.yaml"
+    n = 2
+    while dest.exists():
+        dest = folder / f"{report}.{stamp}-{n}.yaml"
+        n += 1
+    dest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return dest
+
+
+def list_backups(report: str) -> list[Path]:
+    """Existing backups for a report, newest first — what the panel offers as
+    "restore a previous version"."""
+    folder = yaml_path(report).parent / BACKUP_DIR_NAME
+    if not folder.exists():
+        return []
+    return sorted(folder.glob(f"{report}.*.yaml"), reverse=True)
+
+
+def restore_backup(report: str, backup: Path) -> Path:
+    """Puts a backup back as the live metrics/<report>.yaml, backing up whatever is
+    there right now first — so restoring is itself undoable and can't be the move that
+    loses work."""
+    backups_dir = (yaml_path(report).parent / BACKUP_DIR_NAME).resolve()
+    resolved = backup.resolve()
+    if resolved.parent != backups_dir or not resolved.is_file():
+        raise ValueError(f"{backup} isn't a backup of {report}")
+    content = resolved.read_text(encoding="utf-8")   # read first: backup_yaml() writes into this same folder
+    backup_yaml(report)
+    path = yaml_path(report)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def write_scaffold(layout: dict, model: dict, overwrite: bool = False,
                     table_map: dict[str, str] | None = None) -> Path:
     path = yaml_path(layout["report"])
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} already exists; use --overwrite to regenerate (you'll lose the written SQL)")
+    if path.exists():
+        backup_yaml(layout["report"])   # overwrite is destructive; keep the old one
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         YAML_HEADER + yaml.safe_dump(scaffold(layout, model, table_map), allow_unicode=True, sort_keys=False, width=110),

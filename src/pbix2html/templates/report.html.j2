@@ -73,10 +73,15 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}" {% if not loop.first %}hidden{% endif %}>
+<section class="page" id="{{ p.id }}" style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background %}; background: {{ p.background }}{% endif %}" {% if not loop.first %}hidden{% endif %}>
   {% for v in p.visuals %}
+  {# style: what the .pbix actually says about this visual's frame. Power BI's own
+     default is no border and no fill, so a visual that says nothing gets neither —
+     drawing a box around everything is what made every report look like a grid. #}
   <div class="visual {{ 'static' if v.kind == 'static' }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"
-       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
+       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
+              ; background: {{ v.style.background or 'transparent' }}
+              ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     <div class="body"></div>
   </div>
@@ -151,7 +156,12 @@
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
-    static(el) { el.innerHTML = ''; },
+    static(el, v) {
+      // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
+      // for an `image`-kind visual. shape/basicShape/actionButton have no such resource —
+      // those still draw as an empty frame, there's nothing captured to draw for them.
+      el.innerHTML = v.image ? `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">` : '';
+    },
     bar(el, v, b) { chart(el, v, cartesian(v, b, 'bar', true)); },
     column(el, v, b) { chart(el, v, cartesian(v, b, 'bar', false)); },
     line(el, v, b) { chart(el, v, cartesian(v, b, 'line', false, v.area)); },

@@ -32,6 +32,9 @@ pbix2html = ["templates/*.j2", "gui_templates/*.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["teradata: requires a real Teradata connection"]
+# Silences a pytest-asyncio DeprecationWarning printed on every run. Nothing here uses
+# async fixtures; pinning the scope just stops the warning from burying a real one.
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 110

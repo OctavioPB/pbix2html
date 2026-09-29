@@ -5,4 +5,8 @@ cache/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+fixv2/
+.scratch/
+metrics/backups/          # panel-kept copies of metrics/*.yaml before an overwrite
 !reports/Executive_Dashboard.pbix
+BusinessReport.md

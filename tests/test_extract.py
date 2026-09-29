@@ -16,6 +16,23 @@ def test_layout_structure(fake_pbix):
     assert by_id["v2"]["fields"] == ["Region.Name", "Sales.Margin %"]
     assert by_id["v4"]["is_custom"] is True
     assert by_id["g1"]["is_group"] is True
+    # textbox content (objects.general.paragraphs) was never wired up before: every
+    # textbox rendered as an empty box. See conversation notes.
+    assert by_id["v8"]["text"] == '<p><span style="font-weight:bold;color:#123456">Q3 Summary</span></p>'
+    assert by_id["v1"]["text"] is None  # a card's own `general` object has no `paragraphs`
+    # image resource (Report/StaticResources/RegisteredResources/logo.png) resolved to a
+    # real embedded data URI — previously never read at all, every `image` visual rendered
+    # as an empty frame regardless of whether it actually had a picture.
+    # Visual-container formatting (vcObjects.background/border) and the page's own
+    # wallpaper: previously discarded, so the renderer drew its own 1px box and generic
+    # fill on every visual regardless of what the report actually looked like.
+    assert by_id["v1"]["style"] == {"background": "#FFEECC", "border": True, "border_color": "#FF0000"}
+    assert by_id["v2"]["style"] == {}          # says nothing → renderer leaves it bare
+    assert p0["background"] == "#202020"
+    assert L["pages"][1]["background"] is None
+    assert by_id["v9"]["image_ref"] == {"package": "RegisteredResources", "item": "logo.png"}
+    assert by_id["v9"]["image_data_uri"].startswith("data:image/png;base64,")
+    assert by_id["v1"].get("image_data_uri") is None
     assert L["pages"][1]["hidden"] and L["pages"][1]["visuals"][0]["hidden"]
 
 
@@ -68,7 +85,16 @@ def test_pbir_layout_structure(fake_pbir_pbix):
     assert by_id["v2"]["fields"] == ["Region.Name", "Sales.Margin %"]
     # a malformed visual.json (v3) is skipped, not stubbed and not fatal to the page.
     assert "v3" not in by_id
-    assert len(by_id) == 2
+    # a group container ({"visualGroup": {...}}, no "visual" key) must be flagged is_group,
+    # not fall through to type="unknown"/is_group=False (it would then render as a
+    # full-page "unsupported" box instead of being skipped like a real group).
+    assert by_id["g1"]["is_group"] is True and by_id["g1"]["type"] == "__group__"
+    assert by_id["g1"]["title"] == "Header group"
+    # textbox content (objects.general.paragraphs) was never wired up before: every
+    # textbox rendered as an empty box. See conversation notes.
+    assert by_id["v5"]["text"] == '<p><span style="font-weight:bold;color:#123456">Q3 Summary</span></p>'
+    assert by_id["v1"]["text"] is None  # a card's own `general` object has no `paragraphs`
+    assert len(by_id) == 4
 
 
 def test_classic_layout_marks_its_format(fake_pbix):

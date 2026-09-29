@@ -40,7 +40,8 @@ def resolve_theme(layout_theme: dict | None) -> dict:
         t["muted"] = cj["foregroundNeutralSecondary"]
     if cj.get("backgroundNeutral"):
         t["border"] = cj["backgroundNeutral"]
-    face = ((cj.get("textClasses") or {}).get("title") or {}).get("fontFace") \
+    face = cj.get("fontFamily") \
+        or ((cj.get("textClasses") or {}).get("title") or {}).get("fontFace") \
         or ((cj.get("textClasses") or {}).get("label") or {}).get("fontFace")
     if face and not face.lower().startswith("segoe"):
         t["font_family"] = f"'{face}', system-ui, sans-serif"
@@ -84,13 +85,18 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "stacked": "stacked" in v["type"].lower(), "area": "area" in v["type"].lower(),
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
+                "image": v.get("image_data_uri"),
+                # {} when the .pbix says nothing about the frame — the template then
+                # leaves its own default in place instead of inventing a border.
+                "style": v.get("style") or {},
             }
             if include_sql:
                 entry["sql"] = vs.sql if vs else None
                 entry["params"] = vs.params if vs else []
             visuals.append(entry)
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
-                      "width": W, "height": H, "visuals": visuals})
+                      "width": W, "height": H, "background": p.get("background"),
+                      "visuals": visuals})
     parameters = {name: {"label": p.get("label") or name, "value": values.get(name)}
                   for name, p in spec.parameters.items()}
     return {"report": spec.report, "theme": resolve_theme(layout.get("theme")), "pages": pages, "parameters": parameters}

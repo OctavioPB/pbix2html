@@ -1,0 +1,22 @@
+{
+  "columns": ["sf_account_name", "u_teradata_customer_number", "gtm_acct_name", "gtm_acct_nbr",
+              "salesforce_id", "cloud_ops_site_flag", "lake_cloud_ops_site_flag", "ent_cloud_ops_site_flag",
+              "cust_site_id", "solution_sub_type", "td_managed_app_flag", "site_install_status",
+              "u_success_services_tier", "u_site_account_id", "cof_solution_type", "cof_relationship",
+              "cof_operational_status", "cof_site_id", "cof_cloud_account_id", "cof_system_use",
+              "cof_erp", "cof_account_name", "cof_asset_sys_updated_on", "sqle_nd_cnt", "nonsqle_nd_cnt"],
+  "rows": [
+    ["Acme Logistics", 100234, "Acme Logistics GTM", 5001, "0015f00001AbCdE",
+     1, 0, 1, "SITE-1001", "Enterprise", "Y", "Active", "Platinum", "ACCT-1001",
+     "VantageCloud", "Direct", "Operational", "SITE-1001", "CLD-9001", "Production",
+     "SAP", "Acme Logistics Inc", "2026-08-14", 6, 2],
+    ["Borealis Retail", 100567, "Borealis Retail GTM", 5002, "0015f00001XyZaB",
+     1, 1, 0, "SITE-1002", "Lake", "N", "Active", "Gold", "ACCT-1002",
+     "VantageCloud Lake", "Direct", "Operational", "SITE-1002", "CLD-9002", "Production",
+     "Oracle", "Borealis Retail Co", "2026-09-01", 3, 5],
+    ["Cobalt Financial", 100812, "Cobalt Financial GTM", 5003, "0015f00001QwErT",
+     1, 0, 1, "SITE-1003", "Enterprise", "Y", "Active", "Platinum", "ACCT-1003",
+     "VantageCloud", "Partner", "Operational", "SITE-1003", "CLD-9003", "Production",
+     "Workday", "Cobalt Financial Group", "2026-07-22", 10, 1]
+  ]
+}

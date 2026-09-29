@@ -6,11 +6,14 @@
 <div class="card">
   {% if reports %}
   <table>
-    <tr><th>Report</th><th>Metrics template</th><th>Generated HTML</th><th></th></tr>
+    <tr><th>Report</th><th>Metrics template</th><th>Visuals ready</th><th>Still need SQL by hand</th><th>Generated HTML</th><th></th></tr>
     {% for r in reports %}
     <tr>
       <td>{{ r.name }}</td>
       <td>{% if r.has_yaml %}<span class="badge yes">yes</span>{% else %}<span class="badge no">missing</span>{% endif %}</td>
+      <td>{% if r.readiness %}{{ r.readiness.ready }} / {{ r.readiness.needs_sql }}
+          <span class="muted">({{ r.readiness.percent }}%)</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if r.readiness %}{% if r.readiness.todo %}<span class="badge no">{{ r.readiness.todo }}</span>{% else %}<span class="badge yes">none</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{{ r.n_html }}</td>
       <td><a class="btn secondary" href="/reports/{{ r.name }}">Open</a></td>
     </tr>

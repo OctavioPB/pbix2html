@@ -1,10 +1,11 @@
 """Full pipeline without Teradata: extract → yaml → FakeBackend → render → HTML."""
-import json
 from pathlib import Path
+
+import pytest
 
 from pbix2html import extract as ex, semantic
 from pbix2html.query import FakeBackend, bind, run_report
-from pbix2html.render import render_html, build_spec
+from pbix2html.render import render_html
 from pbix2html.validate import compare
 
 FIX = {
@@ -78,6 +79,83 @@ def test_sql_stub_uses_validated_table_map_as_subquery():
 def test_sql_stub_skips_unsafe_table_map_entry():
     sql = semantic._sql_stub(["Sales"], {"Sales": "DELETE FROM sales_fact"})
     assert sql == "TODO -- see skill dax-to-teradata-sql; columns per kind"
+
+
+# ----------------------------------------------------------------------------
+# Table-map auto-detection from each table's own Power Query M source
+# ----------------------------------------------------------------------------
+
+_M_NATIVE_QUERY = (
+    'let\n'
+    '    Source = Value.NativeQuery(Teradata.Database("td.example.com", [HierarchicalNavigation=true]), '
+    '"SELECT snd.sf_account_name, snd.gtm_acct_name#(lf)FROM ACC_TED_VW.syscfg_cld_node_cnt AS snd#(lf)'
+    'WHERE snd.flag = 1 AND snd.name = ""X""", null, [EnableFolding=true])\n'
+    'in\n'
+    '    Source'
+)
+_M_DIRECT_REF = (
+    'let\n'
+    '    Source = Teradata.Database("td.example.com", [HierarchicalNavigation=true]),\n'
+    '    dbo_MyTable = Source{[Schema="dbo",Item="MyTable"]}[Data]\n'
+    'in\n'
+    '    dbo_MyTable'
+)
+_M_MERGE = (
+    'let\n'
+    '    Source = Sql.Database("host", "db"),\n'
+    '    a = Source{[Schema="dbo",Item="A"]}[Data],\n'
+    '    b = Source{[Schema="dbo",Item="B"]}[Data],\n'
+    '    merged = Table.NestedJoin(a, {"Id"}, b, {"Id"}, "b", JoinKind.Inner)\n'
+    'in\n'
+    '    merged'
+)
+_M_DYNAMIC_QUERY = 'Value.NativeQuery(Teradata.Database("h"), "SELECT * FROM " & tableName, null)'
+_M_FILTERED_REF = (
+    'let\n'
+    '    Source = Teradata.Database("h"),\n'
+    '    t = Source{[Schema="dbo",Item="A"]}[Data],\n'
+    '    filtered = Table.SelectRows(t, each [flag] = 1)\n'
+    'in\n'
+    '    filtered'
+)
+
+
+def test_detect_table_query_lifts_native_query_verbatim():
+    sql = semantic._detect_table_query(_M_NATIVE_QUERY)
+    assert sql == ('SELECT snd.sf_account_name, snd.gtm_acct_name\n'
+                    'FROM ACC_TED_VW.syscfg_cld_node_cnt AS snd\n'
+                    'WHERE snd.flag = 1 AND snd.name = "X"')
+
+
+def test_detect_table_query_recognizes_direct_table_reference():
+    assert semantic._detect_table_query(_M_DIRECT_REF) == "SELECT * FROM dbo.MyTable"
+
+
+def test_detect_table_query_ignores_merge_instead_of_reporting_one_side():
+    # Regression: an earlier version of this matched {[Schema=...,Item=...]} anywhere
+    # in the expression, so a table built by joining two sources ("merged") was wrongly
+    # reported as just one of its two inputs ("SELECT * FROM dbo.A") — a wrong, silently
+    # misleading answer, worse than leaving it blank for a person to fill in.
+    assert semantic._detect_table_query(_M_MERGE) is None
+
+
+def test_detect_table_query_ignores_dynamically_built_query():
+    assert semantic._detect_table_query(_M_DYNAMIC_QUERY) is None
+
+
+def test_detect_table_query_ignores_reference_with_an_extra_transform_step():
+    assert semantic._detect_table_query(_M_FILTERED_REF) is None
+
+
+def test_detect_table_map_from_power_query_end_to_end():
+    model = {"power_query": [
+        {"TableName": "TD_MANAGE_APP", "Expression": _M_NATIVE_QUERY},
+        {"TableName": "MyTable", "Expression": _M_DIRECT_REF},
+        {"TableName": "Merged", "Expression": _M_MERGE},
+    ]}
+    detected = semantic.detect_table_map_from_power_query(model)
+    assert set(detected) == {"TD_MANAGE_APP", "MyTable"}
+    assert detected["MyTable"] == "SELECT * FROM dbo.MyTable"
 
 
 # ----------------------------------------------------------------------------
@@ -197,6 +275,49 @@ def test_live_html_has_api_base(fake_pbix):
     spec = semantic.load("Executive_Dashboard")
     html = render_html(L, spec, {"year": 2026}, None, mode="live")
     assert "window.API_BASE" in html and 'id="data"' not in html
+
+
+def test_validate_theme_override_rejects_bad_hex():
+    with pytest.raises(ValueError):
+        semantic.validate_theme_override({"background": "blue"})
+
+
+def test_validate_theme_override_rejects_empty_object():
+    with pytest.raises(ValueError):
+        semantic.validate_theme_override({})
+
+
+def test_validate_theme_override_accepts_flat_font_family():
+    # The panel's manual form submits a flat `fontFamily`; a real Power BI export
+    # instead nests it under textClasses.title.fontFace (render.py checks both).
+    assert semantic.validate_theme_override({"fontFamily": "Georgia, serif"}) == {"fontFamily": "Georgia, serif"}
+
+
+def test_validate_theme_override_drops_unrecognized_keys():
+    # A pasted full Power BI theme export carries deep `visualStyles` formatting rules
+    # with no renderer for them — silently dropped, not stored, so the override file's
+    # purpose stays legible to whatever reads it back (only ever colors + font).
+    out = semantic.validate_theme_override({"name": "Corp", "visualStyles": {"*": {}}, "background": "#FFFFFF"})
+    assert out == {"background": "#FFFFFF"}
+
+
+def test_apply_theme_override_is_noop_without_one(fake_pbix):
+    L = ex.extract_layout(fake_pbix)
+    assert semantic.apply_theme_override(L, None) is L
+
+
+def test_theme_override_replaces_extracted_colors_in_rendered_html(fake_pbix):
+    # Regression scenario from the conversation: the .pbix's own extracted theme
+    # (#0F2B46, a real custom theme in this fixture) should be fully replaceable by
+    # an override, for the common real-world case where the extracted theme has no
+    # usable colors at all (a built-in Power BI theme name, no dataColors of its own).
+    L = ex.extract_layout(fake_pbix)
+    override = semantic.validate_theme_override({"dataColors": ["#AA00AA"], "background": "#111111"})
+    L = semantic.apply_theme_override(L, override)
+    spec = semantic.load("Executive_Dashboard")
+    html = render_html(L, spec, {"year": 2025}, None, mode="snapshot")
+    assert "#AA00AA" in html and "#111111" in html
+    assert "#0F2B46" not in html
 
 
 def test_hah_html_renders(fake_pbix):

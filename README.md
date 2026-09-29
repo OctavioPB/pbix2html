@@ -8,6 +8,18 @@ being available.
 > which reports are already migrated and which are next. If you're looking for a specific
 > report and it's not listed there, it hasn't been migrated yet.
 
+> **Who can finish a report without engineering help?** Be clear on this before planning
+> anyone's time: **migrating a report is not yet a self-service job.** The panel (section 3)
+> handles the setup, the table mapping, the simple visuals, and the whole convert/publish
+> side without anyone touching a terminal. But every visual whose number is anything more
+> than a plain sum/average/count — a ratio, a year-over-year, a filtered total — needs
+> **Teradata SQL written by hand**, and the final numeric check (`Validate`) needs Teradata
+> credentials. Those two steps need someone technical, on every report that has them.
+> Realistic split: a business user can drive the tool end to end and will finish the simple
+> reports alone; anything else is a shared job. The panel now tells you which kind you're
+> looking at before you start — the report list shows **how many visuals still need SQL by
+> hand** for each report.
+
 ---
 
 ## 1. What is this, in plain terms?
@@ -68,12 +80,83 @@ report chooses whichever fits the case.
 | RLS (*Row-Level Security*) | The rules that determine which data rows each role can see. |
 | DAX / SQL | Power BI's formula language (DAX) is rewritten by hand as Teradata SQL queries; no reliable automatic conversion exists. |
 
+These come up from section 3 onward — you don't need them to *use* a report, only to
+follow along while one is being built:
+
+| Term | In plain terms |
+|---|---|
+| Metrics template (the "yaml") | One settings file per report holding each visual's query, its filters, and its roles. The panel edits it for you; you never have to open it. |
+| Visual | One chart, table, or number tile on a report page. |
+| `TODO` | A marker meaning "nobody has written this visual's query yet". The panel counts these for you. |
+| Auto-drafted | A query the tool wrote by itself because the original was simple enough. It still needs a human to check it. |
+| Table mapping | Saying, once per report, where each Power BI table's data actually lives in Teradata. The tool now fills most of this in by itself. |
+| DBQL | A log inside Teradata that records the queries Power BI itself sent. Useful as a starting point and as the thing to check new queries against. Needs database access. |
+| Proxy user / trusted session | How the live version tells Teradata *which person* is asking, so Teradata shows that person only their own rows. Set up once by the technical team. |
+| Snapshot vs live vs HAH | Three ways to deliver the finished report: data frozen in the file, data fetched on open, or data fetched through the internal HTML App Host platform. |
+| Validate | The numeric check that compares the new report's numbers against the original's, visual by visual. Needs Teradata configured. |
+| PBIR | The newer internal format Power BI Desktop (2024+) saves `.pbix` files in. The tool reads both the old and new formats; you don't have to know which you have. |
+
 ---
 
-## 3. Control panel (build/validate reports without using a terminal)
+## 3. Migrating a report from the panel (no terminal)
 
-If you need to generate or review reports but don't want to use the command line, there's
-a local web panel with buttons and forms for the same four steps the technical team uses:
+This is the complete walkthrough for doing a report from the browser. It's the same job
+section 4 describes with typed commands — you don't need that section unless you're
+installing the tool or want the command-line version.
+
+**Before you start (one time, done by someone technical):** the tool is installed on the
+machine and you're left an **`Open_Panel.bat`** file. Everything after that is yours.
+
+### Step by step
+
+1. **Open the panel.** Double-click `Open_Panel.bat`. A black window opens — leave it
+   open, that's the program running — and your browser opens at `http://127.0.0.1:8765`.
+   Closing that black window is how you shut everything down at the end.
+
+2. **Add the report.** The first page lists the reports already there. Use **Upload
+   .pbix** to add yours, then click **Open** next to it.
+   *This list also shows, per report, how many visuals still need SQL written by hand —
+   that's your early read on whether a report is a quick job or needs engineering time.*
+
+3. **Click Extract.** Reads the `.pbix`: pages, visuals, measures. It also fills in as
+   much of the table mapping (step 4) as it can on its own, and picks up any logos or
+   background pictures so they show in the finished report. Nothing to configure.
+
+4. **Check the table mapping** (*Map tables*). This says where each Power BI table's data
+   actually lives in Teradata. Rows marked **detected automatically** were filled in by
+   step 3 — skim them. Any row left blank needs a read-only `SELECT` query from someone
+   who knows the database. You can come back to this later.
+
+5. **Click Generate template.** Creates the per-report settings file, and writes the SQL
+   for every visual simple enough to do automatically. The result message tells you
+   exactly where you stand: *"N of M visuals have working SQL, K still need it written by
+   hand."* The same figure stays visible at the top of the report page.
+
+6. **Fill in the rest** (*Edit SQL, parameters & roles*). A form in the browser: one card
+   per visual, its query in a text box, plus the report's filters and roles.
+   - Visuals marked **Auto-drafted** already have a query — it still needs checking.
+   - Visuals still saying `TODO` need Teradata SQL written by hand. **This is the step
+     that needs someone technical**, and it's usually the bulk of the work on a real
+     report. There's no way around it today.
+   - Anything you type is checked to be a plain read-only query before it saves, and
+     rejected with the reason if it isn't.
+
+7. **Set the colors if they came out wrong** (*Custom theme*, optional). Many `.pbix`
+   files don't actually store their colors, only the name of a built-in Power BI theme —
+   nothing can be recovered automatically in that case. Set them here once and every
+   later conversion uses them.
+
+8. **Click Convert to HTML.** Pick snapshot or live, the role, and the report's filters.
+   You get the finished `.html`. Open it next to the original and compare.
+
+9. **Click Validate** to check the numbers visual by visual against the original.
+   **This needs Teradata credentials configured**, so it may be a step you hand over.
+
+10. **Made a mess? Use *Restore a previous version*** on the report page. Every time the
+    settings file is overwritten — including by **Regenerate template** — the version
+    before it is kept, and you can put any of them back. Restoring is itself undoable.
+
+### Everything the panel can do
 
 1. Someone technical installs the tool once (see section 4) and leaves you an
    **`Open_Panel.bat`** file on the desktop or in a shared folder.
@@ -81,10 +164,19 @@ a local web panel with buttons and forms for the same four steps the technical t
    program running) and the browser opens on its own at `http://127.0.0.1:8765`.
 3. There you'll see the list of available reports (`.pbix`). You can upload a new one
    with the corresponding button, or open an existing one to:
-   - **Extract** its structure (pages, visuals, measures).
+   - **Extract** its structure (pages, visuals, measures). This also tries to auto-fill
+     the table mapping below by reading each table's own Power Query source (the
+     `.pbix`'s own M code, not something typed anywhere) — a straight table reference,
+     or a query Power BI itself was already sending, both turn into a ready mapping with
+     no manual step; anything more involved (a merge, a filter, a dynamically-built
+     query) is left for the next step. Embedded pictures (logos, backgrounds) are also
+     picked up automatically here and show up for real in the generated report instead
+     of an empty frame — nothing to configure.
    - **Map Power BI tables to Teradata** (optional): give it a read-only Teradata query
      for each Power BI table name, once per report (single `SELECT`/`WITH` only — no
-     `INSERT`/`UPDATE`/`DELETE`, no DDL, checked before it's saved).
+     `INSERT`/`UPDATE`/`DELETE`, no DDL, checked before it's saved). Rows already filled
+     in by Extract are marked **detected automatically** — review them like anything
+     else here, they're a mechanical pattern match, not a guarantee.
    - **Generate the metrics template** (`metrics/<Report>.yaml`) — one click creates it.
      If you did the table-mapping step, most visuals come back with a **working `sql`
      already drafted**, not a blank `TODO`: measures that are a single SUM/AVERAGE/MIN/
@@ -94,11 +186,22 @@ a local web panel with buttons and forms for the same four steps the technical t
      notes — still review it and run **Validate** (step 4) before trusting it, same as
      anything else here. Whatever it can't confidently draft (a calculated/filtered
      measure, time intelligence, an unclear join) is left as `TODO`, same as before.
+     The result message says how many visuals ended up in each state, and the same count
+     stays at the top of the report page and in the report list.
+   - **Restore a previous version**: every overwrite of `metrics/<Report>.yaml` — the
+     **Regenerate template** button included — keeps a timestamped copy under
+     `metrics/backups/` first, and this puts any of them back. Restoring saves the
+     current version too, so it's undoable in both directions. Nobody needs git or a
+     text editor to recover from a wrong click.
    - **Edit SQL, parameters & roles**: a form in the browser — a table for parameters, a
      table for roles, and one card per visual with its `sql` in a text box, pre-filled
      when auto-drafted, blank otherwise. Nobody needs to open or hand-edit the yaml file
      itself; every query is checked to be a single read-only `SELECT`/`WITH` before it's
      saved, and rejected with the exact reason if it isn't.
+   - **Custom theme** (optional): many reports' extracted theme is just the *name* of a
+     built-in Power BI theme, with no actual colors stored in the `.pbix` — nothing to
+     recover automatically in that case. Set colors/font by hand here (or paste a theme
+     JSON exported from Power BI Desktop), and every conversion from then on uses it.
    - **Convert to HTML**: pick the mode (snapshot/live/HAH), role, and the report's
      parameters (year, region, etc.) in a form, with plain-language names taken from the yaml.
      Picking **Live** shows whether the live service is reachable and a **Start live
@@ -188,17 +291,19 @@ CLAUDE.md, PLAN.md              project governance (read first)
 .claude/commands/*              /convert, /validate, /new-renderer
 src/pbix2html/                  extract → semantic → query → render → validate; serve (live), gui (panel)
 metrics/<Report>.yaml           semantic layer: SQL per visual (this is what's migrated by hand)
-reference/pbix_extract.py       original extraction script (reference)
 tests/                          synthetic .pbix + full pipeline with a fake backend
+skills/pbix-to-html/          packaged Claude skill: same conversion, in a chat, no install
 docs/ARCHITECTURE.md, decisions/ ADRs
 ```
 
 ### Step-by-step: migrate your first report
 
 Follow this end to end for **one** report at a time (see `CLAUDE.md` rule 1 — never batch
-all ~50 in a session). Everything below can be done with these CLI commands, or through
-the [panel](#3-control-panel-buildvalidate-reports-without-using-a-terminal) (section 3)
-if you'd rather click through it.
+all ~50 in a session).
+
+> This is the command-line version, for the technical team. The same job done from the
+> browser is [section 3](#3-migrating-a-report-from-the-panel-no-terminal), which is a
+> complete walkthrough in its own right — point non-technical people there, not here.
 
 1. **Put the file in place.** Copy the `.pbix` into `reports/` (e.g. `reports/Sales.pbix`).
 
@@ -231,8 +336,10 @@ if you'd rather click through it.
    This creates `metrics/Sales.yaml` (from `metrics/_template.yaml`) with one entry per
    visual, slicers turned into `parameters:`, and RLS roles pulled from the model if any
    were found. This file is the one you edit by hand from here on; re-running `scaffold`
-   again requires `--overwrite` and **wipes any SQL you've already written**, so only do
-   that on purpose.
+   again requires `--overwrite` and **replaces any SQL you've already written**, so only do
+   that on purpose. An overwrite copies the current file to `metrics/backups/<Report>.<stamp>.yaml`
+   first (`semantic.list_backups` / `restore_backup`, or the panel's *Restore a previous
+   version*), so it's recoverable — but don't lean on that instead of committing.
 
 5. **Capture the reference SQL from DBQL.** Open the report in Power BI, interact with
    each visual, then pull the SQL the gateway actually sent to Teradata (skill
