@@ -285,6 +285,11 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > working directory); if it's still happening, the 404's own message names the exact
 > path it looked for and where it's actually running from.
 >
+> **Visual shows `HTTP 500` with a message?** The service found the yaml and the failure happened when
+> running the query: the message in the visual is the real error, and the full traceback is printed in the
+> terminal where `serve.py` runs (a Teradata error, a wrong table/column in a drafted SQL, a proxy user without
+> `GRANT CONNECT THROUGH`, or missing `TERADATA_*` in `.env`).
+>
 > **Visual shows `HTTP 401` instead?** This is expected, not a bug, when there's no
 > reverse proxy in front of `serve.py` injecting the `AUTH_HEADER` (`X-Authenticated-User`
 > by default) after SSO — which is exactly the case when previewing on your own machine.

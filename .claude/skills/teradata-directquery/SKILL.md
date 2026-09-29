@@ -79,3 +79,11 @@ change daily: a TTL of a few hours is reasonable; it's invalidated on regenerati
 - `SAMPLE` only for development; never in a production yaml.
 - Timeouts: `teradatasql` has no native query timeout; `SET SESSION`... doesn't exist for
   this; control it with `asyncio.wait_for` in `serve.py` and `ABORT SESSION` if needed.
+
+## Sessions in live mode (`TeradataBackend`)
+
+A small pool (`max_connections`, default 4): each request checks a session out, sets `QUERY_BAND
+PROXYUSER`, runs, clears it and returns the session. The report fires every visual at once, so a single shared
+session would interleave requests and let one request run under another user's identity; never share a session
+across requests. Any error discards the session (identity/state can't be trusted) and the next request
+reconnects, so a dropped connection heals. `serve.py` logs the full traceback of a failing visual/slicer.
