@@ -219,3 +219,24 @@ def test_multi_fact_sql_parses_as_teradata():
 def test_multi_fact_with_two_values_or_a_table_visual_stays_manual():
     v = {"projections": {"Values": ["A.Ending"]}}
     assert S._draft_visual_sql(v, "table", MF_MEASURES, MF_MAP, MF_RELS, MF_PARAMS) is None
+
+
+# ---- FORMAT with time parts, TIME(), NOW() ----------------------------------------------------
+
+def _translate(dax):
+    r = S.translate_dax(dax, {})
+    return r and r.text
+
+
+def test_format_with_time_parts_and_time_arithmetic():
+    sql = _translate('FORMAT(MAX(T[ts]) + TIME(4,0,0), "yyyy-mm-dd hh:mm:ss")')
+    assert "(INTERVAL '04:00:00' HOUR TO SECOND)" in sql
+    for element in ("'YYYY'", "'MM'", "'DD'", "'HH24'", "'MI'", "'SS'"):
+        assert f", {element})" in sql
+    assert sql.count("'MM'") == 1 and sql.count("'MI'") == 1      # mm is month first, minutes after hh
+
+
+def test_now_keeps_the_time_and_unsupported_formats_stay_manual():
+    assert _translate("NOW()") == "CURRENT_TIMESTAMP(0)" or "CURRENT_TIMESTAMP(0)" in (_translate("MAX(T[ts]) - NOW()") or "")
+    assert _translate('FORMAT(MAX(T[ts]), "hh:mm AM/PM")') is None          # 12-hour clock: not translated
+    assert _translate("TIME(a, 0, 0)") is None

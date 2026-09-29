@@ -606,15 +606,37 @@ def _dax_format_sql(fmt: str, date_expr: str) -> str | None:
     blank-padded month name never leaves gaps inside the result."""
     pieces: list[str] = []
     i = 0
+    prev_hour = False                       # `mm` right after hours (or before seconds) is minutes
+    low = fmt.lower()
+    if "am/pm" in low or "a/p" in low:
+        return None                         # 12-hour clocks aren't translated
     while i < len(fmt):
+        rest = low[i:]
+        if rest.startswith("hh") or rest.startswith("h"):
+            n = 2 if rest.startswith("hh") else 1
+            pieces.append(f"TO_CHAR({date_expr}, 'HH24')" if n == 2 else f"CAST(EXTRACT(HOUR FROM {date_expr}) AS VARCHAR(2))")
+            i += n
+            prev_hour = True
+            continue
+        if rest.startswith("ss"):
+            pieces.append(f"TO_CHAR({date_expr}, 'SS')")
+            i += 2
+            prev_hour = False
+            continue
+        if rest.startswith("nn") or (rest.startswith("mm") and (prev_hour or re.match(r"mm\s*:\s*ss", rest))):
+            pieces.append(f"TO_CHAR({date_expr}, 'MI')")
+            i += 2
+            prev_hour = False
+            continue
         for token, (element, is_name) in _FORMAT_TOKENS:
             if fmt[i:i + len(token)].upper() == token:
                 one = f"TO_CHAR({date_expr}, '{element}')"
                 pieces.append(f"TRIM({one})" if is_name else one)
                 i += len(token)
+                prev_hour = False
                 break
         else:
-            if fmt[i] not in " -/,":
+            if fmt[i] not in " -/,:":
                 return None
             pieces.append("'" + fmt[i] + "'")
             i += 1
@@ -1267,7 +1289,7 @@ class _DaxTranslator:
         self._expect("(")
         if name in ("TODAY", "NOW"):
             self._expect(")")
-            return "CURRENT_DATE"
+            return "CURRENT_DATE" if name == "TODAY" else "CURRENT_TIMESTAMP(0)"
         if name in ("MIN", "MAX"):
             table = self._table_name()
             nxt = self._peek()
@@ -1414,7 +1436,29 @@ class _DaxTranslator:
         if name in ("TODAY", "NOW"):
             self._expect("(")
             self._expect(")")
-            return "CURRENT_DATE"
+            return "CURRENT_DATE" if name == "TODAY" else "CURRENT_TIMESTAMP(0)"
+        if name == "FORMAT":
+            self._expect("(")
+            value = self._expression(filters)
+            self._expect(",")
+            kind, text = self._take()
+            if kind != "string":
+                raise _DaxUnsupported("FORMAT needs a literal format string")
+            self._expect(")")
+            out = _dax_format_sql(text[1:-1], value)
+            if out is None:
+                raise _DaxUnsupported(f"FORMAT string {text} isn't translated")
+            return f"({out})"
+        if name == "TIME":
+            self._expect("(")
+            parts = []
+            for i in range(3):
+                kind, text = self._take()
+                if kind != "number" or not text.isdigit():
+                    raise _DaxUnsupported("TIME needs literal integers")
+                parts.append(int(text))
+                self._expect(")" if i == 2 else ",")
+            return f"(INTERVAL '{parts[0]:02d}:{parts[1]:02d}:{parts[2]:02d}' HOUR TO SECOND)"
         if name == "CALCULATE":
             return self._calculate(filters)
         if name == "IF":

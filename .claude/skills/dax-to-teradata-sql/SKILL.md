@@ -158,3 +158,10 @@ through more than one relationship hop. Drill-through filters (`howCreated` 5) a
 their saved value is only the last one the author tried, and the HTML has no drill-through navigation yet.
 Unverified against Power BI: the Top N ranking direction/tie handling and the aggregate-function codes
 (0 Sum, 1 Avg, 2 Count distinct, 3 Min, 4 Max, 5 Count), taken from Power BI's enums.
+
+## FORMAT with time, TIME(), NOW()
+
+`FORMAT(x, "yyyy-mm-dd hh:mm:ss")` → `TO_CHAR` pieces joined with `||` (`hh`→`HH24`; `mm` is minutes right after
+`hh` or before `ss`, month otherwise; 12-hour `AM/PM` isn't translated). `TIME(h,m,s)` with literal integers →
+`INTERVAL 'hh:mm:ss' HOUR TO SECOND`. `NOW()` → `CURRENT_TIMESTAMP(0)` (keeps the time), `TODAY()` → `CURRENT_DATE`.
+Time zone: Power BI's `NOW()` is UTC in the service and local in Desktop; the Teradata session zone decides here.

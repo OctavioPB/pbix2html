@@ -142,6 +142,16 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
   from the source page is not modelled.
 - `pbix2html mapping` now previews the table map from Power Query without saving it.
 
+## Findings from a fifth real report, DirectQuery ops dashboard (2026-09-29)
+
+- Small (5 pages, 4 hidden and unlinked; 9 DirectQuery tables from custom Teradata SQL with regexp/time-zone
+  syntax that passes through untouched). 6 of 6 data visuals drafted after adding `FORMAT` with time parts,
+  `TIME()` and `NOW()` (was: `FORMAT(MAX(ts) + TIME(4,0,0), "yyyy-mm-dd hh:mm:ss")` untranslatable).
+- `NOW()` used to become `CURRENT_DATE` (lost the time): now `CURRENT_TIMESTAMP(0)`.
+- A visual-level filter on a table with no relationship path to the visual has no effect in Power BI; not reported.
+- Custom theme (`TeradataTheme*.json`) renders; the report has one visible page, so most of its content is
+  reachable only with `--include-hidden`.
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`
