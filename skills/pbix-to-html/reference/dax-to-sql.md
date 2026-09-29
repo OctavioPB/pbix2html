@@ -61,7 +61,7 @@ measure's DAX. Every one with a `definition` becomes a `WHERE` predicate on that
 | `Not In` / "is not" | `(col NOT IN (...) OR col IS NULL)` — Power BI keeps blanks in a negated filter |
 | comparison, range (`And` of `>=`/`<=`) | `col >= x AND col <= y`; dates as `DATE 'YYYY-MM-DD'` |
 | contains / starts / ends with | `col LIKE '%x%' ESCAPE '\'` (escape `%` and `_`) |
-| Top N (`Top n` of `col` by `Sum(y)`) | `col IN (SELECT k FROM (SELECT col k, SUM(y) a FROM T [WHERE slicers on T] GROUP BY 1) t QUALIFY RANK() OVER (ORDER BY a DESC) <= n)` |
+| Top N (`Top n` of `col` by `Sum(y)`) | `col IN (SELECT t.k FROM (SELECT col k, SUM(y) a FROM T [WHERE slicers on T] GROUP BY 1) t WHERE (SELECT COUNT(*) FROM (…same…) u WHERE u.a > t.a) < n)` (no window function: Teradata error 3706 forbids them in a subquery) |
 | a filter on a table the visual doesn't read | semi-join through the relationship; with no relationship it has no effect |
 | filter on an aggregate (`aggregation` set) or a measure | `HAVING` / measure test — not automatic, do it by hand |
 

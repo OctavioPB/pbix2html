@@ -71,6 +71,25 @@ templates = _Templates()
 # Utilities
 # ----------------------------------------------------------------------------
 
+def _default_value(text: str, multi: bool, dtype: str | None, previous: Any) -> Any:
+    """A parameter default typed in the edit page. A multi-value parameter is a list (`2026` or `a, b`;
+    numbers stay numbers for a numeric slicer field), never the text `[2026]`: the page shows a list as
+    `a, b`, and saving what it showed must give the list back."""
+    if text == "":
+        return None
+    if not multi:
+        return text
+    items = semantic.multi_values(text)
+    numeric = dtype == "number" or (isinstance(previous, list) and previous
+                                    and all(isinstance(x, (int, float)) for x in previous))
+    if numeric:
+        try:
+            items = [int(x) if float(x).is_integer() else float(x) for x in items]
+        except (TypeError, ValueError):
+            pass
+    return items
+
+
 def _pbix_files() -> list[Path]:
     if not REPORTS_DIR.exists():
         return []
@@ -514,16 +533,16 @@ async def save_edit(request: Request, name: str):
         p = dict(p or {})
         p["type"] = form.get(f"param__{pname}__type") or p.get("type") or "string"
         default = form.get(f"param__{pname}__default", "")
-        p["default"] = default if default != "" else None
         p["label"] = form.get(f"param__{pname}__label") or p.get("label") or pname
         p["multi"] = form.get(f"param__{pname}__multi") == "on"
+        p["default"] = _default_value(default, p["multi"], p.get("dtype"), p.get("default"))
         parameters[pname] = p
     new_pname = (form.get("newparam__name") or "").strip()
     if new_pname:
         default = form.get("newparam__default", "")
         parameters[new_pname] = {
             "type": form.get("newparam__type") or "string",
-            "default": default if default != "" else None,
+            "default": _default_value(default, form.get("newparam__multi") == "on", None, None),
             "label": form.get("newparam__label") or new_pname,
             "multi": form.get("newparam__multi") == "on",
         }

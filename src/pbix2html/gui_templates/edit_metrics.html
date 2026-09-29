@@ -34,7 +34,7 @@
             {% endfor %}
           </select>
         </td>
-        <td><input type="text" name="param__{{ pname }}__default" value="{{ p.default if p.default is not none else '' }}"></td>
+        <td><input type="text" name="param__{{ pname }}__default" value="{{ (p.default|join(', ') if p.default is sequence and p.default is not string else p.default) if p.default is not none else '' }}"></td>
         <td><input type="text" name="param__{{ pname }}__label" value="{{ p.label or pname }}"></td>
         <td class="checkbox-row" style="margin:0"><input type="checkbox" name="param__{{ pname }}__multi" {{ "checked" if p.multi }}></td>
         <td class="checkbox-row" style="margin:0"><input type="checkbox" name="param__{{ pname }}__delete"></td>
