@@ -39,12 +39,13 @@ Theme lives at `Report/StaticResources/SharedResources/BaseThemes/<Name>.json` i
 `RegisteredResources`. `layout.json["format"]` is `"pbir"` or `"classic"` so downstream
 code (and you) can tell which parser produced it.
 
-**Still unconfirmed against a real file** (best-effort defaults in `_parse_visual_pbir`/
-`_parse_page_pbir`, marked `# TODO` in `extract.py`): how a visual **group** is
-represented (classic uses `singleVisualGroup`; PBIR's equivalent hasn't been observed
-yet), page/visual **filters**, and the exact **hidden-page** key. If you're looking at a
-real PBIR `.pbix` and hit one of these, that's the structure to capture — see "When you
-find a new structure" below; `tests/fixtures/make_fake_pbir_pbix.py` is the fixture to extend.
+**Mapped from Microsoft's PBIR schemas, still unconfirmed against a real file**
+(`_parse_visual_pbir`/`_parse_page_pbir`/`_pbir_custom_packages`): visual `isHidden`,
+`parentGroupName`, `filterConfig.filters` (filter target under `field`, handled by
+`parse_filters`), page `visibility == "HiddenInViewMode"`, and custom visuals from
+`report.json` (`publicCustomVisuals`, `resourcePackages` of type `CustomVisual`). If a real
+file disagrees, capture the structure — see "When you find a new structure" below;
+`tests/fixtures/make_fake_pbir_pbix.py` is the fixture to extend.
 
 ## Layout nesting
 
