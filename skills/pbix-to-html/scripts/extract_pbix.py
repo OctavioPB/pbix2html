@@ -215,6 +215,10 @@ def resolve_theme_markers(layout: dict) -> None:
             if isinstance(style, dict):
                 fix(style, "background")
                 fix(style, "border_color")
+            for state in ((v.get("button") or {}).get("states") or {}).values():
+                for card in ("text", "fill", "outline"):
+                    if isinstance(state.get(card), dict):
+                        fix(state[card], "color")
 
 
 def _object_color(objects: dict, name: str, prop: str = "color",
@@ -356,6 +360,91 @@ def _fill_color(objects: dict) -> str | None:
         solid = ((props["fillColor"] or {}).get("solid") or {}).get("color") or {}
         return literal_color(solid.get("expr"))
     return None
+
+
+_BUTTON_STATES = ("default", "hover", "pressed", "disabled", "selected")
+
+
+def _num(expr: Any) -> float | None:
+    """A numeric literal such as `11D` / `2L` / `0.5D` → float."""
+    text = literal_to_text(expr)
+    if text is None:
+        return None
+    try:
+        return float(text.rstrip("DdLl"))
+    except ValueError:
+        return None
+
+
+def _bool(expr: Any) -> bool | None:
+    text = literal_to_text(expr)
+    return {"true": True, "false": False}.get(text) if text is not None else None
+
+
+def _color_prop(prop: Any) -> str | None:
+    return literal_color(((prop or {}).get("solid") or {}).get("color", {}).get("expr")) if isinstance(prop, dict) else None
+
+
+def parse_button(sv: dict) -> dict | None:
+    """Formatting of an `actionButton`, per state: {state: {text, fill, outline, round, icon}}.
+
+    Power BI stores each formatting card (`text`, `fill`, `outline`, `shape`, `icon`) as a list
+    of entries: one without a selector that carries the card's `show` flag, and one per
+    state (`selector.id`: default / hover / pressed / disabled / selected) with only the
+    properties that differ from the button defaults. A state's missing properties fall back
+    to `default` (merged by the renderer). Only what the report sets is returned, so absent
+    keys mean "not set" and the renderer does not invent styling. The property names beyond
+    `text`, `fontSize`, `fill.fillColor/transparency` and `icon.shapeType` follow Power BI's
+    documented names but are unverified against a real file (see ADR-005)."""
+    objects = (sv or {}).get("objects") or {}
+    shown: dict[str, bool] = {}
+    for card in ("text", "fill", "outline", "shape", "icon"):
+        for e in objects.get(card) or []:
+            if not (e or {}).get("selector"):
+                flag = _bool((((e.get("properties") or {}).get("show") or {}).get("expr")))
+                if flag is not None:
+                    shown[card] = flag
+    states: dict[str, dict] = {}
+    for card in ("text", "fill", "outline", "shape", "icon"):
+        for e in objects.get(card) or []:
+            sel = ((e or {}).get("selector") or {}).get("id")
+            if sel not in _BUTTON_STATES:
+                continue
+            pr = e.get("properties") or {}
+            st = states.setdefault(sel, {})
+            ex = lambda k: (pr.get(k) or {}).get("expr")   # noqa: E731
+            if card == "text":
+                t = {k: v for k, v in {
+                    "label": literal_to_text(ex("text")), "size": _num(ex("fontSize")),
+                    "color": _color_prop(pr.get("fontColor")), "font": literal_to_text(ex("fontFamily")),
+                    "bold": _bool(ex("bold")), "italic": _bool(ex("italic")), "underline": _bool(ex("underline")),
+                    "align": literal_to_text(ex("horizontalAlignment")),
+                    "valign": literal_to_text(ex("verticalAlignment")),
+                }.items() if v is not None}
+                if t:
+                    st["text"] = t
+            elif card == "fill":
+                f = {k: v for k, v in {"color": _color_prop(pr.get("fillColor")),
+                                       "transparency": _num(ex("transparency"))}.items() if v is not None}
+                if f:
+                    st["fill"] = f
+            elif card == "outline":
+                o = {k: v for k, v in {"color": _color_prop(pr.get("lineColor")), "weight": _num(ex("weight")),
+                                       "transparency": _num(ex("transparency"))}.items() if v is not None}
+                if o:
+                    st["outline"] = o
+            elif card == "shape":
+                r = _num(ex("roundEdge"))
+                if r is not None:
+                    st["round"] = r
+            elif card == "icon":
+                kind = literal_to_text(ex("shapeType"))
+                if kind:
+                    st["icon"] = kind
+    hidden = {c for c, flag in shown.items() if flag is False}
+    if not states and not hidden:
+        return None
+    return {"states": states, "hidden": sorted(hidden)}
 
 
 def _style_with_fill(style: dict, objects: dict) -> dict:
@@ -601,6 +690,7 @@ def _parse_visual(vc: dict) -> dict:
         "style": _style_with_fill(container_style(vco), sv.get("objects") or {}),
         "texts": texts,
         "action": _visual_link(vco),
+        **({"button": parse_button(sv)} if vtype == "actionButton" else {}),
     })
     return visual
 

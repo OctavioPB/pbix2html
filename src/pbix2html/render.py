@@ -70,6 +70,86 @@ def _background_image_css(bg: dict | None) -> str | None:
     return f"url({uri}) center / {size} no-repeat"
 
 
+_HEX6 = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_FLEX = {"left": "flex-start", "center": "center", "right": "flex-end",
+         "top": "flex-start", "middle": "center", "bottom": "flex-end"}
+
+
+def _rgba(color: str | None, transparency: float | None) -> str | None:
+    """'#RRGGBB' + Power BI transparency (0-100) → a CSS colour; None if not a plain hex."""
+    if not color or not _HEX6.match(color):
+        return None
+    alpha = 1 - min(max(transparency or 0, 0), 100) / 100
+    if alpha >= 1:
+        return color.upper()
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r},{g},{b},{alpha:.2f})"
+
+
+def _merged_state(states: dict, name: str) -> dict:
+    """`default` overlaid with the named state, card by card (Power BI stores only the
+    properties a state changes)."""
+    out: dict = {}
+    for src in (states.get("default") or {}, states.get(name) or {} if name != "default" else {}):
+        for k, v in src.items():
+            out[k] = {**out.get(k, {}), **v} if isinstance(v, dict) else v
+    return out
+
+
+def _button_css(button: dict | None) -> str | None:
+    """A button's stored formatting as CSS custom properties for the template's `.btn` rules
+    (default plus hover / pressed / disabled). Every value is rebuilt from validated pieces
+    (hex colours, numbers, a fixed alignment table), never copied from the file."""
+    if not button:
+        return None
+    states, hidden = button.get("states") or {}, set(button.get("hidden") or [])
+    css: dict[str, str] = {}
+
+    def fill(m: dict) -> str:
+        f = m.get("fill") or {}
+        return "transparent" if "fill" in hidden else (_rgba(f.get("color"), f.get("transparency")) or "transparent")
+
+    def outline(m: dict) -> str:
+        o = m.get("outline") or {}
+        c = _rgba(o.get("color"), o.get("transparency"))
+        if "outline" in hidden or not c:
+            return "none"
+        return f"inset 0 0 0 {min(max(o.get('weight') or 1, 0), 20):g}px {c}"
+
+    base = _merged_state(states, "default")
+    css["--bg0"], css["--ol"] = fill(base), outline(base)
+    t = base.get("text") or {}
+    if t.get("color") and _HEX6.match(t["color"]):
+        css["--fg"] = t["color"]
+    if t.get("size"):
+        css["--fs"] = f"{min(max(t['size'], 4), 96):g}pt"
+    if t.get("bold"):
+        css["--fw"] = "bold"
+    if t.get("italic"):
+        css["--fi"] = "italic"
+    if t.get("underline"):
+        css["--td"] = "underline"
+    font = re.split(r"[,]", str(t.get("font") or ""))[0].strip().strip("'\"")
+    if font and re.fullmatch(r"[\w .-]{1,60}", font):
+        css["--ff"] = f"'{font}', system-ui, sans-serif"
+    if t.get("align") in _FLEX:
+        css["--jc"] = _FLEX[t["align"]]
+        css["--ta"] = t["align"]
+    if t.get("valign") in _FLEX:
+        css["--ai"] = _FLEX[t["valign"]]
+    if isinstance(base.get("round"), (int, float)):
+        css["--rad"] = f"{min(max(base['round'], 0), 200):g}px"
+    for suffix, name in (("h", "hover"), ("p", "pressed"), ("d", "disabled")):
+        if name not in states:
+            continue
+        m = _merged_state(states, name)
+        css[f"--bg-{suffix}"], css[f"--ol-{suffix}"] = fill(m), outline(m)
+        c = (m.get("text") or {}).get("color")
+        if c and _HEX6.match(c):
+            css[f"--fg-{suffix}"] = c
+    return ";".join(f"{k}:{v}" for k, v in css.items())
+
+
 def _group_chain(v: dict, by_id: dict) -> list[str]:
     """Ids of the groups a visual sits in, nearest first (cycles ignored)."""
     chain: list[str] = []
@@ -201,6 +281,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "action": (_page_action(v.get("action"), by_name, shown | nav_only)
                            or _bookmark_action(v.get("action"), bookmarks, p, all_pages, warnings)),
                 "groups": _group_chain(v, by_id),
+                "btn_css": _button_css(v.get("button")),
+                "btn_off": bool((v.get("action") or {}).get("enabled") is False
+                                and "disabled" in ((v.get("button") or {}).get("states") or {})),
                 # subtitle / button label / axis + legend titles, as the report sets
                 # them (see extract.py's visual_text). Absent keys mean "not set" —
                 # the renderer shows nothing rather than inventing a label.

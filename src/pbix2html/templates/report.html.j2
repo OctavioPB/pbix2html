@@ -47,6 +47,14 @@
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
+  .visual.btn { background: var(--bg0, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
+  .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, .8rem); font-family: var(--ff, inherit); font-weight: var(--fw, normal); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
+  .visual.btn:hover { background: var(--bg-h, var(--bg0, transparent)); box-shadow: var(--ol-h, var(--ol, none)); }
+  .visual.btn:hover .shape-text { color: var(--fg-h, var(--fg, inherit)); }
+  .visual.btn:active { background: var(--bg-p, var(--bg-h, var(--bg0, transparent))); box-shadow: var(--ol-p, var(--ol-h, var(--ol, none))); }
+  .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
+  .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
+  .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
   .error { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
@@ -84,9 +92,9 @@
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
-              ; background: {{ v.style.background or 'transparent' }}
+              {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}

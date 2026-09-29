@@ -36,8 +36,16 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
 - [x] **Bookmarks and action buttons** — `docs/decisions/ADR-005`, phases 1, 2a, 2b done and
       verified on the real report (view switchers, monthly/historical toggle). Bookmarks saved on
       the historical page are reused on its monthly clone by group name (logged; owner confirmed
-      the intent). Open: bookmark-captured filter/slicer state (phase 3), the button per-state
-      formatting, and PBIR bookmarks (`Report/definition/bookmarks/`, unverified).
+      the intent). Open: bookmark-captured filter/slicer state (phase 3) and PBIR bookmarks
+      (`Report/definition/bookmarks/`, unverified).
+- [x] **Button formatting** — `extract.parse_button` reads text (label, size, colour, font,
+      bold/italic/underline, alignment), fill, outline, corner radius and icon per state
+      (default / hover / pressed / disabled), and `render._button_css` converts it to validated CSS
+      variables with hover/pressed/disabled rules, in both templates. The real report only uses
+      `default` text (`fontSize`) and fill; every other property name is Power BI's documented one
+      but **unverified against a real file**. Not done: icons (only `blank` seen), the
+      `selected` state, and Power BI's built-in defaults when a card is absent (an unstyled button
+      renders transparent; if Desktop shows a fill or grey text there, capture it).
 - [x] Hidden `HST ...` pages are the *historical* twin of each monthly page, reached through a
       "Current Month / Historic Data" button pair (owner-confirmed). Now rendered when a
       visible page links to them (ADR-005 phase 2a). Tooltip pages stay out. Open: the twin

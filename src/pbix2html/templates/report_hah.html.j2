@@ -53,6 +53,15 @@
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
+  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
+  .visual.btn { background: var(--bg0, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
+  .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, .8rem); font-family: var(--ff, inherit); font-weight: var(--fw, normal); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
+  .visual.btn:hover { background: var(--bg-h, var(--bg0, transparent)); box-shadow: var(--ol-h, var(--ol, none)); }
+  .visual.btn:hover .shape-text { color: var(--fg-h, var(--fg, inherit)); }
+  .visual.btn:active { background: var(--bg-p, var(--bg-h, var(--bg0, transparent))); box-shadow: var(--ol-p, var(--ol-h, var(--ol, none))); }
+  .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
+  .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
+  .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
   .error-state { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
@@ -90,8 +99,8 @@
 {% for p in spec.pages %}
 <section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
-       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}">
+  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: 1px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
     <div class="body"></div>
   </div>
@@ -206,9 +215,16 @@
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
     static(el, v) {
       // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
-      // for an `image`-kind visual. shape/basicShape/actionButton have no such resource —
-      // those still draw as an empty frame, there's nothing captured to draw for them.
-      el.innerHTML = v.image ? `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">` : '';
+      // for an `image`-kind visual; a shape or button instead carries a label
+      // (extract.py's visual_text) — same as the standard template.
+      if (v.image) {
+        el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
+      } else if (v.texts && v.texts.shape_text) {
+        el.innerHTML = '<div class="shape-text"></div>';
+        el.firstChild.textContent = v.texts.shape_text;
+      } else {
+        el.innerHTML = '';
+      }
     },
     bar(el, v, b) { chart(el, v, cartesian(v, b, 'bar', true)); },
     column(el, v, b) { chart(el, v, cartesian(v, b, 'bar', false)); },

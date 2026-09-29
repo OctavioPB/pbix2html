@@ -156,3 +156,17 @@ is `explorationState.sections[<page>].visualContainerGroups = {groupId: {isHidde
 (group and visual ids) + `applyOnlyToTargetVisuals` limit what it changes. Buttons point at a
 bookmark (`visualLink` type `Bookmark`) or a page (`PageNavigation`, empty target = itself).
 Group children's x/y are relative to the group. See `docs/decisions/ADR-005`.
+
+## Button formatting (`actionButton`)
+
+`objects.text|fill|outline|shape|icon` are lists: one entry without a selector holding the
+card's `show` flag, then one per state (`selector.id`: `default`, `hover`, `pressed`,
+`disabled`, `selected`) with only the properties that state changes. `parse_button` returns
+`{"states": {state: {text, fill, outline, round, icon}}, "hidden": [cards shown=false]}`;
+the renderer overlays a state on `default` (`render._button_css`) and emits CSS variables that
+the `.btn` rules in the templates use for hover / pressed / disabled. Verified on a real
+report: `text.text`, `text.fontSize` (`11D` = points), `fill.fillColor` / `transparency`,
+`icon.shapeType` (`blank`), all in `default`. Other property names (`fontColor`, `bold`,
+`horizontalAlignment`, `lineColor`, `weight`, `roundEdge`, the hover/pressed states) follow
+Power BI's documented names and are unverified. The report's theme `visualStyles` had no
+`actionButton` entry, so an absent card means "transparent / inherit", not a Power BI default.
