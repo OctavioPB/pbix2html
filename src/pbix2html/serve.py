@@ -128,11 +128,16 @@ def _param_values(spec, request: Request) -> dict:
 def slicer_options(report: str, visual_id: str, request: Request):
     """Distinct values for a slicer widget (no parameters: a slicer lists all its values)."""
     spec = _spec(report)
-    if visual_id not in (spec.raw.get("slicers") or {}):
-        raise HTTPException(404, "slicer not defined in the yaml")
     user = request.headers.get(AUTH_HEADER)
     if REQUIRE_AUTH and not user:
         raise HTTPException(401, f"missing header {AUTH_HEADER} (SSO)")
+    if visual_id not in (spec.raw.get("slicers") or {}):
+        # The report's HTML asks for every slicer it draws, so a missing entry means the yaml is older than
+        # the HTML (a yaml written before slicers were widgets, or a slicer added since). A 404 made the
+        # widget show "HTTP 404"; answering "skipped" lets it fall back to typed values, and says why.
+        return {"columns": [], "rows": [], "skipped": True,
+                "note": f"slicer {visual_id!r} has no entry under `slicers:` in the yaml; run the panel's "
+                        "auto-draft or `pbix2html scaffold --overwrite` to add it"}
     try:
         return run_slicer_options(spec, visual_id, _backend(), proxy_user=user, use_cache=True)
     except Exception as e:

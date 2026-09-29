@@ -296,6 +296,20 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > working directory); if it's still happening, the 404's own message names the exact
 > path it looked for and where it's actually running from.
 >
+> **Visual shows `HTTP 500` with a message?** The service is running and found the yaml, and the
+> failure happened when running the query; the message in the visual is the real error.
+> `A hostname or IP address must be specified for the host connection parameter` (Teradata driver
+> error 179) means `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` aren't set in `.env`
+> (`serve.py` reads `.env` from the project, not from where you started it): live mode has no
+> `--fake-data`, it always needs a real connection. Any other message comes from Teradata itself
+> (wrong table/column in a drafted SQL, no access to the view, a SQL syntax error): copy the query
+> from the yaml and run it in a SQL client.
+>
+> **A slicer shows `HTTP 404`?** Older versions answered 404 when the yaml had no `slicers:` entry for
+> that slicer (a yaml written before slicers became widgets). It now answers "skipped" and the widget
+> takes typed values; to get real dropdowns run the panel's auto-draft (it adds the missing entries) or
+> `pbix2html scaffold <pbix> --overwrite`. If a *visual* also shows 404, that is the wrong-folder case above.
+>
 > **Visual shows `HTTP 401` instead?** This is expected, not a bug, when there's no
 > reverse proxy in front of `serve.py` injecting the `AUTH_HEADER` (`X-Authenticated-User`
 > by default) after SSO — which is exactly the case when previewing on your own machine.
