@@ -337,6 +337,11 @@ def action_extract(request: Request, name: str):
         # Auto-fill the table mapping (step 2b) from each table's own Power Query M
         # source where it's unambiguous (semantic.detect_table_map_from_power_query) —
         # never touches an entity someone already mapped by hand.
+        _, new_rels = semantic.sync_relationships(name, model)
+        if new_rels:
+            detail.append(f"Proposed {len(new_rels)} relationship(s) from a calendar table to the fact "
+                          f"tables' date column — saved to metrics/{name}.relationships.json, review them.")
+        model = semantic.with_relationship_overrides(name, model)
         _, new_names = semantic.sync_table_map(name, model)
         if new_names:
             detail.append(f"Auto-mapped {len(new_names)} Power BI table(s) to Teradata from their "
@@ -358,6 +363,7 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
     try:
         layout = ex.extract_layout(pbix)
         model = ex.extract_model(pbix)
+        model = semantic.with_relationship_overrides(name, model)
         table_map = _load_table_map(name)
         had_previous = semantic.yaml_path(name).exists()
         path = semantic.write_scaffold(layout, model, overwrite=regenerate, table_map=table_map)
@@ -405,7 +411,8 @@ def action_autofill(request: Request, name: str):
             return _page(request, pbix, result)
 
         layout = ex.extract_layout(pbix)
-        outcome = semantic.autofill(spec.raw, layout, ex.extract_model(pbix), _load_table_map(name))
+        outcome = semantic.autofill(spec.raw, layout, semantic.with_relationship_overrides(name, ex.extract_model(pbix)),
+                                    _load_table_map(name))
         detail = []
         if outcome["filled"]:
             semantic.backup_yaml(name)          # writing: keep the version before it

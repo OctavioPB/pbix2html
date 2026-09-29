@@ -91,10 +91,20 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - [ ] **Slicers as real widgets.** 62 slicers here; today they are only parameters in the top bar.
       Needs a values query per slicer (distinct column values), the widget kind (list/dropdown/date
       range/hierarchy) and positioning; `live`/`hah` can fetch values, `snapshot` needs them at build.
-- [ ] **`Calendar` (a DAX `CALENDAR()` table) has no Teradata source and no relationship to any fact**
-      (23 of 25 undrafted visuals). The facts' M adds `log_dt`; a `Calendar[Date] = log_dt` join is
-      probably intended but undeclared. Needs an owner decision: a hand-written relationship override
-      (`metrics/<Report>.relationships.json`?) plus a derived `sys_calendar.calendar` source.
+- [x] **`Calendar` (a DAX `CALENDAR(start, end)` table)** is rebuilt on `sys_calendar.calendar`
+      (`detect_calendar_tables`; owner-confirmed pattern, e.g. `CALENDAR("2017-01-01", NOW())`),
+      together with its calculated columns (`FORMAT`, `YEAR/MONTH/DAY`, `VALUE`, `IF`, `&&`/`||`,
+      `+ - *`; anything else is listed as "not translated", never guessed). The fact tables' date
+      column `log_dt` (found in the model's column list, not only in the M) is proposed as
+      `fact.log_dt → Calendar.Date` in `metrics/<Report>.relationships.json` — review it; delete
+      nothing, set `"IsActive": 0` to switch one off. Date slicers now reach visuals that don't read
+      the calendar through a semi-join (`fact.log_dt IN (SELECT date FROM calendar WHERE ... IN (:p))`,
+      dropped by `bind` when nothing is selected), which is what filter propagation means in Power BI.
+      Verified: 65 of 71 data visuals drafted on the second report, all parse as Teradata.
+      Caveats: month names come from `TO_CHAR(..., 'Month')` (session language); a slash date like
+      "04/01/2026" is read as MM/DD/YYYY and noted in the SQL; slicer parameters are named after the
+      column only, so two slicers on same-named columns of different tables collide; date-*range*
+      slicers (`BETWEEN`) are not modelled, only `IN`.
 - [ ] Composite measures over unrelated fact tables (`Grand Total = [A] + [B] + ...`): one scalar
       subquery per term instead of a join.
 - [ ] DAX with `VAR`/`EOMONTH`/time intelligence (`Projected Monthly Avg Spend`) stays manual.

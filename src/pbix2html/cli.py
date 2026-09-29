@@ -28,7 +28,12 @@ def _layout_and_model(pbix: Path, out_dir: Path):
     rdir.mkdir(parents=True, exist_ok=True)
     (rdir / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
     (rdir / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    return layout, model
+    # proposed extra relationships (a calendar's date key) are saved for review, then applied
+    _, new_rels = semantic.sync_relationships(layout["report"], model)
+    if new_rels:
+        print(f"relationships: {len(new_rels)} proposed (fact date key → calendar) → "
+              f"{semantic.relationships_path(layout['report'])} (review before trusting)")
+    return layout, semantic.with_relationship_overrides(layout["report"], model)
 
 
 def _backend(args):

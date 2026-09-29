@@ -34,7 +34,8 @@ def bind(sql: str, params: list[str], values: dict[str, Any]) -> tuple[str, list
 
     A slicer with nothing selected means "no filter" in Power BI, so a predicate of the exact
     shape `<column> IN (:name)` whose parameter is empty (None, "" or an empty list) becomes
-    `1=1` instead of `IN (NULL)`, which would return no rows at all. Other uses of an empty
+    `1=1` instead of `IN (NULL)`, which would return no rows at all (and so does a predicate
+    wrapped in `/*if name*/ ... /*fi name*/`). Other uses of an empty
     parameter (e.g. `= :year`) are left to the query's author.
     """
     bound: list[Any] = []
@@ -42,6 +43,8 @@ def bind(sql: str, params: list[str], values: dict[str, Any]) -> tuple[str, list
     for name in params:
         val = values.get(name)
         if val is None or val == "" or (isinstance(val, (list, tuple)) and not val):
+            # a whole predicate marked by the drafter (a semi-join through a relationship)
+            sql = re.sub(rf"/\*if {re.escape(name)}\*/.*?/\*fi {re.escape(name)}\*/", "1=1", sql, flags=re.S)
             sql = re.sub(rf'(?<![\w."])[\w."]+\s+IN\s*\(\s*:{re.escape(name)}\s*\)', "1=1", sql, flags=re.I)
 
     def repl(m: re.Match) -> str:

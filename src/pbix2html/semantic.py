@@ -500,6 +500,345 @@ def detect_table_map_from_power_query(model: dict) -> dict[str, str]:
     return out
 
 
+# ----------------------------------------------------------------------------
+# DAX calendar tables: `Calendar = CALENDAR("2017-01-01", NOW())` (+ calculated columns) is
+# rebuilt from Teradata's `sys_calendar.calendar`. The report only needs it to filter by date,
+# and the fact tables carry the date as `log_dt`; that join is proposed (never applied
+# silently) in metrics/<Report>.relationships.json. Only the exact patterns below are
+# recognised; anything else keeps the table unmapped rather than guessed.
+# ----------------------------------------------------------------------------
+
+DATE_KEY_COLUMNS = ("log_dt",)     # the fact-table date column a calendar joins to (owner-confirmed)
+_DAX_CALENDAR_RE = re.compile(r"^\s*CALENDAR\s*\(", re.IGNORECASE)
+_DAX_COL_REF = r"(?:'[^']+'|\w+)?\[([^\]]+)\]"
+# DAX FORMAT tokens → Teradata TO_CHAR elements; names get TRIM (they are blank-padded)
+_FORMAT_TOKENS = (("MMMM", ("Month", True)), ("MMM", ("Mon", True)), ("MM", ("MM", False)),
+                  ("YYYY", ("YYYY", False)), ("YY", ("YY", False)), ("DDDD", ("Day", True)),
+                  ("DDD", ("Dy", True)), ("DD", ("DD", False)))
+
+
+def _dax_date_bound(text: str) -> tuple[str | None, str | None]:
+    """A DAX date argument → (Teradata expression, note). `NOW()`/`TODAY()` → CURRENT_DATE,
+    "YYYY-MM-DD", "MM/DD/YYYY" (US order assumed when both parts are <= 12: noted) and
+    DATE(y, m, d) → DATE literals. Anything else → (None, None)."""
+    t = text.strip()
+    if re.fullmatch(r"(NOW|TODAY)\s*\(\s*\)", t, re.IGNORECASE):
+        return "CURRENT_DATE", None
+    m = re.fullmatch(r'"(\d{4})-(\d{2})-(\d{2})"', t)
+    if m:
+        return f"DATE '{m.group(1)}-{m.group(2)}-{m.group(3)}'", None
+    m = re.fullmatch(r'"(\d{1,2})/(\d{1,2})/(\d{4})"', t)
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        month, day = (b, a) if a > 12 else (a, b)
+        note = "assumed MM/DD/YYYY" if a <= 12 and b <= 12 and a != b else None
+        return f"DATE '{y}-{month:02d}-{day:02d}'", note
+    m = re.fullmatch(r"DATE\s*\(\s*(\d{4})\s*,\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)", t, re.IGNORECASE)
+    if m:
+        return f"DATE '{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}'", None
+    return None, None
+
+
+def _dax_format_sql(fmt: str, date_expr: str) -> str | None:
+    """DAX FORMAT(date, "<fmt>") → a Teradata string expression, or None if the format uses
+    anything beyond the tokens above and space, '-', '/', ','. Pieces are concatenated so a
+    blank-padded month name never leaves gaps inside the result."""
+    pieces: list[str] = []
+    i = 0
+    while i < len(fmt):
+        for token, (element, is_name) in _FORMAT_TOKENS:
+            if fmt[i:i + len(token)].upper() == token:
+                one = f"TO_CHAR({date_expr}, '{element}')"
+                pieces.append(f"TRIM({one})" if is_name else one)
+                i += len(token)
+                break
+        else:
+            if fmt[i] not in " -/,":
+                return None
+            pieces.append("'" + fmt[i] + "'")
+            i += 1
+    return " || ".join(pieces) if pieces else None
+
+
+class _CalendarUnsupported(Exception):
+    pass
+
+
+_CAL_TOKEN_RE = re.compile(
+    r"""\s*(?:(?P<str>"(?:[^"]|"")*")|(?P<num>\d+(?:\.\d+)?)|(?P<ref>(?:'[^']+'|\w+)?\[[^\]]+\])"""
+    r"""|(?P<op>&&|\|\||<>|<=|>=|[=<>+\-*(),])|(?P<name>[A-Za-z_]\w*))""")
+
+
+def _calendar_expr_sql(expr: str, date_col: str, date_expr: str) -> str | None:
+    """One DAX calculated column of a calendar table → a Teradata expression, or None.
+
+    Recognised: FORMAT(date, "fmt"), YEAR/MONTH/DAY(date or TODAY()), TODAY()/NOW(), VALUE(x),
+    IF(cond, a[, b]), string/number literals, comparisons, && / ||, + - *, parentheses. The
+    only column allowed is the calendar's own date. Everything else (a division, a lookup, any
+    other function) is refused, and that column is simply left out."""
+    text = re.sub(r"\s+", " ", expr or "").strip()
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(text):
+        m = _CAL_TOKEN_RE.match(text, pos)
+        if not m or m.end() == pos:
+            return None
+        pos = m.end()
+        kind = m.lastgroup
+        if kind:
+            tokens.append((kind, m.group(kind)))
+    tokens.append(("end", ""))
+    i = 0
+
+    def peek() -> tuple[str, str]:
+        return tokens[i]
+
+    def take(value: str | None = None) -> tuple[str, str]:
+        nonlocal i
+        tok = tokens[i]
+        if value is not None and tok[1] != value:
+            raise _CalendarUnsupported(f"expected {value}")
+        i += 1
+        return tok
+
+    def binary(parse_next, ops: dict[str, str]) -> str:
+        left = parse_next()
+        while peek()[0] == "op" and peek()[1] in ops:
+            op = ops[take()[1]]
+            left = f"({left} {op} {parse_next()})"
+        return left
+
+    def parse_or() -> str:
+        return binary(parse_and, {"||": "OR"})
+
+    def parse_and() -> str:
+        return binary(parse_cmp, {"&&": "AND"})
+
+    def parse_cmp() -> str:
+        left = parse_add()
+        if peek()[0] == "op" and peek()[1] in ("=", "<>", "<", ">", "<=", ">="):
+            op = take()[1]
+            return f"({left} {op} {parse_add()})"
+        return left
+
+    def parse_add() -> str:
+        return binary(parse_mul, {"+": "+", "-": "-"})
+
+    def parse_mul() -> str:
+        return binary(parse_primary, {"*": "*"})
+
+    def args() -> list[str]:
+        take("(")
+        out = [parse_or()]
+        while peek()[1] == ",":
+            take()
+            out.append(parse_or())
+        take(")")
+        return out
+
+    def parse_primary() -> str:
+        kind, value = take()
+        if kind == "num":
+            return value
+        if kind == "str":
+            return "'" + value[1:-1].replace('""', '"').replace("'", "''") + "'"
+        if kind == "ref":
+            col = re.search(r"\[([^\]]+)\]", value).group(1)
+            if col.strip().lower() != date_col.lower():
+                raise _CalendarUnsupported(col)
+            return date_expr
+        if kind == "op" and value == "(":
+            inner = parse_or()
+            take(")")
+            return f"({inner})"
+        if kind != "name":
+            raise _CalendarUnsupported(value)
+        fn = value.upper()
+        if fn in ("TODAY", "NOW"):
+            take("(")
+            take(")")
+            return "CURRENT_DATE"
+        if fn in ("YEAR", "MONTH", "DAY"):
+            (a,) = args()
+            return f"EXTRACT({fn} FROM {a})"
+        if fn == "VALUE":
+            (a,) = args()
+            return a if re.fullmatch(r"[\d.]+", a) else f"CAST({a} AS INTEGER)"
+        if fn == "FORMAT":
+            a = args_raw_format()
+            return a
+        if fn == "IF":
+            a = args()
+            if len(a) not in (2, 3):
+                raise _CalendarUnsupported("IF")
+            return f"CASE WHEN {a[0]} THEN {a[1]}" + (f" ELSE {a[2]}" if len(a) == 3 else "") + " END"
+        raise _CalendarUnsupported(fn)
+
+    def args_raw_format() -> str:
+        # FORMAT(date, "literal format"): the format is translated, never evaluated
+        take("(")
+        target = parse_or()
+        take(",")
+        kind, value = take()
+        if kind != "str":
+            raise _CalendarUnsupported("FORMAT")
+        take(")")
+        sql = _dax_format_sql(value[1:-1], target)
+        if sql is None:
+            raise _CalendarUnsupported("FORMAT")
+        return sql
+
+    try:
+        sql = parse_or()
+        if peek()[0] != "end":
+            return None
+    except (_CalendarUnsupported, ValueError):
+        return None
+    return sql[1:-1] if sql.startswith("(") and sql.endswith(")") and sql.count("(") == sql.count(")") \
+        and _balanced_outer(sql) else sql
+
+
+def _balanced_outer(sql: str) -> bool:
+    """True when the first '(' closes at the very end (safe to strip)."""
+    depth = 0
+    for n, ch in enumerate(sql):
+        depth += ch == "("
+        depth -= ch == ")"
+        if depth == 0 and n < len(sql) - 1:
+            return False
+    return True
+
+
+def _calendar_column_sql(expr: str, date_col: str, date_expr: str) -> str | None:
+    return _calendar_expr_sql(expr, date_col, date_expr)
+
+
+def detect_calendar_tables(model: dict) -> dict[str, dict]:
+    """{table: {"sql", "date_column", "unsupported": [columns], "notes": [...]}} for every DAX
+    `CALENDAR(start, end)` calculated table, rebuilt on `sys_calendar.calendar`."""
+    out: dict[str, dict] = {}
+    columns: dict[str, list[dict]] = {}
+    for c in model.get("calculated_columns") or []:
+        if isinstance(c, dict) and c.get("TableName"):
+            columns.setdefault(c["TableName"], []).append(c)
+    for t in model.get("calculated_tables") or []:
+        table, expr = (t or {}).get("TableName"), ((t or {}).get("Expression") or "")
+        m = _DAX_CALENDAR_RE.match(expr)
+        if not table or not m:
+            continue
+        args = _m_split_args(expr[m.end():])       # top-level comma split, string-aware
+        if len(args) != 2:
+            continue
+        (start, n1), (end, n2) = _dax_date_bound(args[0]), _dax_date_bound(args[1])
+        if not start or not end:
+            continue
+        date_col = "Date"
+        alias = "calendar_date"
+        select = [f'{alias} AS {_sql_col(date_col)}']
+        unsupported: list[str] = []
+        for c in columns.get(table, []):
+            sql = _calendar_column_sql(c.get("Expression"), date_col, alias)
+            if sql:
+                select.append(f"{sql} AS {_sql_col(c['ColumnName'])}")
+            else:
+                unsupported.append(c["ColumnName"])
+        notes = [n for n in (n1, n2) if n]
+        one_line = re.sub(r"\s+", " ", expr).strip()
+        header = [f"-- rebuilt from DAX: {one_line}"]
+        if notes:
+            header.append("-- note: " + ", ".join(notes))
+        if unsupported:
+            header.append("-- not translated (calculated columns): " + ", ".join(unsupported))
+        query = ("\n".join(header) + "\nSELECT " + ",\n       ".join(select) +
+                 "\nFROM sys_calendar.calendar\n"
+                 f"WHERE {alias} BETWEEN {start} AND {end}")
+        try:
+            query = validate_read_only_sql(query)
+        except ValueError:
+            continue
+        out[table] = {"sql": query, "date_column": date_col, "unsupported": unsupported, "notes": notes}
+    return out
+
+
+def _has_relationship(model: dict, a: str, b: str) -> bool:
+    return any(e and {e[0], e[2]} == {a, b} for e in (_rel_ends(r) for r in model.get("relationships") or []))
+
+
+def _tables_with_date_key(model: dict) -> dict[str, str]:
+    """{table: column} for the tables that have a date-key column (`DATE_KEY_COLUMNS`). Uses the
+    model's column list when it has one (`model.json["columns"]`, date-typed columns only) and
+    falls back to the table's Power Query text for older extracts."""
+    out: dict[str, str] = {}
+    columns = model.get("columns")
+    if isinstance(columns, list) and columns:
+        for c in columns:
+            name, table = str((c or {}).get("ColumnName") or ""), (c or {}).get("TableName")
+            if table and name.lower() in DATE_KEY_COLUMNS and "datetime" in str(c.get("PandasDataType") or "datetime"):
+                out.setdefault(table, name)
+        return out
+    for row in model.get("power_query") or []:
+        fact, expr = (row or {}).get("TableName"), (row or {}).get("Expression") or ""
+        key = next((k for k in DATE_KEY_COLUMNS if re.search(rf"\b{k}\b", expr, re.IGNORECASE)), None)
+        if fact and key:
+            out.setdefault(fact, key)
+    return out
+
+
+def detect_calendar_relationships(model: dict) -> list[dict]:
+    """Proposed `fact.log_dt → Calendar.Date` (many-to-one, filters flow from the calendar to the
+    fact) for each derived calendar and each table with a date-key column, unless the model
+    already relates the two."""
+    keyed = _tables_with_date_key(model)
+    out = []
+    for cal, info in detect_calendar_tables(model).items():
+        for fact, key in keyed.items():
+            if fact == cal or _has_relationship(model, fact, cal):
+                continue
+            out.append({"FromTableName": fact, "FromColumnName": key, "ToTableName": cal,
+                        "ToColumnName": info["date_column"], "Cardinality": "M:1",
+                        "CrossFilteringBehavior": "Single", "IsActive": 1, "Proposed": True})
+    return out
+
+
+def relationships_path(name: str) -> Path:
+    return METRICS_DIR / f"{name}.relationships.json"
+
+
+def read_relationships(name: str) -> list[dict]:
+    """Hand-editable extra relationships (same field names as model.json), or []."""
+    path = relationships_path(name)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def sync_relationships(name: str, model: dict) -> tuple[list[dict], list[dict]]:
+    """Saves the proposed calendar relationships to `metrics/<name>.relationships.json` (a
+    reviewable file, like the table map). Existing entries, including hand-edited or removed
+    ones that were once proposed, are never rewritten. Returns (all entries, newly added)."""
+    existing = read_relationships(name)
+    known = {(r.get("FromTableName"), r.get("FromColumnName"), r.get("ToTableName")) for r in existing}
+    new = [r for r in detect_calendar_relationships(model)
+           if (r["FromTableName"], r["FromColumnName"], r["ToTableName"]) not in known]
+    if new:
+        path = relationships_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(existing + new, ensure_ascii=False, indent=2), encoding="utf-8")
+    return existing + new, new
+
+
+def with_relationship_overrides(name: str, model: dict) -> dict:
+    """`model` with the report's extra relationships appended (a copy; the input is untouched)."""
+    extra = read_relationships(name)
+    if not extra:
+        return model
+    return {**model, "relationships": [*(model.get("relationships") or []), *extra]}
+
+
 def table_map_path(name: str) -> Path:
     return METRICS_DIR / f"{name}.table_map.json"
 
@@ -532,7 +871,9 @@ def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
     (`detect_table_map_from_power_query`). Entries already there, i.e. mapped by hand, are never
     touched. Returns (merged mapping, names of the newly added tables)."""
     existing, _ = read_table_map(name)
-    new = {k: v for k, v in detect_table_map_from_power_query(model).items() if k not in existing}
+    detected = {t: info["sql"] for t, info in detect_calendar_tables(model).items()}
+    detected.update(detect_table_map_from_power_query(model))     # a real source wins
+    new = {k: v for k, v in detected.items() if k not in existing}
     merged = {**existing, **new}
     if new:
         path = table_map_path(name)
@@ -1042,8 +1383,36 @@ def _draft_from_clause(tables_needed: list[str], table_map: dict[str, str],
     return sources, aliases
 
 
-def _draft_where(parameters: dict[str, dict], aliases: dict[str, str]) -> tuple[list[str], list[str]]:
-    """Slicer parameters that apply to the tables this visual already reads."""
+def _filter_edges(relationships: list[dict]) -> list[tuple[str, str, str, str]]:
+    """(source_table, source_col, target_table, target_col): the directions a filter flows.
+    Power BI filters the many side from the one side (the relationship's To → From); a
+    both-directions relationship flows the other way too."""
+    edges = []
+    for r in relationships or []:
+        ends = _rel_ends(r)
+        if ends is None:
+            continue
+        ft, fc, tt, tc = ends
+        edges.append((tt, tc, ft, fc))
+        if "both" in str(r.get("CrossFilteringBehavior") or "").lower():
+            edges.append((ft, fc, tt, tc))
+    return edges
+
+
+def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
+                 table_map: dict[str, str] | None = None,
+                 relationships: list[dict] | None = None) -> tuple[list[str], list[str]]:
+    """Slicer parameters that apply to the tables this visual reads.
+
+    A slicer on a table the visual reads becomes `alias.col IN (:p)`. A slicer on a table it
+    does not read still filters it in Power BI when a relationship connects them (a date slicer
+    on a calendar filtering a fact table), so it is applied as a semi-join:
+    `fact.key IN (SELECT key FROM <slicer table> WHERE col IN (:p))`. A semi-join does not
+    duplicate rows and, wrapped in `/*if p*/ ... /*fi p*/`, `query.bind` drops the whole
+    predicate when nothing is selected. Only one relationship hop, and only when the slicer
+    table has a known source query."""
+    table_map = table_map or {}
+    edges = _filter_edges(relationships or [])
     where_parts, params_used = [], []
     for pname, p in parameters.items():
         slicer_ref = (p or {}).get("from_slicer")
@@ -1055,6 +1424,24 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str]) -> tuple[
             # single value or someone later turns on `multi` — see query.py's bind().
             where_parts.append(f"{aliases[ptable]}.{_sql_col(pcol)} IN (:{pname})")
             params_used.append(pname)
+            continue
+        if ptable not in table_map:
+            continue
+        try:
+            source = validate_read_only_sql(table_map[ptable])
+        except ValueError:
+            continue
+        seen: set[str] = set()
+        for src, scol, dst, dcol in edges:
+            if src != ptable or dst not in aliases or dst in seen:
+                continue
+            seen.add(dst)
+            where_parts.append(
+                f"/*if {pname}*/ {aliases[dst]}.{_sql_col(dcol)} IN (SELECT {_sql_col(scol)} FROM "
+                f"{_subquery(source, _sql_alias(ptable))} WHERE {_sql_alias(ptable)}.{_sql_col(pcol)} "
+                f"IN (:{pname})) /*fi {pname}*/")
+            if pname not in params_used:
+                params_used.append(pname)
     return where_parts, params_used
 
 
@@ -1090,7 +1477,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     if built is None:
         return None
     sources, aliases = built
-    where_parts, params_used = _draft_where(parameters, aliases)
+    where_parts, params_used = _draft_where(parameters, aliases, table_map, relationships)
 
     sort = v.get("sort")
 
@@ -1156,7 +1543,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             if arm_built is None:
                 return None
             arm_sources, arm_aliases = arm_built
-            arm_where, arm_params = _draft_where(parameters, arm_aliases)
+            arm_where, arm_params = _draft_where(parameters, arm_aliases, table_map, relationships)
             all_params += [p for p in arm_params if p not in all_params]
             name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
             label = name.replace("'", "''")
@@ -1256,9 +1643,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             "rls_rules": len(model.get("rls") or []),
             # fact tables whose Power Query adds a date column: the likely join key for an
             # undeclared calendar relationship (a hint, never applied automatically)
-            "date_key_hint": sorted({
-                r.get("TableName") for r in model.get("power_query") or []
-                if isinstance(r, dict) and re.search(r"\bAS\s+log_dt\b", r.get("Expression") or "", re.I)}),
+            "date_key_hint": sorted(_tables_with_date_key(model)),
         },
         "visuals": {"data_visuals": n_data, "drafted": len(visuals.get("ok", [])),
                     "by_reason": {k: v for k, v in sorted(visuals.items()) if k != "ok"}},

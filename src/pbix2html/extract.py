@@ -1171,6 +1171,7 @@ def extract_model(pbix: Path) -> dict:
             out[key] = {"error": f"{type(e).__name__}: {e}"}
 
     grab("tables", lambda: list(m.tables))
+    grab("columns", lambda: df_records(m.schema))     # [{TableName, ColumnName, PandasDataType}]
     grab("measures", lambda: df_records(m.dax_measures))
     grab("calculated_columns", lambda: df_records(m.dax_columns))
     grab("calculated_tables", lambda: df_records(m.dax_tables))

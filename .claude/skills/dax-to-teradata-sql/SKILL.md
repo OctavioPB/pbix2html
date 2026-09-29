@@ -92,3 +92,9 @@ columns`; `kpi → value, target`. Aliases always lowercase.
 - Table sources come from Power Query (`Query="..."`, `Value.NativeQuery`, plain accessors, "Enter
   Data" tables). DAX calculated tables (`CALENDAR`, `Row(...)`) have no source: see
   `pbix2html mapping` for exactly which visuals that blocks.
+- **Calendar tables**: `CALENDAR(start, end)` becomes `SELECT ... FROM sys_calendar.calendar WHERE
+  calendar_date BETWEEN start AND end` with its calculated columns translated (a small, closed
+  grammar). The join to facts (`log_dt`) is *proposed* in `metrics/<Report>.relationships.json`.
+- **Slicer on a table the visual doesn't read** (typically a calendar or a dimension): applied as
+  a semi-join through one relationship, wrapped in `/*if p*/ ... /*fi p*/`; `bind` removes the whole
+  predicate when `p` is empty.
