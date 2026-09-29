@@ -250,9 +250,12 @@
   };
   function cartesian(v, b, type, horizontal, area) {
     const { cats, groups } = series(b);
+    // 100% stacked: every category's series are rescaled to share 100 (ECharts has no such mode)
+    const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
+    const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };
     const ser = [...groups.entries()].map(([name, m]) => ({
       name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
-      data: cats.map(c => m.get(c) ?? null), stack: v.stacked ? 'total' : undefined,
+      data: cats.map((c, i) => val(m, c, i)), stack: v.stacked ? 'total' : undefined,
       areaStyle: area ? {} : undefined, smooth: false,
     }));
     // Axis and legend titles as the report labels them (extract.py's visual_text).
@@ -262,7 +265,7 @@
     const axisTitle = name => name ? { name, nameLocation: 'middle', nameGap: 26,
                                        nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
     const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x) };
-    const valAxis = { type: 'value', ...axisStyle, axisLabel: { color: theme.muted, formatter: x => fmt(x, v.format.value) },
+    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
                       ...axisTitle(t.axis_y) };
     const legend = groups.size > 1
       ? { top: 0, textStyle: { color: theme.muted }, ...(t.legend ? { name: t.legend } : {}) }

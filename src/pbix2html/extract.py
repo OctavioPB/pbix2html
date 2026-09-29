@@ -1400,6 +1400,14 @@ def extract_model(pbix: Path) -> dict:
             mode = p.get("Mode") if "Mode" in p else p.get("mode")
             modes[str(mode)] += 1
     out["storage_modes"] = dict(modes)   # '1' = DirectQuery in TMSCHEMA
+    # per table: 0 Import, 1 DirectQuery, 2 Dual (composite models mix them)
+    mode_names = {0: "Import", 1: "DirectQuery", 2: "Dual"}
+    table_modes: dict[str, str] = {}
+    for p in parts if isinstance(parts, list) else []:
+        t, mode = p.get("TableName"), p.get("Mode") if "Mode" in p else p.get("mode")
+        if t and not _AUTO_DATE_TABLE_RE.match(t) and mode in mode_names:
+            table_modes[t] = mode_names[mode]
+    out["table_modes"] = table_modes
     try:
         m.close()
     except Exception:

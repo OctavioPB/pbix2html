@@ -48,3 +48,28 @@ def test_not_connected_is_reported_for_tables_without_a_path():
         _visual("clusteredColumnChart", Category=["Region.name"], Y=["Sum(Sales.Amount)"])]}]}
     rep = semantic.mapping_report(layout, model, TABLE_MAP)
     assert list(rep["visuals"]["by_reason"]) == ["not_connected:Region+Sales"]
+
+
+def test_mapping_reports_storage_modes_and_hidden_pages():
+    layout = {"report": "R", "pages": [
+        {"name": "a", "display_name": "Main", "hidden": False, "visuals": [
+            {"id": "b", "type": "actionButton", "action": {"type": "page", "page": "h1", "enabled": True}}]},
+        {"name": "h1", "display_name": "Linked", "hidden": True, "visuals": []},
+        {"name": "h2", "display_name": "Orphan", "hidden": True, "visuals": []}]}
+    model = {"tables": ["Fact", "Dim"], "table_modes": {"Fact": "DirectQuery", "Dim": "Import"}}
+    rep = semantic.mapping_report(layout, model)
+    assert rep["model"]["storage_modes"] == {"Fact": "DirectQuery", "Dim": "Import"}
+    assert rep["model"]["hidden_pages"] == {"reachable": ["Linked"], "left_out": ["Orphan"]}
+    md = semantic.render_mapping_report(rep)
+    assert "Composite model" in md and "`Orphan`" in md
+
+
+def test_hundred_percent_charts_are_flagged_for_rescaling(fake_pbix):
+    from pbix2html import extract as ex
+    from pbix2html.render import build_spec
+    layout = ex.extract_layout(fake_pbix)
+    v = layout["pages"][0]["visuals"][0]
+    v["type"] = "hundredPercentStackedColumnChart"
+    page = build_spec(layout, semantic.load("Executive_Dashboard"), {"year": 2025})["pages"][0]
+    e = next(x for x in page["visuals"] if x["id"] == v["id"])
+    assert e["stacked"] and e["percent"]

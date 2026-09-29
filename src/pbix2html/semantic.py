@@ -1826,6 +1826,22 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             for reason in diagnose_visual(v, kind, measures, table_map, rels, set(tables),
                                           _params_for_page(params, page.get("display_name"))):
                 visuals.setdefault(reason, []).append(label)
+    # hidden pages: reachable ones (a visible page's button navigates to them, transitively) are
+    # rendered; the rest are left out (tooltip/drillthrough pages nobody links to)
+    pages = layout["pages"]
+    by_name = {p.get("name"): p for p in pages if p.get("name")}
+    reach = [p for p in pages if not p.get("hidden")]
+    seen = {id(p) for p in reach}
+    while reach:
+        for v in reach.pop()["visuals"]:
+            a = v.get("action") or {}
+            t = by_name.get(a.get("page")) if a.get("type") == "page" and a.get("enabled") else None
+            if t is not None and id(t) not in seen:
+                seen.add(id(t))
+                reach.append(t)
+    hidden_pages = {"reachable": [p.get("display_name") for p in pages if p.get("hidden") and id(p) in seen],
+                    "left_out": [p.get("display_name") for p in pages if p.get("hidden") and id(p) not in seen]}
+    table_modes = {t: m for t, m in (model.get("table_modes") or {}).items() if t in tables}
     measure_names = {n for (_, n) in measures}
     composite = sorted(n for (_, n), dax in measures.items()
                        if any(ref in measure_names for ref in re.findall(r"(?<![\w'\]])\[([^\]]+)\]", dax or "")))
@@ -1839,6 +1855,8 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
                                    for c in model.get("calculated_columns") or []
                                    if not _AUTO_DATE_TABLE_RE.match(c.get("TableName") or "")],
             "relationships": len(rels),
+            "storage_modes": table_modes,
+            "hidden_pages": hidden_pages,
             "many_to_many": [f"{e[0]} → {e[2]}" for r in rels if r.get("Cardinality") == "M:M"
                              and (e := _rel_ends(r))],
             "unrelated_tables": sorted(t for t in tables if not any(
@@ -1866,6 +1884,22 @@ def render_mapping_report(rep: dict) -> str:
         L += [f"- `{t}` = `{e}`" for t, e in m["calculated_tables"].items()]
         if m["calculated_columns"]:
             L += ["- calculated columns: " + ", ".join(f"`{c}`" for c in m["calculated_columns"])]
+        L += [""]
+    kinds = sorted(set(m["storage_modes"].values()))
+    if len(kinds) > 1:
+        L += ["## Composite model (mixed storage modes)", ""]
+        for k in kinds:
+            L += [f"- {k}: " + ", ".join(f"`{t}`" for t, x in sorted(m["storage_modes"].items()) if x == k)]
+        L += ["", "Import tables that come from Teradata become live queries after migration (inline or calculated ones stay in the yaml): "
+              "their data can differ from the (stale) copy inside the .pbix, so validate them against a fresh refresh.", ""]
+    hp = m["hidden_pages"]
+    if hp["reachable"] or hp["left_out"]:
+        L += ["## Hidden pages", ""]
+        if hp["reachable"]:
+            L += ["- rendered (a button navigates to them): " + ", ".join(f"`{n}`" for n in hp["reachable"])]
+        if hp["left_out"]:
+            L += ["- left out (nothing links to them; `--include-hidden` keeps them): "
+                  + ", ".join(f"`{n}`" for n in hp["left_out"])]
         L += [""]
     if m["unmapped"]:
         L += ["## Tables without a Teradata query", "", ", ".join(f"`{t}`" for t in m["unmapped"]), ""]

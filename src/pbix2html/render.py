@@ -300,7 +300,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "w": round(100 * (v["width"] or 0) / W, 3), "h": round(100 * (v["height"] or 0) / H, 3),
                 "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {},
-                "stacked": "stacked" in v["type"].lower(), "area": "area" in v["type"].lower(),
+                "stacked": "stacked" in v["type"].lower(),
+                "percent": v["type"].lower().startswith("hundredpercent"),
+                "area": "area" in v["type"].lower(),
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
                 "image": v.get("image_data_uri"),
