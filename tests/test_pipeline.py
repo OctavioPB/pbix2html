@@ -459,3 +459,16 @@ def test_table_map_detects_connector_query_option():
     assert got["A"] == 'SELECT a, b\nFROM db.t WHERE x = "y"'
     assert got["B"].startswith("SEL d")
     assert "C" not in got and "D" not in got
+
+
+def test_hidden_group_hides_its_descendants():
+    from pbix2html.render import _hidden_with_descendants
+
+    vs = [
+        {"id": "g1", "hidden": True, "is_group": True, "parent_group": None},
+        {"id": "g2", "hidden": False, "is_group": True, "parent_group": "g1"},
+        {"id": "a", "hidden": False, "parent_group": "g2"},     # under hidden g1 via g2
+        {"id": "b", "hidden": False, "parent_group": None},
+        {"id": "c", "hidden": True, "parent_group": None},      # own flag
+    ]
+    assert _hidden_with_descendants(vs) == {"g1", "g2", "a", "c"}

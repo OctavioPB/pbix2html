@@ -472,7 +472,10 @@ def _parse_visual(vc: dict) -> dict:
     if group is not None:
         visual.update({"type": "__group__", "is_group": True, "is_custom": False,
                        "title": group.get("displayName"), "projections": {}, "fields": [],
-                       "text": None, "image_ref": None, "hidden": False, "filters": [],
+                       "text": None, "image_ref": None, "filters": [],
+                       # A hidden group hides all its descendants: it is how reports build
+                       # "view switchers" (see ADR-005).
+                       "hidden": bool(group.get("isHidden")),
                        "has_drill_other_visuals": False, "objects_keys": []})
         return visual
 
@@ -685,7 +688,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
                 "width": pos.get("width", 0), "height": pos.get("height", 0),
                 "tab_order": pos.get("tabOrder"), "parent_group": None,
                 "type": "__group__", "is_group": True, "is_custom": False,
-                "title": group.get("displayName"), "hidden": False,
+                "title": group.get("displayName"), "hidden": bool(vdata.get("isHidden")),
                 "projections": {}, "fields": [], "filters": [],
                 "has_drill_other_visuals": False, "objects_keys": [], "text": None,
                 "image_ref": None,

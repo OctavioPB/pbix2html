@@ -33,11 +33,10 @@ drawn at the page's top-left (their x/y are relative to the group); page backgro
 *images* were ignored (white title text on a white canvas); the table-map detector missed
 `Teradata.Database(host, [Query="..."])` and `SEL`. **Still open** (design work, in priority order):
 
-- [ ] **Bookmarks and action buttons.** 7 bookmarks, 49 of 52 buttons are `Bookmark` /
-      `PageNavigation` actions. Bookmarks act as view switchers (stacked visuals, one visible
-      at a time), so the HTML currently draws all of them on top of each other. Needs: read
-      `config.bookmarks` + each button's `visualLink`, render buttons as toggles, and pick the
-      initially visible view. `PageNavigation` buttons could map to the tab bar.
+- [ ] **Bookmarks and action buttons** — designed in `docs/decisions/ADR-005`. Phase 1 (a
+      hidden group hides its descendants) is done and removed the stacked views; phase 2
+      (bookmarks + buttons as a client-side state machine) is next. Open question to confirm
+      in Desktop: the visible page's buttons reference bookmarks bound to another page.
 - [ ] Slicers reference an entity (`Table.models`) that isn't in `model.json["tables"]`
       (only its hidden `H$Table` hierarchy partitions are); warn on unresolved entities.
 - [ ] Two tables are inline data (`Table.FromRows(...)`, no Teradata source): embed or ask.

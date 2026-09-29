@@ -68,6 +68,21 @@ def _background_image_css(bg: dict | None) -> str | None:
     return f"url({uri}) center / {size} no-repeat"
 
 
+def _hidden_with_descendants(visuals: list[dict]) -> set:
+    """Ids of visuals that start hidden: their own `hidden` flag, or any ancestor group's."""
+    by_id = {v.get("id"): v for v in visuals}
+    out: set = set()
+    for v in visuals:
+        cur, seen = v, set()
+        while cur is not None and cur.get("id") not in seen:
+            if cur.get("hidden"):
+                out.add(v.get("id"))
+                break
+            seen.add(cur.get("id"))
+            cur = by_id.get(cur.get("parent_group"))
+    return out
+
+
 def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_hidden: bool = False,
                include_sql: bool = False) -> dict:
     """Structure consumed by the template/JS: pages → visuals with position in % and kind.
@@ -82,8 +97,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             continue
         W, H = float(p.get("width") or 1280), float(p.get("height") or 720)
         visuals = []
+        hidden_ids = _hidden_with_descendants(p["visuals"])
         for v in p["visuals"]:
-            if v.get("is_group") or v.get("hidden"):
+            if v.get("is_group") or v.get("id") in hidden_ids:
                 continue
             vs = spec.visuals.get(v["id"])
             kind = vs.kind if vs else KIND_MAP.get(v["type"], "unsupported")
