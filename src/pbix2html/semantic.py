@@ -1035,8 +1035,6 @@ def sync_table_map(name: str, model: dict) -> tuple[dict[str, str], list[str]]:
     return merged, sorted(new)
 
 
-# Teradata reserved words a Power BI column is commonly named after (a calendar's Date / Year /
-# Month...). Unquoted they are a syntax error as an identifier, so they are always double-quoted.
 # Teradata reserved words (Teradata SQL "Reserved Words and Keywords"), lower-cased, plus `value`, the
 # renderer's own column contract. Unquoted, one of these as a name is a syntax error (error 3707, e.g.
 # `SELECT SUM(x) AS value` or a Power BI column called Rename), which sqlglot's Teradata dialect does not
