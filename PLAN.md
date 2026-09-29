@@ -191,6 +191,25 @@ Suggested order: by business area, starting with the ones that reuse measures al
 - [ ] Operations runbook: how to add a measure, a report, a role.
 - [ ] Retire Power BI reports one by one after owner sign-off.
 
+## Open items (consolidated, 2026-09-29)
+
+Known and unresolved after five real reports; none has been checked against real Power BI numbers or a real
+Teradata/HAH, which is the actual gate for every "implemented" line above.
+
+- Validation: no reference values yet for cards drafted with filter-pane filters, Top N, selection-dependent
+  (`MIN/MAX`, `FILTER … = MIN`) or multi-fact measures (ADR-007, ADR-008).
+- Enum assumptions taken from memory (verify): filter aggregate codes, Top N direction/ties, `howCreated` 5.
+- Filters not applied: on an aggregate or a measure, relative date, booleans, multi-column `In`, multi-hop.
+- Drill-through navigation with a value from the source page; hidden pages reachable only via `--include-hidden`.
+- Slicers: relative-date and tile modes, cascading options, pair-accurate hierarchy selection (ADR-006).
+- Measures: `CALCULATE` shorthand override vs `FILTER` intersect, table/matrix over several fact tables,
+  time intelligence beyond the recognised idioms.
+- PBIR: bookmarks, hidden visuals and groups unverified on a real file.
+- Mapping report exists only as CLI/markdown, not in the panel; the packaged skill's renderer is a simplified
+  standard-library one (no slicer widgets, buttons, tooltips, 100 % stacked).
+- A table with no relationship path to its visual's tables (`Open Reqs` + `Workday codes`) needs a decision
+  from the report owner.
+
 ## Open risks
 
 - Measures with complex time intelligence (nested SAMEPERIODLASTYEAR, TOTALYTD with filters) need windowed SQL; estimate separately.

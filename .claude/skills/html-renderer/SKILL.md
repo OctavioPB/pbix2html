@@ -69,6 +69,16 @@ value.
 Lowercase aliases. Dates as ISO strings. Nulls: the renderer skips categories whose
 `value` is null. Numeric formatting (`format: "#,##0.0%"`) goes in the yaml, not the SQL.
 
+## 100 % stacked charts
+
+`hundredPercentStacked*` visuals are drawn with `v.percent`: each category's series are rescaled to sum to
+100 in the renderer (ECharts has no such mode), the value axis is fixed at 0–100 with `%` labels. The SQL is
+the same as for a plain stacked chart (absolute values). Both templates (`report.html.j2`,
+`report_hah.html.j2`) carry it.
+
+Fields in a chart's `Tooltips` role are **not** drafted as SQL columns (they used to become extra series);
+if the tooltip must show them, add them to the SQL by hand.
+
 ## Theme
 
 `layout.json → theme.custom_json`: `dataColors` → series palette; `background`/`foreground`

@@ -68,6 +68,13 @@ report chooses whichever fits the case.
   closest standard chart, not copied pixel by pixel; this is noted in each report's
   documentation.
 - It never mixes data from different roles/permissions in the same file.
+- **Drill-through** (right-click a value to jump to a detail page for that value) has no navigation yet:
+  those pages show all values, and the value saved in the file is not used.
+- A few filters Power BI applies can't be reproduced automatically (filters on a total such as
+  "sum less than 100", filters on a measure, relative dates). The team's mapping report lists them per report;
+  those visuals are finished by hand before the numbers are compared.
+- Pages the author hid in Power BI stay hidden unless a button leads to them.
+
 
 ### Two-line glossary
 
@@ -94,6 +101,8 @@ follow along while one is being built:
 | Proxy user / trusted session | How the live version tells Teradata *which person* is asking, so Teradata shows that person only their own rows. Set up once by the technical team. |
 | Snapshot vs live vs HAH | Three ways to deliver the finished report: data frozen in the file, data fetched on open, or data fetched through the internal HTML App Host platform. |
 | Validate | The numeric check that compares the new report's numbers against the original's, visual by visual. Needs Teradata configured. |
+| Mapping report | A per-report checklist (`pbix2html mapping`): which visuals could be drafted, which need a person and why, which Power BI filters aren't reproduced, drill-through and hidden pages. Read it before reviewing a draft. |
+| Filter-pane filters | The filters set in Power BI's Filters pane (for the report, a page or one visual). They change the numbers, so the tool adds them to each query. |
 | PBIR | The newer internal format Power BI Desktop (2024+) saves `.pbix` files in. The tool reads both the old and new formats; you don't have to know which you have. |
 
 ---
@@ -257,9 +266,11 @@ If you only need what the panel requires (without the test dependencies), `pip i
 
 ```bash
 pbix2html extract reports/          # inventory of every .pbix → out/summary.md
-pbix2html scaffold reports/X.pbix   # metrics/X.yaml with sql: TODO per visual
+pbix2html mapping reports/X.pbix    # what can/can't be drafted and why → out/X/mapping_report.md
+pbix2html scaffold reports/X.pbix   # metrics/X.yaml, auto-drafting what it can (--overwrite re-drafts, keeping a backup)
 pbix2html convert reports/X.pbix --mode snapshot --params year=2026 [--role Sales_North]
 pbix2html convert reports/X.pbix --mode live
+pbix2html convert reports/X.pbix --include-hidden  # also render pages hidden in Power BI
 pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
 pbix2html validate X
 pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat

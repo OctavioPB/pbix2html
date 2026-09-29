@@ -99,6 +99,27 @@ BI literals carry a type suffix: `2026L` (long), `'text'`, `datetime'2026-01-01T
 `12.5D`. A slicer's filter appears in the slicer visual's `filters` **and** in every other
 visual's `prototypeQuery`.
 
+### Where filters live, and which ones constrain anything
+
+Three levels, all normalized by `parse_filters` into `{target, type, definition, how_created,
+aggregation, is_hidden, is_locked}`: report (`layout["filters"]`: classic `Layout.filters`, PBIR
+`report.json → filterConfig`), page (`page["filters"]`) and visual (`visual["filters"]`).
+
+- A filter **without** `filter`/`definition` is just a field listed in the pane (no effect).
+- `type`: `Categorical` (In / Not In), `Advanced` (Comparison, And/Or, Contains/StartsWith/EndsWith, and
+  `Not` of any of them), `TopN` (an `In` whose table is a `Subquery` with `Top`, `OrderBy`),
+  `RelativeDate`. A negated condition is `{"Not": {"Expression": <cond>}}` in `Where`.
+- `aggregation` is set when the pane field is an aggregate (`Aggregation.Function`: 0 Sum, 1 Avg,
+  2 Count distinct, 3 Min, 4 Max, 5 Count; from Power BI's enum): the condition is on the aggregate, not the
+  rows. `target` is still `Table.column`.
+- `how_created`: 0 auto, 1 user, 2 drill, 3 include, 4 exclude, **5 drill-through** (from Power BI's enum,
+  not confirmed against Microsoft docs here). A drill-through filter's saved value is only the last one the
+  author tried.
+- A filter on a **measure** has target `Table.Measure` and `expression.Measure`.
+
+Applying them to SQL is `semantic.effective_filters` / `filter_sql` (see skill `dax-to-teradata-sql`,
+ADR-008).
+
 ## Theme
 
 `themeCollection.customTheme.name` points to the JSON under `StaticResources`. Useful
@@ -112,6 +133,22 @@ fields: `dataColors[]`, `background`, `foreground`, `tableAccent`,
 `dax_measures`, `dax_columns`, `relationships`, `rls` (roles and DAX filters),
 `tmschema_partitions` (`Mode`: 1 = DirectQuery), `tmschema_datasources`, `power_query`.
 `get_table()` will fail or return empty: don't use it.
+
+### Storage modes and internal partitions
+
+`model.json → table_modes` maps each table to `Import`, `DirectQuery` or `Dual` (`partitions[].Mode`
+0 / 1 / 2); `storage_modes` counts partitions by mode. Two traps: the partitions list also holds
+engine-internal entries named `H$…`, `R$…`, `U$…` (column-hierarchy and relationship storage, all `Dual`),
+and the auto date tables (`LocalDateTable_*`, `DateTableTemplate_*`); both are filtered out. A report can
+be all Import (TestReport4), all DirectQuery (TestReport5) or composite (TestReport3). After migration every
+table that came from Teradata is read live regardless of its original mode; an Import table built from inline
+data or a DAX calculated table stays in the yaml/table map, and the `.pbix` copy of an Import table can be
+stale relative to Teradata.
+
+Relationships: pbixray hides those that touch a calculated table (`SystemFlags` 2, e.g. a DAX `CALENDAR`);
+`extract._all_relationships` re-reads them. Hidden pages: `hidden` on the page; the renderer keeps those a
+visible page's button navigates to (transitively) and the mapping report lists the rest (`--include-hidden`
+renders all).
 
 ### If PBIXRay can't open the file (known gap, not yet implemented)
 

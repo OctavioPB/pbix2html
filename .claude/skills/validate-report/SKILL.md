@@ -21,6 +21,18 @@ For every visual with `sql` in the yaml:
 - Reports `OK`, `DIFF` (with the differing rows), or `SKIP` (no reference).
 - Writes `out/<Report>.validation.md` and exits with a non-zero code if there's a `DIFF`.
 
+## Before validating
+
+1. Read `out/<Report>/mapping_report.md` (`pbix2html mapping <pbix>`): it lists what could not be drafted and,
+   under *Filter-pane filters not applied*, the filters Power BI applies that the SQL doesn't (aggregate/measure
+   filters, relative date, multi-hop). Those visuals will differ until fixed by hand.
+2. SQL drafted **before** filter-pane filters were applied (the report's first `convert`) lacks them. A yaml
+   whose `sql` is already written is never overwritten. Regenerate the drafts with `pbix2html scaffold <pbix> --overwrite` (it backs the old yaml
+   up first; copy any hand-written SQL back from the backup) or reset that visual's `sql` to `TODO` and let the panel
+   auto-draft again, before comparing numbers.
+3. Compare with the same slicer state on both sides. Drill-through pages have no navigation in the HTML, and
+   their saved filter value is ignored, so compare them for the value you pass explicitly.
+
 ## Diagnosing differences
 
 | Symptom | Likely cause | Where to look |
@@ -30,6 +42,10 @@ For every visual with `sql` in the yaml:
 | Extra/missing period | date filter `<` vs `<=`; timezone | `reference_sql` |
 | Small constant difference | intermediate rounding | drop `ROUND` from the SQL, format at render time |
 | A role sees extra data | RLS not applied | `--role` / PROXYUSER; secure view |
+| Numbers off only where the visual had a Top N / advanced filter | filter-pane filter not applied or ranked differently (direction, ties) | mapping report; `effective_filters` |
+| A time-series or "starting/ending" value off by a period | `MIN/MAX(Calendar[Date])` evaluated for the whole selection instead of per group, or month compare | skill `dax-to-teradata-sql` (selection-dependent) |
+| A timestamp off by hours | `NOW()` is UTC in the service, local in Desktop; Teradata session zone | `CURRENT_TIMESTAMP(0)` |
+| Import table differs from the `.pbix` copy | the file holds a stale cache, Teradata is the truth | refresh Power BI first |
 | Different order | `prototypeQuery.OrderBy` not replicated | `ORDER BY` in the SQL + `sort` in the yaml |
 
 ## "Ready" criteria
