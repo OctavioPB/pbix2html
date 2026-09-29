@@ -67,6 +67,8 @@
 
     <form method="post" action="/reports/{{ name }}/autofill" style="margin-bottom:10px">
       <button type="submit">Auto-detect queries &amp; parameters</button>
+      <label class="muted" style="margin-left:10px"><input type="checkbox" name="redraft"> also redo queries the tool
+         drafted earlier (keeps a backup; queries you wrote yourself are never touched)</label>
       <p class="muted" style="margin:6px 0 0">Works out each visual's query from the report's own
          measures and table relationships, and turns slicers into parameters. <strong>Only fills
          what's still empty</strong> — anything already written is left exactly as it is, so this is

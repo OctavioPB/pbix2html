@@ -412,7 +412,7 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
 
 
 @app.post("/reports/{name}/autofill")
-def action_autofill(request: Request, name: str):
+async def action_autofill(request: Request, name: str):
     """Fill in the queries and parameters that are still missing, leaving everything
     already written alone.
 
@@ -430,8 +430,9 @@ def action_autofill(request: Request, name: str):
             return _page(request, pbix, result)
 
         layout = ex.extract_layout(pbix)
+        form = await request.form()
         outcome = semantic.autofill(spec.raw, layout, semantic.with_relationship_overrides(name, ex.extract_model(pbix)),
-                                    _load_table_map(name))
+                                    _load_table_map(name), redraft=form.get("redraft") == "on")
         detail = []
         if outcome["filled"]:
             semantic.backup_yaml(name)          # writing: keep the version before it

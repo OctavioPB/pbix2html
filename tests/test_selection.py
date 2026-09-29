@@ -299,3 +299,37 @@ def test_legacy_sql_with_reserved_names_after_a_dot_is_quoted_too():
     assert q(old) == 'SELECT lvl."rename", lvl."date", COUNT(*) FROM (SELECT 1 AS lvl, \'x\' AS "rename") AS lvl'
     assert q("SELECT 'a.value' FROM t -- x.value\nWHERE t.region = 1 AND f(t.k) > 2.5") == \
         "SELECT 'a.value' FROM t -- x.value\nWHERE t.region = 1 AND f(t.k) > 2.5"
+
+
+# ---- SQL written by an earlier drafter is repaired when it is sent (Teradata 3888 / 3706) -----------
+
+def test_set_operation_arms_without_a_table_get_one_row_source():
+    legacy = ("SELECT x FROM (SELECT CAST('N' AS VARCHAR(1)) AS x\nUNION ALL\nSELECT 'E'\nUNION ALL\nSELECT 'I'\n) AS t "
+              "WHERE t.x IN (?)")
+    fixed = S.add_from_to_bare_selects(legacy)
+    assert fixed.count("FROM (SELECT 1 AS one) AS one_row") == 3
+    assert S.add_from_to_bare_selects(fixed) == fixed                          # idempotent
+    plain = "SELECT a FROM t UNION ALL SELECT b FROM u"
+    assert S.add_from_to_bare_selects(plain) == plain                          # arms with a table: untouched
+    assert S.add_from_to_bare_selects("SELECT 1") == "SELECT 1"                # not a set operation
+    assert S.add_from_to_bare_selects("SELECT 'a UNION ALL SELECT b' AS s FROM t") == "SELECT 'a UNION ALL SELECT b' AS s FROM t"
+
+
+def test_legacy_top_n_with_a_window_function_is_rewritten_to_the_counted_form():
+    old = ("WHERE h.lvl IN (SELECT k FROM (\nSELECT h.lvl AS k, SUM(h.lvl) AS a\nFROM (SELECT * FROM x\n) AS h\nGROUP BY 1\n"
+           ") AS t QUALIFY RANK() OVER (ORDER BY a ASC) <= 1)")
+    new = S.rewrite_legacy_top_n(old)
+    assert "QUALIFY" not in new and "OVER" not in new
+    assert "WHERE (SELECT COUNT(*) FROM (" in new and "WHERE u.a < t.a) < 1)" in new and new.count("SUM(h.lvl) AS a") == 2
+    assert S.rewrite_legacy_top_n(new) == new
+    assert S.rewrite_legacy_top_n(old.replace("ASC", "DESC").replace(" <= 1", " <= 3")).endswith("u.a > t.a) < 3)")
+
+
+def test_the_backend_sends_repaired_sql(monkeypatch):
+    from tests.test_backend_pool import FakeCon
+    log = []
+    b = query.TeradataBackend()
+    monkeypatch.setattr(b, "_connect", lambda: FakeCon(log))
+    b.execute("SELECT 'a' AS value UNION ALL SELECT 'b'", [], None)
+    assert log[-1][2] == ('SELECT \'a\' AS "value" FROM (SELECT 1 AS one) AS one_row UNION ALL '
+                          "SELECT 'b' FROM (SELECT 1 AS one) AS one_row")
