@@ -152,6 +152,14 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - Custom theme (`TeradataTheme*.json`) renders; the report has one visible page, so most of its content is
   reachable only with `--include-hidden`.
 
+## HTML verifier (2026-09-29, ADR-009)
+
+`pbix2html verify` (static + rendered checks, pixel contrast, numbered screenshots) was run on the five real reports
+and exposed conversion bugs now fixed: theme colour ids lost when a report has no custom theme, textbox paragraph
+alignment, default shape fill, card number colour, slicer text on its own white control, translucent button text.
+Open: text drawn inside charts is not checked; chart label heuristics are approximate; no comparison with Power BI
+reference screenshots.
+
 ## Phase 1 — End-to-end pilot (1 report)
 
 Pick the most representative report (common visuals, ≥1 slicer, RLS). Record here: `Pilot report: ______`

@@ -245,7 +245,8 @@ def test_theme_colour_ids_and_tints():
     assert literal_color(ref(2, 0.6), pal) == "#FFBF9A"            # value seen in a real report
     assert _tint("#FFFFFF", -0.5) == "#808080"                      # negative = darker
     assert literal_color(ref(2, 0.6)) == "theme:2:0.6"              # palette unknown yet: marker
-    assert theme_palette({}) is None
+    # no custom theme: Power BI's default palette (white, black, #118DFF...), so ColorId 0 is still white
+    assert theme_palette({})[:3] == ["#FFFFFF", "#000000", "#118DFF"]
 
 
 def test_shape_fill_uses_theme_colour_end_to_end(tmp_path):

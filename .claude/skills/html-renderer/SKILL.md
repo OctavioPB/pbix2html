@@ -84,6 +84,17 @@ colour is the default text of a slicer widget (`--sl-fg`). A background at 100 %
 (`style.transparency`); a partial one is `rgba`. The title text itself comes from the yaml (`title`), so an old
 yaml keeps old text until it is regenerated.
 
+## Verifying the result (`pbix2html verify`, ADR-009)
+
+`pbix2html verify out/Report.html` opens every page in a browser and writes `verify_report.md` with numbered
+screenshots. Rules: `overlap`, `outside_page`, `too_small`, `no_renderer`, `no_data` / `data_error` /
+`empty_result` (static); `invisible_text`, `low_contrast`, `text_busy_background` (pixel contrast),
+`text_covered`, `text_overlap`, `text_clipped` / `text_truncated`, `text_too_big`, `visual_error`, `visual_empty`,
+`broken_image`, `chart_labels_crowded` / `chart_labels_wide` / `chart_font_large` / `chart_legend_crowded` /
+`chart_many_slices`, `js_error`. Offline: `--echarts <local echarts.min.js>`; browser: `--browser <path>`.
+Fixes it led to: theme colour ids for a report without a custom theme, textbox paragraph alignment, default shape
+fill (the theme's first colour), card number colour, readable default text on dark panels and translucent buttons.
+
 ## 100 % stacked charts
 
 `hundredPercentStacked*` visuals are drawn with `v.percent`: each category's series are rescaled to sum to

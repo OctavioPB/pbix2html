@@ -27,25 +27,23 @@
   .params input, .params select { font: inherit; padding: .15rem .3rem; }
   .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
   .page[hidden] { display: none; }
-  .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
-  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; }
+  .visual .title { font-size: .85rem; font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
   .chart { position: absolute; inset: 0; }
   .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
-  .card .value { font-size: clamp(1rem, 20cqmin, 2.4rem); font-weight: 600; line-height: 1.1; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .card .label { color: var(--muted); font-size: clamp(.6rem, 7cqmin, .8rem); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .kpi .target { color: var(--muted); font-size: clamp(.6rem, 6cqmin, .8rem); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .value { font-size: clamp(1.2rem, 3.2vw, 2.6rem); font-weight: 600; line-height: 1; }
+  .card .label { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
+  .kpi .target { color: var(--muted); font-size: .8rem; }
   .multicard { display: grid; grid-template-columns: 1fr auto; gap: .2rem .8rem; padding: .5rem .6rem; font-size: .85rem; align-content: start; }
   .multicard .v { text-align: right; font-weight: 600; }
   .tablewrap { overflow: auto; height: 100%; }
   table { border-collapse: collapse; width: 100%; font-size: .8rem; }
   th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-  th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: 600; }
+  th { position: sticky; top: 0; background: var(--bg); font-weight: 600; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
-  tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
@@ -67,6 +65,7 @@
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
   .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
   .sl-btn:disabled { cursor: default; opacity: .8; }
+  .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
   .sl-range { display: flex; gap: .3rem; align-items: center; }
   .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
   .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
@@ -109,7 +108,7 @@
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
@@ -190,13 +189,13 @@
   const R = {
     card(el, v, b) {
       const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
-      el.innerHTML = `<div class="card"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
         (li >= 0 && r[li] ? `<div class="label">${r[li]}</div>` : '') + `</div>`;
     },
     kpi(el, v, b) {
       const r = b.rows[0] || []; const vi = col(b, 'value'), ti = col(b, 'target');
       const delta = (ti >= 0 && r[ti]) ? (r[vi] - r[ti]) / r[ti] : null;
-      el.innerHTML = `<div class="card kpi"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card kpi"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
         (ti >= 0 ? `<div class="target">Target ${fmt(r[ti], v.format.value)}${delta !== null ? ' · ' + fmt(delta, '%') : ''}</div>` : '') + `</div>`;
     },
     multicard(el, v, b) {
@@ -205,15 +204,7 @@
     },
     table(el, v, b) {
       const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
-      // A table style preset (extract.py's _table_style) sets its own header/row-banding
-      // colours; absent keys keep the theme-neutral default (no banding) below.
-      const st = v.style || {};
-      const vars = [
-        st.table_header_bg && `--th-bg:${st.table_header_bg}`, st.table_header_fg && `--th-fg:${st.table_header_fg}`,
-        st.table_row_bg && `--tr-bg:${st.table_row_bg}`, st.table_row_bg_alt && `--tr-bg-alt:${st.table_row_bg_alt}`,
-        st.table_row_fg && `--tr-fg:${st.table_row_fg}`,
-      ].filter(Boolean).join(';');
-      el.innerHTML = `<div class="tablewrap"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
+      el.innerHTML = '<div class="tablewrap"><table><thead><tr>' +
         b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || c}</th>`).join('') + '</tr></thead><tbody>' +
         b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
         '</tbody></table></div>';
