@@ -392,6 +392,56 @@ def action_scaffold(request: Request, name: str, regenerate: bool = Form(False))
     return _page(request, pbix, result)
 
 
+@app.post("/reports/{name}/autofill")
+def action_autofill(request: Request, name: str):
+    """Fill in the queries and parameters that are still missing, leaving everything
+    already written alone.
+
+    Distinct from "Regenerate template", which rebuilds from the .pbix and discards
+    hand-written SQL — that used to be the only way to pick up a draft, so improving
+    the drafter did nothing for a report someone had already started."""
+    pbix = _find_pbix(name)
+    try:
+        spec, yaml_error = _load_spec(name)
+        if spec is None:
+            result = {"ok": False, "title": "Generate the template first",
+                      "message": yaml_error or "There's no metrics template for this report yet — "
+                                               "use “Generate template” above, then come back.",
+                      "detail": []}
+            return _page(request, pbix, result)
+
+        layout = ex.extract_layout(pbix)
+        outcome = semantic.autofill(spec.raw, layout, ex.extract_model(pbix), _load_table_map(name))
+        detail = []
+        if outcome["filled"]:
+            semantic.backup_yaml(name)          # writing: keep the version before it
+            semantic.save_raw(name, outcome["raw"])
+            detail.append("Review them on “Edit SQL, parameters & roles” — they're drafts, "
+                          "and each one is marked Auto-drafted in its notes.")
+        if outcome["already"]:
+            detail.append(f"{len(outcome['already'])} visual(s) already had SQL and were left untouched.")
+        if outcome["parameters_added"]:
+            detail.append(f"Added {len(outcome['parameters_added'])} parameter(s) from slicers: "
+                          f"{', '.join(outcome['parameters_added'])}.")
+        if outcome["still_todo"]:
+            detail.append(f"{len(outcome['still_todo'])} visual(s) still need SQL by hand — usually "
+                          f"time intelligence, an unmapped table (step 2b), or a measure too "
+                          f"involved to translate safely.")
+        result = {
+            "ok": True,
+            "title": f"Filled in {len(outcome['filled'])} visual(s)" if outcome["filled"]
+                     else "Nothing new to fill in",
+            "message": ("Wrote the queries it could work out from the report's own measures "
+                        "and relationships." if outcome["filled"]
+                        else "Every visual either already has SQL or needs it written by hand."),
+            "detail": detail,
+        }
+    except Exception as e:
+        result = {"ok": False, "title": "Couldn't auto-detect",
+                  "message": f"{type(e).__name__}: {e}", "detail": []}
+    return _page(request, pbix, result)
+
+
 @app.post("/reports/{name}/restore")
 def action_restore(request: Request, name: str, backup: str = Form(...)):
     """Puts a previous version of metrics/<name>.yaml back. The panel keeps a copy every

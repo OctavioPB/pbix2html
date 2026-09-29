@@ -265,6 +265,72 @@ def test_edit_still_allows_saving_an_untouched_todo_stub(tmp_path, monkeypatch, 
     assert "TODO" in semantic.load(name).visuals[vid].sql
 
 
+def test_autofill_fills_gaps_without_touching_written_sql(tmp_path, monkeypatch, fake_pbix):
+    # The point of a separate button: "Regenerate" rebuilds from the .pbix and discards
+    # hand-written SQL, so it was the only way to pick up a draft and nobody with work
+    # in progress could use it. Auto-detect only fills what's still empty.
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    c.post(f"/reports/{name}/extract")
+    c.post(f"/reports/{name}/scaffold")
+    spec = semantic.load(name)
+    vid = next(iter(spec.visuals))
+    mine = "SELECT 42 AS value FROM my_own_view"
+    c.post(f"/reports/{name}/edit", data=_edit_form(name, spec, **{f"visual__{vid}__sql": mine}))
+
+    r = c.post(f"/reports/{name}/autofill")
+    assert r.status_code == 200
+    after = semantic.load(name)
+    assert after.visuals[vid].sql == mine                      # untouched
+    assert "already had SQL and were left untouched" in r.text
+
+
+def test_autofill_drafts_what_it_can_and_says_what_it_could_not(tmp_path, monkeypatch, fake_pbix):
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    c.post(f"/reports/{name}/extract")
+    # Map the tables so the drafter has somewhere to point FROM, and give it a model
+    # with a measure that composes others plus one it must refuse.
+    c.post(f"/reports/{name}/table-map", data={"td__Sales": "SELECT * FROM sales_fact",
+                                               "td__Region": "SELECT * FROM region_dim"})
+    monkeypatch.setattr(gui.ex, "extract_model", lambda pbix: {
+        "measures": [
+            {"TableName": "Sales", "Name": "Net Revenue", "Expression": "SUM(Sales[Amount])"},
+            {"TableName": "Sales", "Name": "Cost", "Expression": "SUM(Sales[CostAmount])"},
+            {"TableName": "Sales", "Name": "Margin %", "Expression": "DIVIDE([Net Revenue], [Cost])"},
+        ],
+        "relationships": [{"FromTable": "Sales", "FromColumn": "RegionId",
+                           "ToTable": "Region", "ToColumn": "Id"}]})
+    c.post(f"/reports/{name}/scaffold", data={"regenerate": "on"})
+
+    before = semantic.readiness(semantic.load(name))
+    r = c.post(f"/reports/{name}/autofill")
+    after = semantic.readiness(semantic.load(name))
+    assert r.status_code == 200
+    assert after["ready"] >= before["ready"]
+    assert after["todo"] <= before["todo"]
+    # Whatever it drafted is flagged for review, and pointed at the edit page.
+    if after["drafted"]:
+        assert "Edit SQL, parameters &amp; roles" in r.text or "Edit SQL" in r.text
+        assert all("Auto-drafted" in (v.notes or "")
+                   for v in semantic.load(name).visuals.values()
+                   if v.has_data and "my_own" not in (v.sql or ""))
+
+
+def test_autofill_without_a_template_says_so_instead_of_failing(tmp_path, monkeypatch, fake_pbix):
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    c.post(f"/reports/{name}/extract")
+    r = c.post(f"/reports/{name}/autofill")       # no scaffold yet
+    assert r.status_code == 200 and "Generate the template first" in r.text
+
+
+def test_autofill_button_is_offered_on_the_report_page(tmp_path, monkeypatch, fake_pbix):
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    c.post(f"/reports/{name}/extract")
+    c.post(f"/reports/{name}/scaffold")
+    page = c.get(f"/reports/{name}").text
+    assert "Auto-detect queries" in page
+    assert f'action="/reports/{name}/autofill"' in page
+
+
 def test_regenerate_backs_up_the_previous_yaml_and_can_restore_it(tmp_path, monkeypatch, fake_pbix):
     # From BusinessReport.md ask 5: "Regenerate template" used to be a one-way door
     # guarded by a single confirm() dialog, with no way back for someone with no git

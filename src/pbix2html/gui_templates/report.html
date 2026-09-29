@@ -63,9 +63,19 @@
   <div class="step"><span class="n">2</span><h2>Metrics template (SQL per visual)</h2></div>
   {% if has_yaml %}
     <p class="muted"><code>metrics/{{ name }}.yaml</code> already exists. That's where each visual's
-       SQL lives — edit it below, right here in the panel (skill <code>dax-to-teradata-sql</code>
-       has the DAX → SQL patterns).</p>
+       SQL lives — fill it in automatically below, then check the result, all in the panel.</p>
+
+    <form method="post" action="/reports/{{ name }}/autofill" style="margin-bottom:10px">
+      <button type="submit">Auto-detect queries &amp; parameters</button>
+      <p class="muted" style="margin:6px 0 0">Works out each visual's query from the report's own
+         measures and table relationships, and turns slicers into parameters. <strong>Only fills
+         what's still empty</strong> — anything already written is left exactly as it is, so this is
+         safe to run again (for example after mapping more tables in step 2b).</p>
+    </form>
+
     <a class="btn" href="/reports/{{ name }}/edit">Edit SQL, parameters &amp; roles</a>
+    <p class="muted" style="margin:6px 0 0">Where you check what auto-detect produced and change
+       anything it got wrong or left blank. Drafted visuals are marked <code>Auto-drafted</code>.</p>
     <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml from the .pbix and any SQL already written is replaced.\n\nA copy of the current version is saved first, and you can put it back with “Restore a previous version” on this page.\n\nContinue?');">
       <div class="checkbox-row">
         <input type="checkbox" id="regenerate" name="regenerate">

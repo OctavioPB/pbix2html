@@ -127,17 +127,25 @@ machine and you're left an **`Open_Panel.bat`** file. Everything after that is y
    step 3 — skim them. Any row left blank needs a read-only `SELECT` query from someone
    who knows the database. You can come back to this later.
 
-5. **Click Generate template.** Creates the per-report settings file, and writes the SQL
-   for every visual simple enough to do automatically. The result message tells you
-   exactly where you stand: *"N of M visuals have working SQL, K still need it written by
-   hand."* The same figure stays visible at the top of the report page.
+5. **Click Generate template**, then **Auto-detect queries & parameters.** The first
+   creates the per-report settings file; the second works out each visual's query from
+   the report's own measures and table relationships, and turns slicers into parameters.
+   The result tells you exactly where you stand: *"N of M visuals have working SQL, K
+   still need it written by hand."* That figure also stays at the top of the report page.
 
-6. **Fill in the rest** (*Edit SQL, parameters & roles*). A form in the browser: one card
-   per visual, its query in a text box, plus the report's filters and roles.
-   - Visuals marked **Auto-drafted** already have a query — it still needs checking.
+   **Auto-detect only fills what's still empty** — anything already written is left
+   alone, so it's safe to run again later (after mapping more tables in step 4, say).
+   *Regenerate template* is the different, destructive one: it rebuilds from the `.pbix`
+   and replaces written SQL, keeping a backup you can restore.
+
+6. **Check what it produced** (*Edit SQL, parameters & roles*). A form in the browser:
+   one card per visual, its query in a text box, plus the report's filters and roles.
+   - Visuals marked **Auto-drafted** already have a query — **that's a draft, not an
+     answer.** Read it, and confirm it with *Validate* (step 9) before trusting a number.
    - Visuals still saying `TODO` need Teradata SQL written by hand. **This is the step
-     that needs someone technical**, and it's usually the bulk of the work on a real
-     report. There's no way around it today.
+     that needs someone technical.** It's what auto-detect deliberately won't guess at:
+     time intelligence (year-to-date, same-period-last-year), measures over virtual
+     tables, and any table that isn't mapped yet.
    - Anything you type is checked to be a plain read-only query before it saves, and
      rejected with the reason if it isn't.
 
@@ -179,13 +187,16 @@ machine and you're left an **`Open_Panel.bat`** file. Everything after that is y
      else here, they're a mechanical pattern match, not a guarantee.
    - **Generate the metrics template** (`metrics/<Report>.yaml`) — one click creates it.
      If you did the table-mapping step, most visuals come back with a **working `sql`
-     already drafted**, not a blank `TODO`: measures that are a single SUM/AVERAGE/MIN/
-     MAX/COUNT/COUNTROWS/DISTINCTCOUNT of one column (most real ones, in DirectQuery)
-     are translated automatically, joins included when the tables involved have a
-     documented relationship. Every auto-drafted visual is marked `Auto-drafted` in its
-     notes — still review it and run **Validate** (step 4) before trusting it, same as
-     anything else here. Whatever it can't confidently draft (a calculated/filtered
-     measure, time intelligence, an unclear join) is left as `TODO`, same as before.
+     already drafted**, not a blank `TODO`. It translates the aggregates
+     (SUM/AVERAGE/MIN/MAX/COUNT/COUNTROWS/DISTINCTCOUNT) *and* the things measures are
+     usually built out of: ratios (`DIVIDE`), arithmetic between measures, measures that
+     reference other measures, and `CALCULATE` with column filters. Joins come from the
+     model's own relationships, slicers become parameters, and a chart with several
+     measures gets one series per measure. Every auto-drafted visual is marked
+     `Auto-drafted` in its notes — still review it and run **Validate** (step 4) before
+     trusting it. What it deliberately won't guess at: time intelligence (`TOTALYTD`,
+     `SAMEPERIODLASTYEAR`), `ALL`/`ALLSELECTED`, virtual tables and iterators
+     (`SUMX` over an expression), and any table it can't reach — those stay `TODO`.
      The result message says how many visuals ended up in each state, and the same count
      stays at the top of the report page and in the report list.
    - **Restore a previous version**: every overwrite of `metrics/<Report>.yaml` — the
@@ -348,10 +359,11 @@ all ~50 in a session).
    `validate` will check against.
 
 6. **Review/write the real `sql` per visual.** Step 4's scaffold already auto-drafts
-   `sql` for visuals whose measure is a single SUM/AVERAGE/MIN/MAX/COUNT/COUNTROWS/
-   DISTINCTCOUNT (most real ones, in DirectQuery — see `_draft_visual_sql` in
-   `semantic.py`), joins included where `model.json`'s relationships make it
-   unambiguous; those are marked `Auto-drafted` in the visual's `notes` and still need
+   `sql` for most visuals: `translate_dax` in `semantic.py` handles the aggregates plus
+   `DIVIDE`, arithmetic, measure-to-measure references and `CALCULATE` column filters,
+   and `_draft_visual_sql` assembles them into each kind's column contract — joins
+   included where `model.json`'s relationships make it unambiguous, one series per
+   measure on a multi-measure chart. Those are marked `Auto-drafted` in `notes` and still need
    a human review, especially the JOIN (a wrong direction/multiplicity duplicates rows
    and inflates totals — see skill `validate-report`). Everything else is still rewritten
    by hand as Teradata SQL (DAX itself is never ported — see skill `dax-to-teradata-sql`

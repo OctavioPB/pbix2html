@@ -10,7 +10,7 @@ _PNG_1PX = base64.b64decode(
 def _lit(value):
     return {"expr":{"Literal":{"Value":value}}}
 
-def cfg(name, vtype, proj, title=None, hidden=False, styled=False):
+def cfg(name, vtype, proj, title=None, hidden=False, styled=False, labelled=False):
     c = {"name": name, "layouts":[{"id":0,"position":{"x":10,"y":20,"z":0,"width":300,"height":200,"tabOrder":0}}],
          "singleVisual":{"visualType":vtype,"projections":proj,"drillFilterOtherVisuals":True,
             "objects":{"dataPoint":[{}],"labels":[{}]}}}
@@ -22,6 +22,14 @@ def cfg(name, vtype, proj, title=None, hidden=False, styled=False):
         vco = c["singleVisual"].setdefault("vcObjects", {})
         vco["background"] = [{"properties":{"color":{"solid":{"color":_lit("'#FFEECC'")}}}}]
         vco["border"] = [{"properties":{"show":_lit("true"),"color":{"solid":{"color":_lit("'#FF0000'")}}}}]
+    if labelled:
+        # Subtitle plus axis and legend titles — visible text the extractor used to drop.
+        c["singleVisual"].setdefault("vcObjects", {})["subTitle"] = [
+            {"properties":{"text":_lit("'FY2026, excl. tax'")}}]
+        c["singleVisual"]["objects"].update({
+            "categoryAxis":[{"properties":{"titleText":_lit("'Region'")}}],
+            "valueAxis":[{"properties":{"titleText":_lit("'Margin %'")}}],
+            "legend":[{"properties":{"titleText":_lit("'Segment'")}}]})
     if hidden:
         c["singleVisual"]["display"]={"mode":"hidden"}
     return json.dumps(c)
@@ -37,7 +45,7 @@ layout = {"id":0,"resourcePackages":[{"resourcePackage":{"name":"Deneb","type":0
   {"id":0,"name":"ReportSection1","displayName":"Executive Summary","ordinal":0,"width":1280,"height":720,"filters":pf,"config":json.dumps({"objects":{"outspace":[{"properties":{"color":{"solid":{"color":_lit("'#202020'")}}}}]}}),
    "visualContainers":[
      {"x":0,"y":0,"z":0,"width":200,"height":100,"filters":"[]","config":cfg("v1","card",{"Values":[{"queryRef":"Sales.Net Revenue"}]},"Revenue",styled=True)},
-     {"x":220,"y":0,"z":1,"width":600,"height":300,"filters":"[]","config":cfg("v2","clusteredBarChart",{"Category":[{"queryRef":"Region.Name"}],"Y":[{"queryRef":"Sales.Margin %"}]},"Margin by Region")},
+     {"x":220,"y":0,"z":1,"width":600,"height":300,"filters":"[]","config":cfg("v2","clusteredBarChart",{"Category":[{"queryRef":"Region.Name"}],"Y":[{"queryRef":"Sales.Margin %"}]},"Margin by Region",labelled=True)},
      {"x":0,"y":320,"z":2,"width":300,"height":80,"filters":"[]","config":cfg("v3","slicer",{"Values":[{"queryRef":"Calendar.Year"}]})},
      {"x":0,"y":420,"z":3,"width":300,"height":200,"filters":"[]","config":cfg("v4","Deneb2B2C3F1A2","{}" and {"Values":[{"queryRef":"Sales.Net Revenue"}]},"Custom")},
      {"x":0,"y":0,"z":9,"width":10,"height":10,"config":json.dumps({"name":"g1","singleVisualGroup":{"displayName":"KPI Group"}})},
@@ -48,6 +56,12 @@ layout = {"id":0,"resourcePackages":[{"resourcePackage":{"name":"Deneb","type":0
      {"x":0,"y":720,"z":6,"width":300,"height":60,"filters":"[]","config":json.dumps({"name":"v8",
        "singleVisual":{"visualType":"textbox","objects":{"general":[{"properties":{"paragraphs":[
          {"textRuns":[{"value":"Q3 Summary","textStyle":{"fontWeight":"bold","color":"#123456"}}]}]}}]}}})},
+     # A button carrying a label, plus a title the report switches off: both were
+     # dropped before (blank box, and a heading the original doesn't show).
+     {"x":0,"y":880,"z":8,"width":140,"height":40,"filters":"[]","config":json.dumps({"name":"v10",
+       "singleVisual":{"visualType":"actionButton","projections":{},"vcObjects":{
+         "text":[{"properties":{"text":_lit("'Back to summary'")}}],
+         "title":[{"properties":{"text":_lit("'Hidden heading'"),"show":_lit("false")}}]}}})},
      {"x":0,"y":800,"z":7,"width":120,"height":60,"filters":"[]","config":json.dumps({"name":"v9",
        "singleVisual":{"visualType":"image","objects":{"general":[{"properties":{"imageUrl":{"expr":{
          "ResourcePackageItem":{"PackageName":"RegisteredResources","PackageType":1,"ItemName":"logo.png"}}}}}]}}})},

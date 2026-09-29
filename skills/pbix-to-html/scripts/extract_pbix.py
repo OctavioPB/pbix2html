@@ -181,6 +181,73 @@ def _object_flag(objects: dict, name: str, prop: str = "show") -> bool | None:
     return None
 
 
+def _object_text(objects: dict, name: str, *props: str) -> str | None:
+    """Text out of a formatting object, e.g. vcObjects.title[0].properties.text.expr, or
+    objects.categoryAxis[0].properties.titleText.expr. Tries each candidate property
+    name in turn because Power BI isn't consistent about it (`text`, `titleText`,
+    `labelText` all appear for what a reader just sees as a label)."""
+    for entry in (objects or {}).get(name) or []:
+        properties = (entry or {}).get("properties") or {}
+        for prop in props:
+            text = literal_to_text((properties.get(prop) or {}).get("expr"))
+            if text:
+                return text
+    return None
+
+
+def _is_shown(objects: dict, name: str) -> bool:
+    """Whether a formatting object is switched on. Absent means on: Power BI writes the
+    `show` flag only when someone has changed it."""
+    return _object_flag(objects, name, "show") is not False
+
+
+def visual_text(sv: dict) -> dict:
+    """Every piece of human-readable text a visual carries, as
+    {title, subtitle, shape_text, axis_x, axis_y, legend}, omitting whatever isn't set.
+
+    Only `title` was read before, and it was read even when the report switches the
+    title *off* — so converted reports showed headings the original hides. Everything
+    else here (a subtitle, the label on a button or shape, axis and legend titles) was
+    dropped outright, which is why shapes and buttons came out as blank boxes.
+
+    `show: false` is honoured for each one independently. Dynamic titles — bound to a
+    measure rather than typed — can't be resolved without running a query, so they come
+    back as None rather than as a wrong literal."""
+    vco = sv.get("vcObjects") or {}
+    objects = sv.get("objects") or {}
+    out: dict[str, str] = {}
+
+    if _is_shown(vco, "title"):
+        title = _object_text(vco, "title", "text", "titleText")
+        if title:
+            out["title"] = title
+    if _is_shown(vco, "subTitle"):
+        subtitle = _object_text(vco, "subTitle", "text", "titleText")
+        if subtitle:
+            out["subtitle"] = subtitle
+    # Buttons and shapes: the label lives in its own object, and which one depends on
+    # the visual. Checking several is cheaper than caring which; a miss yields nothing.
+    for container, name in ((vco, "text"), (objects, "text"), (objects, "shape"),
+                            (vco, "outline"), (objects, "general")):
+        shape_text = _object_text(container, name, "text", "labelText")
+        if shape_text:
+            out["shape_text"] = shape_text
+            break
+    if _is_shown(objects, "categoryAxis"):
+        axis_x = _object_text(objects, "categoryAxis", "titleText")
+        if axis_x:
+            out["axis_x"] = axis_x
+    if _is_shown(objects, "valueAxis"):
+        axis_y = _object_text(objects, "valueAxis", "titleText")
+        if axis_y:
+            out["axis_y"] = axis_y
+    if _is_shown(objects, "legend"):
+        legend = _object_text(objects, "legend", "titleText", "text")
+        if legend:
+            out["legend"] = legend
+    return out
+
+
 def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> dict:
     """The visual's own frame as the .pbix defines it: {background, border, border_color}.
 
@@ -392,14 +459,9 @@ def _parse_visual(vc: dict) -> dict:
     fields = sorted({p.get("queryRef") for role in projections.values() if isinstance(role, list)
                      for p in role if isinstance(p, dict) and p.get("queryRef")})
 
-    # Title: at vcObjects.title[0].properties.text.expr
-    title = None
     vco = sv.get("vcObjects") or {}
-    for t in vco.get("title") or []:
-        props = (t or {}).get("properties", {})
-        title = literal_to_text((props.get("text") or {}).get("expr"))
-        if title:
-            break
+    texts = visual_text(sv)          # title, subtitle, shape/button label, axis + legend titles
+    title = texts.get("title")
 
     display = (sv.get("display") or {}).get("mode")
 
@@ -418,6 +480,7 @@ def _parse_visual(vc: dict) -> dict:
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": container_style(vco),
+        "texts": texts,
     })
     return visual
 
@@ -544,13 +607,15 @@ def _pbir_fields(query_state: dict) -> list[dict]:
     return fields
 
 
+def _pbir_texts(container_objects: dict, vis: dict) -> dict:
+    """Same job as `visual_text` for PBIR, where the container's formatting sits in
+    `visualContainerObjects` rather than `vcObjects` while the visual's own objects
+    keep the classic shape."""
+    return visual_text({"vcObjects": container_objects or {}, "objects": vis.get("objects") or {}})
+
+
 def _pbir_title(container_objects: dict) -> str | None:
-    try:
-        val = (container_objects["title"][0]["properties"]
-               .get("text", {}).get("expr", {}).get("Literal", {}).get("Value", ""))
-        return val.strip("'\"") or None
-    except (KeyError, IndexError, TypeError):
-        return None
+    return _pbir_texts(container_objects, {}).get("title")
 
 
 def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
@@ -585,7 +650,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "tab_order": pos.get("tabOrder"), "parent_group": None,
             "type": vtype, "is_group": False,   # a real group container returns above instead
             "is_custom": vtype not in STANDARD_VISUALS and bool(CUSTOM_VISUAL_PATTERN.match(vtype)),
-            "title": _pbir_title(vdata.get("visualContainerObjects") or {}),
+            "title": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis).get("title"),
             "hidden": vis.get("visible") is False,   # TODO: confirm against a real hidden visual
             "projections": projections,
             "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
@@ -594,6 +659,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
+            "texts": _pbir_texts(vdata.get("visualContainerObjects") or {}, vis),
         }
     except Exception as e:
         stub = _empty_visual_stub({}, e)

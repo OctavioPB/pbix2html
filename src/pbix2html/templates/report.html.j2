@@ -29,6 +29,8 @@
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; }
   .visual .title { font-size: .85rem; font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
   .chart { position: absolute; inset: 0; }
   .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
@@ -83,6 +85,7 @@
               ; background: {{ v.style.background or 'transparent' }}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
     {% if v.title %}<div class="title">{{ v.title }}</div>{% endif %}
+    {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}
     <div class="body"></div>
   </div>
   {% endfor %}
@@ -157,10 +160,17 @@
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
     static(el, v) {
-      // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
-      // for an `image`-kind visual. shape/basicShape/actionButton have no such resource —
-      // those still draw as an empty frame, there's nothing captured to draw for them.
-      el.innerHTML = v.image ? `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">` : '';
+      // An `image` visual has its picture embedded as a data: URI; a shape or button
+      // instead carries a label (extract.py's visual_text). Either way the point is not
+      // to leave the box blank, which is what happened to both until now.
+      if (v.image) {
+        el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
+      } else if (v.texts && v.texts.shape_text) {
+        el.innerHTML = '<div class="shape-text"></div>';
+        el.firstChild.textContent = v.texts.shape_text;
+      } else {
+        el.innerHTML = '';
+      }
     },
     bar(el, v, b) { chart(el, v, cartesian(v, b, 'bar', true)); },
     column(el, v, b) { chart(el, v, cartesian(v, b, 'bar', false)); },
@@ -187,9 +197,24 @@
       data: cats.map(c => m.get(c) ?? null), stack: v.stacked ? 'total' : undefined,
       areaStyle: area ? {} : undefined, smooth: false,
     }));
-    const catAxis = { type: 'category', data: cats, ...axisStyle };
-    const valAxis = { type: 'value', ...axisStyle, axisLabel: { color: theme.muted, formatter: x => fmt(x, v.format.value) } };
-    return { ...base, legend: groups.size > 1 ? { top: 0, textStyle: { color: theme.muted } } : undefined,
+    // Axis and legend titles as the report labels them (extract.py's visual_text).
+    // Only set when the report actually names one — an axis titled by default in
+    // Power BI carries no text, and inventing one would read as our own caption.
+    const t = v.texts || {};
+    const axisTitle = name => name ? { name, nameLocation: 'middle', nameGap: 26,
+                                       nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
+    const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x) };
+    const valAxis = { type: 'value', ...axisStyle, axisLabel: { color: theme.muted, formatter: x => fmt(x, v.format.value) },
+                      ...axisTitle(t.axis_y) };
+    const legend = groups.size > 1
+      ? { top: 0, textStyle: { color: theme.muted }, ...(t.legend ? { name: t.legend } : {}) }
+      : undefined;
+    // containLabel reserves room for tick labels but not for an axis *name*, so a title
+    // on the bottom/left axis gets clipped at the edge unless the grid is opened up.
+    const grid = { ...base.grid,
+                   bottom: base.grid.bottom + (t.axis_x || t.axis_y ? 20 : 0),
+                   left: base.grid.left + (t.axis_x || t.axis_y ? 16 : 0) };
+    return { ...base, grid, legend,
              xAxis: horizontal ? valAxis : catAxis, yAxis: horizontal ? { ...catAxis, inverse: true } : valAxis, series: ser };
   }
   function chart(el, v, option) {

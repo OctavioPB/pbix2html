@@ -166,7 +166,8 @@ MODEL = {
     "measures": [
         {"TableName": "Sales", "Name": "Net Revenue", "Expression": "SUM(Sales[Amount])"},
         {"TableName": "Sales", "Name": "Margin %", "Expression": "SUM(Sales[MarginAmount])"},
-        {"TableName": "Sales", "Name": "Unfoldable", "Expression": "CALCULATE([Net Revenue], Region[Name]=\"X\")"},
+        {"TableName": "Sales", "Name": "Unfoldable",
+         "Expression": "TOTALYTD([Net Revenue], Calendar[Date])"},   # time intelligence: still manual
     ],
     "relationships": [
         {"FromTable": "Sales", "FromColumn": "RegionId", "ToTable": "Region", "ToColumn": "Id"},
@@ -175,15 +176,56 @@ MODEL = {
 TABLE_MAP = {"Sales": "SELECT * FROM sales_fact", "Region": "SELECT * FROM region_dim"}
 
 
-def test_translate_measure_expression_recognizes_simple_aggregates():
-    assert semantic._translate_measure_expression("SUM(Sales[Amount])") == ("SUM", "Sales", "Amount", False)
-    assert semantic._translate_measure_expression("COUNTROWS(Sales)") == ("COUNT", "Sales", None, False)
-    assert semantic._translate_measure_expression("DISTINCTCOUNT(Customers[Id])") == \
-        ("COUNT", "Customers", "Id", True)
-    assert semantic._translate_measure_expression("'Sales Fact'[Amount]") is None  # not a call, no agg
-    assert semantic._translate_measure_expression("CALCULATE(SUM(Sales[Amount]), Region[Name]=\"X\")") is None
-    assert semantic._translate_measure_expression("DIVIDE([A],[B])") is None
-    assert semantic._translate_measure_expression("") is None
+DAX_MEASURES = {
+    ("Sales", "Net Revenue"): "SUM(Sales[Amount])",
+    ("Sales", "Cost"): "SUM(Sales[CostAmount])",
+    ("Sales", "Margin"): "[Net Revenue] - [Cost]",
+    ("Sales", "Margin %"): "DIVIDE([Margin], [Net Revenue])",
+    ("Sales", "North Revenue"): 'CALCULATE(SUM(Sales[Amount]), Region[Name] = "North")',
+    ("Sales", "Big Orders"): "CALCULATE(COUNTROWS(Sales), Sales[Amount] > 1000)",
+    ("Sales", "Orders"): "COUNTROWS(Sales)",
+    ("Sales", "Customers"): "DISTINCTCOUNT(Sales[CustomerId])",
+    ("Sales", "Loop"): "[Loop] + 1",
+    ("Sales", "YTD"): "TOTALYTD([Net Revenue], Calendar[Date])",
+    ("Sales", "Virtual"): "SUMX(SUMMARIZE(Sales, Sales[Id]), [Net Revenue])",
+}
+
+
+def _dax(name):
+    return semantic.translate_dax(DAX_MEASURES[("Sales", name)], DAX_MEASURES)
+
+
+def test_translate_dax_handles_plain_aggregates():
+    assert _dax("Net Revenue").text == "SUM(sales.amount)"
+    assert _dax("Orders").text == "COUNT(*)"
+    assert _dax("Customers").text == "COUNT(DISTINCT sales.customerid)"
+
+
+def test_translate_dax_composes_measures_out_of_other_measures():
+    # The whole reason people still wrote every query by hand: the old translator was a
+    # single regex for AGG(Table[Col]), so a measure referencing other measures — most
+    # real ones — failed to resolve and took its visual down to a TODO with it.
+    assert _dax("Margin").text == "((SUM(sales.amount)) - (SUM(sales.costamount)))"
+    ratio = _dax("Margin %").text
+    assert ratio.startswith("(CASE WHEN") and "DECIMAL(18,6)" in ratio   # DIVIDE, zero-safe
+    assert "sales.costamount" in ratio                                   # resolved two levels deep
+
+
+def test_translate_dax_folds_calculate_filters_into_the_aggregate():
+    north = _dax("North Revenue")
+    assert north.text == "SUM(CASE WHEN region.name = 'North' THEN sales.amount END)"
+    assert north.tables == {"Sales", "Region"}          # the filter's table gets joined in
+    assert _dax("Big Orders").text == "SUM(CASE WHEN sales.amount > 1000 THEN 1 ELSE 0 END)"
+
+
+def test_translate_dax_refuses_what_it_cannot_do():
+    # Honest blank beats a wrong number that looks right.
+    assert _dax("Loop") is None                          # measure referencing itself
+    assert _dax("YTD") is None                           # time intelligence
+    assert _dax("Virtual") is None                       # virtual table / iterator
+    assert semantic.translate_dax("", {}) is None
+    assert semantic.translate_dax("'Sales Fact'[Amount]", {}) is None   # column, not a measure
+    assert semantic.translate_dax("[Missing Measure]", {}) is None
 
 
 def test_scaffold_auto_drafts_single_table_card(fake_pbix):
@@ -216,7 +258,7 @@ def test_scaffold_does_not_auto_draft_without_table_map(fake_pbix):
     assert "notes" not in sc["visuals"]["v1"] or "Auto-drafted" not in sc["visuals"]["v1"].get("notes", "")
 
 
-def test_scaffold_falls_back_to_todo_for_unrecognized_dax():
+def test_scaffold_falls_back_to_todo_for_untranslatable_dax():
     layout = {
         "report": "R", "source": None,
         "pages": [{"display_name": "P", "filters": [], "visuals": [{
@@ -226,6 +268,64 @@ def test_scaffold_falls_back_to_todo_for_unrecognized_dax():
     }
     sc = semantic.scaffold(layout, MODEL, TABLE_MAP)
     assert "TODO" in sc["visuals"]["vx"]["sql"]
+
+
+_RICH_MEASURES = {
+    ("Sales", "Net Revenue"): "SUM(Sales[Amount])",
+    ("Sales", "Cost"): "SUM(Sales[CostAmount])",
+    ("Sales", "Margin"): "[Net Revenue] - [Cost]",
+    ("Sales", "Margin %"): "DIVIDE([Margin], [Net Revenue])",
+    ("Sales", "YTD"): "TOTALYTD([Net Revenue], Calendar[Date])",
+}
+_RICH_REL = [{"FromTable": "Sales", "FromColumn": "RegionId", "ToTable": "Region", "ToColumn": "Id"}]
+_RICH_MAP = {"Sales": "SELECT * FROM sales_fact", "Region": "SELECT * FROM region_dim"}
+
+
+def _draft(kind, projections, parameters=None):
+    return semantic._draft_visual_sql({"projections": projections}, kind, _RICH_MEASURES,
+                                      _RICH_MAP, _RICH_REL, parameters or {})
+
+
+def test_draft_handles_a_measure_built_from_other_measures():
+    sql, _ = _draft("card", {"Values": ["Sales.Margin %"]})
+    assert sql.startswith("SELECT (CASE WHEN")
+    assert "sales.costamount" in sql                     # resolved through two measures
+    semantic.validate_read_only_sql(sql)                 # the editor would accept it
+
+
+def test_draft_puts_several_measures_on_one_chart_as_series():
+    # Revenue vs. cost vs. margin on one chart is ordinary; refusing it was a big part
+    # of why so many visuals still came back as TODO.
+    sql, _ = _draft("bar", {"Category": ["Region.Name"],
+                            "Y": ["Sales.Net Revenue", "Sales.Cost", "Sales.Margin"]})
+    assert sql.count("UNION ALL") == 2
+    for label in ("'Net Revenue' AS series", "'Cost' AS series", "'Margin' AS series"):
+        assert label in sql
+    assert sql.count("GROUP BY 1, 2") == 3               # category × series, every arm
+    semantic.validate_read_only_sql(sql)
+
+
+def test_draft_applies_slicer_filters_to_every_union_arm():
+    sql, params = _draft("bar", {"Category": ["Region.Name"],
+                                 "Y": ["Sales.Net Revenue", "Sales.Cost"]},
+                         {"year": {"from_slicer": "Sales.Year"}})
+    assert params == ["year"]
+    assert sql.count("sales.year IN (:year)") == 2       # not just the first arm
+
+
+def test_draft_now_covers_kpi_gauge_and_matrix():
+    kpi, _ = _draft("kpi", {"Values": ["Sales.Net Revenue", "Sales.Cost"]})
+    assert "AS value" in kpi and "AS target" in kpi
+    assert _draft("gauge", {"Values": ["Sales.Net Revenue"]})[0].endswith("AS sales_fact") is False
+    assert "AS value" in _draft("gauge", {"Values": ["Sales.Net Revenue"]})[0]
+    assert _draft("matrix", {"Values": ["Region.Name", "Sales.Net Revenue"]}) is not None
+
+
+def test_draft_still_refuses_what_it_cannot_translate():
+    assert _draft("card", {"Values": ["Sales.YTD"]}) is None          # time intelligence
+    assert _draft("card", {"Values": ["Region.Name"]}) is None        # a bare column isn't a measure
+    assert _draft("line", {"Category": ["Calendar.Month"],            # Calendar is unmapped
+                           "Y": ["Sales.Net Revenue"]}) is None
 
 
 def test_draft_visual_sql_bails_when_join_path_is_missing():

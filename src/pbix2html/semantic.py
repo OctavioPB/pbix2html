@@ -2,12 +2,13 @@
 Semantic layer: metrics/<Report>.yaml.
 
 - `scaffold(layout, model)` generates an initial yaml from the layout and the DAX
-  measures. When a visual's fields all resolve to the small set of unambiguous DAX
-  patterns in skill `dax-to-teradata-sql` (SUM/AVG/MIN/MAX/COUNT/COUNTROWS/
-  DISTINCTCOUNT of one column, joined via model.json's own documented relationships),
-  `sql` is auto-drafted instead of left as `TODO` — see `_draft_visual_sql`. Anything
-  outside that (CALCULATE, DIVIDE, time intelligence, multi-hop joins) still needs a
-  person; a wrong silent draft is worse than an honest blank one.
+  measures, auto-drafting each visual's `sql` wherever it can rather than leaving a
+  `TODO`. `translate_dax` handles the aggregates plus the things measures are actually
+  built from — DIVIDE, arithmetic, references to other measures, CALCULATE with column
+  filters — and `_draft_visual_sql` assembles those into the columns each visual kind
+  expects, joining via model.json's own relationships. Time intelligence, ALL/
+  ALLSELECTED, virtual tables and iterators are refused on purpose and left for a
+  person: a wrong silent draft is worse than an honest blank one.
 - `load(report)` loads and validates the yaml for query/render/validate.
 """
 from __future__ import annotations
@@ -470,81 +471,329 @@ def _sql_stub(entities: list[str], table_map: dict[str, str]) -> str:
 # documented in skill validate-report ("every value × k" from a duplicating JOIN).
 # ----------------------------------------------------------------------------
 
-_DAX_AGG_RE = re.compile(
-    r"^\s*(SUM|COUNTROWS|COUNTA|COUNT|DISTINCTCOUNT|AVERAGE|MIN|MAX)\s*\(\s*"
-    r"(?:'([^']+)'|([A-Za-z_]\w*))"
-    r"(?:\s*\[\s*([^\]]+?)\s*\])?"
-    r"\s*\)\s*$"
-)
+_DAX_TOKEN_RE = re.compile(r"""
+    (?P<ws>\s+)
+  | (?P<comment>//[^\n]*|/\*.*?\*/)
+  | (?P<number>\d+(?:\.\d+)?)
+  | (?P<string>"(?:[^"]|"")*")
+  | (?P<qtable>'(?:[^']|'')*'(?=\s*\[))
+  | (?P<bracket>\[[^\]]*\])
+  | (?P<ident>[A-Za-z_][\w.]*)
+  | (?P<op><=|>=|<>|[-+*/=<>&])
+  | (?P<punct>[(),])
+""", re.VERBOSE | re.DOTALL)
 
-# ref-level agg wrapper name (from query_ref_parts, e.g. "Sum" in "Sum(Sales.Amount)")
-# → (Teradata aggregate function, needs DISTINCT)
+# DAX aggregate → (SQL function, needs DISTINCT, takes a table rather than a column)
+_DAX_AGGREGATES: dict[str, tuple[str, bool, bool]] = {
+    "SUM": ("SUM", False, False), "AVERAGE": ("AVG", False, False),
+    "MIN": ("MIN", False, False), "MAX": ("MAX", False, False),
+    "COUNT": ("COUNT", False, False), "COUNTA": ("COUNT", False, False),
+    "DISTINCTCOUNT": ("COUNT", True, False), "COUNTROWS": ("COUNT", False, True),
+}
+# ref-level wrapper Power BI puts on an auto-aggregated column ("Sum(Sales.Amount)")
 _REF_AGG_TO_SQL: dict[str, tuple[str, bool]] = {
     "sum": ("SUM", False), "count": ("COUNT", False), "countnonnull": ("COUNT", False),
-    "min": ("MIN", False), "max": ("MAX", False), "avg": ("AVG", False), "average": ("AVG", False),
-    "distinctcount": ("COUNT", True),
+    "min": ("MIN", False), "max": ("MAX", False), "avg": ("AVG", False),
+    "average": ("AVG", False), "distinctcount": ("COUNT", True),
 }
-# DAX function name (from a measure's own Expression text) → same, for _DAX_AGG_RE
-_DAX_FUNC_TO_SQL: dict[str, tuple[str, bool]] = {
-    "SUM": ("SUM", False), "COUNTROWS": ("COUNT", False), "COUNTA": ("COUNT", False),
-    "COUNT": ("COUNT", False), "DISTINCTCOUNT": ("COUNT", True),
-    "AVERAGE": ("AVG", False), "MIN": ("MIN", False), "MAX": ("MAX", False),
-}
+_DAX_COMPARISONS = {"=": "=", "<>": "<>", ">": ">", "<": "<", ">=": ">=", "<=": "<="}
 
 
-def _translate_measure_expression(dax: str) -> tuple[str, str, str | None, bool] | None:
-    """Recognizes a single aggregation function over one column or table — nothing
-    calculated or filtered (no CALCULATE, DIVIDE, time intelligence: see skill
-    dax-to-teradata-sql for those, still written by hand). Returns
-    (sql_function, table, column_or_None, distinct) or None if it doesn't match;
-    column is None only for `COUNTROWS(Table)` → `COUNT(*)`."""
-    if not dax:
+class _DaxUnsupported(Exception):
+    """Raised the moment something isn't confidently translatable. Always caught — the
+    visual falls back to a TODO rather than shipping a guess."""
+
+
+@dataclass
+class _Sql:
+    """A translated fragment plus the Power BI tables it needs joined in."""
+    text: str
+    tables: set[str] = field(default_factory=set)
+
+
+def _dax_tokenize(text: str) -> list[tuple[str, str]]:
+    tokens, pos = [], 0
+    while pos < len(text):
+        m = _DAX_TOKEN_RE.match(text, pos)
+        if not m:
+            raise _DaxUnsupported(f"unparseable at {text[pos:pos + 20]!r}")
+        pos = m.end()
+        if m.lastgroup not in ("ws", "comment"):
+            tokens.append((m.lastgroup, m.group()))
+    return tokens
+
+
+class _DaxTranslator:
+    """Recursive-descent translation of a DAX measure into one SQL aggregate expression.
+
+    Narrow but *compositional*, which is the whole point. The previous version matched a
+    single `AGG(Table[Col])` with one regex, so any measure built out of other measures —
+    a ratio, a filtered total, a difference — failed to resolve and took its whole visual
+    down to a TODO. Most real measures are exactly those, which is why people kept having
+    to write every query by hand. Handled:
+
+      SUM/AVERAGE/MIN/MAX/COUNT/COUNTA/DISTINCTCOUNT/COUNTROWS
+      DIVIDE(a, b[, alt]), arithmetic + - * /, parentheses, ABS/ROUND/COALESCE
+      [Other Measure]                 resolved recursively (self-reference refused)
+      CALCULATE(expr, T[C] = "x", …)  filters folded into each aggregate as CASE WHEN
+
+    Anything else — time intelligence, ALL/ALLSELECTED, virtual tables, iterators —
+    raises _DaxUnsupported and the caller leaves a TODO. A wrong number that looks right
+    is far worse than an honest blank."""
+
+    def __init__(self, measures: dict[tuple[str, str], str]):
+        self.measures = measures
+        self.tables: set[str] = set()
+        self._resolving: set[str] = set()
+        self.tokens: list[tuple[str, str]] = []
+        self.pos = 0
+        self._bare_column: str | None = None    # a column used outside any aggregate
+
+    def translate(self, dax: str) -> _Sql:
+        self.tokens, self.pos = _dax_tokenize(dax), 0
+        node = self._expression([])
+        if self.pos != len(self.tokens):
+            raise _DaxUnsupported(f"trailing tokens: {self.tokens[self.pos:][:3]}")
+        if self._bare_column:
+            # A measure has to reduce to one value per group. A bare column doesn't —
+            # emitting it would produce `SELECT dim.name AS category, fact.amount AS
+            # value ... GROUP BY 1`, which the database rejects outright.
+            raise _DaxUnsupported(f"{self._bare_column} isn't aggregated")
+        return _Sql(node, set(self.tables))
+
+    # -- token helpers -------------------------------------------------------
+    def _peek(self) -> tuple[str, str] | None:
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def _take(self) -> tuple[str, str]:
+        if self.pos >= len(self.tokens):
+            raise _DaxUnsupported("unexpected end of expression")
+        self.pos += 1
+        return self.tokens[self.pos - 1]
+
+    def _expect(self, value: str) -> None:
+        text = self._take()[1]
+        if text != value:
+            raise _DaxUnsupported(f"expected {value!r}, got {text!r}")
+
+    # -- grammar -------------------------------------------------------------
+    def _expression(self, filters: list[str]) -> str:
+        left = self._term(filters)
+        while (tok := self._peek()) and tok[1] in ("+", "-"):
+            op = self._take()[1]
+            left = f"({left} {op} {self._term(filters)})"
+        return left
+
+    def _term(self, filters: list[str]) -> str:
+        left = self._unary(filters)
+        while (tok := self._peek()) and tok[1] in ("*", "/"):
+            op = self._take()[1]
+            right = self._unary(filters)
+            # Plain `/` in DAX yields BLANK on divide-by-zero instead of erroring;
+            # mirroring that keeps one bad row from failing a whole visual.
+            left = (f"(CASE WHEN ({right}) = 0 THEN NULL ELSE ({left}) / "
+                    f"CAST(({right}) AS DECIMAL(18,6)) END)") if op == "/" else f"({left} * {right})"
+        return left
+
+    def _unary(self, filters: list[str]) -> str:
+        if (tok := self._peek()) and tok[1] == "-":
+            self._take()
+            return f"(-{self._unary(filters)})"
+        return self._primary(filters)
+
+    def _primary(self, filters: list[str]) -> str:
+        kind, text = self._take()
+        if kind == "number":
+            return text
+        if kind == "string":
+            return "'" + text[1:-1].replace('""', '"').replace("'", "''") + "'"
+        if text == "(":
+            inner = self._expression(filters)
+            self._expect(")")
+            return f"({inner})"
+        if kind == "bracket":                       # [Measure]
+            return self._measure_reference(text[1:-1].strip(), filters)
+        if kind in ("ident", "qtable"):
+            nxt = self._peek()
+            if nxt and nxt[0] == "bracket":         # Table[Column], outside an aggregate
+                self._take()
+                table = text[1:-1].replace("''", "'") if kind == "qtable" else text
+                column = nxt[1][1:-1].strip()
+                self.tables.add(table)
+                self._bare_column = f"{table}[{column}]"
+                return f"{_sql_alias(table)}.{_sql_alias(column)}"
+            if nxt and nxt[1] == "(":               # a function call
+                return self._function(text.upper(), filters)
+            raise _DaxUnsupported(f"bare identifier {text!r}")
+        raise _DaxUnsupported(f"unexpected token {text!r}")
+
+    def _measure_reference(self, name: str, filters: list[str]) -> str:
+        if name in self._resolving:
+            raise _DaxUnsupported(f"measure [{name}] refers to itself")
+        expression = next((e for (_tbl, mname), e in self.measures.items() if mname == name and e), None)
+        if expression is None:
+            raise _DaxUnsupported(f"measure [{name}] isn't in the model")
+        self._resolving.add(name)
+        saved_tokens, saved_pos = self.tokens, self.pos
+        try:
+            self.tokens, self.pos = _dax_tokenize(expression), 0
+            inner = self._expression(filters)
+            if self.pos != len(self.tokens):
+                raise _DaxUnsupported(f"measure [{name}] has trailing tokens")
+            return f"({inner})"
+        finally:
+            self.tokens, self.pos = saved_tokens, saved_pos
+            self._resolving.discard(name)
+
+    def _aggregate(self, func: str, filters: list[str]) -> str:
+        sql_func, distinct, table_only = _DAX_AGGREGATES[func]
+        self._expect("(")
+        kind, text = self._take()
+        if kind == "qtable":
+            table = text[1:-1].replace("''", "'")
+        elif kind == "ident":
+            table = text
+        else:
+            raise _DaxUnsupported(f"{func} expects a table or column, got {text!r}")
+        column = None
+        if (nxt := self._peek()) and nxt[0] == "bracket":
+            self._take()
+            column = nxt[1][1:-1].strip()
+        self._expect(")")
+        self.tables.add(table)
+
+        if column is None:
+            if not table_only:
+                raise _DaxUnsupported(f"{func} needs a column")
+            return (f"SUM(CASE WHEN {' AND '.join(filters)} THEN 1 ELSE 0 END)"
+                    if filters else "COUNT(*)")
+        target = f"{_sql_alias(table)}.{_sql_alias(column)}"
+        if filters:
+            target = f"CASE WHEN {' AND '.join(filters)} THEN {target} END"
+        return f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
+
+    def _function(self, name: str, filters: list[str]) -> str:
+        if name in _DAX_AGGREGATES:
+            return self._aggregate(name, filters)
+        if name == "DIVIDE":
+            self._expect("(")
+            args = self._arguments(filters)
+            if not 2 <= len(args) <= 3:
+                raise _DaxUnsupported("DIVIDE takes 2 or 3 arguments")
+            alt = args[2] if len(args) == 3 else "NULL"
+            return (f"(CASE WHEN ({args[1]}) = 0 OR ({args[1]}) IS NULL THEN {alt} "
+                    f"ELSE ({args[0]}) / CAST(({args[1]}) AS DECIMAL(18,6)) END)")
+        if name == "CALCULATE":
+            return self._calculate(filters)
+        if name in ("ABS", "ROUND", "COALESCE"):
+            self._expect("(")
+            return f"{name}({', '.join(self._arguments(filters))})"
+        raise _DaxUnsupported(f"{name}() isn't translated automatically")
+
+    def _arguments(self, filters: list[str]) -> list[str]:
+        args = [self._expression(filters)]
+        while (tok := self._peek()) and tok[1] == ",":
+            self._take()
+            args.append(self._expression(filters))
+        self._expect(")")
+        return args
+
+    def _calculate(self, filters: list[str]) -> str:
+        """CALCULATE(expr, Table[Col] = "x", …) → the comparisons folded into every
+        aggregate inside `expr` as CASE WHEN. Only plain column comparisons are taken;
+        ALL()/ALLSELECTED(), a measure used as a filter, and table filters all raise,
+        because those change the evaluation context in ways a WHERE clause doesn't."""
+        self._expect("(")
+        start = self.pos
+        self._skip_argument()                       # re-parsed below, once filters are known
+        extra: list[str] = []
+        while (tok := self._peek()) and tok[1] == ",":
+            self._take()
+            extra.append(self._filter_predicate())
+        self._expect(")")
+        end = self.pos
+        self.pos = start
+        inner = self._expression(filters + extra)
+        self.pos = end
+        return inner
+
+    def _skip_argument(self) -> None:
+        depth = 0
+        while (tok := self._peek()) is not None:
+            if tok[1] == "(":
+                depth += 1
+            elif tok[1] == ")":
+                if depth == 0:
+                    return
+                depth -= 1
+            elif tok[1] == "," and depth == 0:
+                return
+            self._take()
+
+    def _filter_predicate(self) -> str:
+        kind, text = self._take()
+        if kind == "qtable":
+            table = text[1:-1].replace("''", "'")
+        elif kind == "ident":
+            table = text
+        else:
+            raise _DaxUnsupported(f"filter must compare a column, got {text!r}")
+        nxt = self._peek()
+        if not nxt or nxt[0] != "bracket":
+            raise _DaxUnsupported(f"filter on {text!r} isn't a column comparison")
+        self._take()
+        column = nxt[1][1:-1].strip()
+        op = self._take()[1]
+        if op not in _DAX_COMPARISONS:
+            raise _DaxUnsupported(f"filter operator {op!r} isn't supported")
+        value = self._primary([])
+        self.tables.add(table)
+        return f"{_sql_alias(table)}.{_sql_alias(column)} {_DAX_COMPARISONS[op]} {value}"
+
+
+def translate_dax(dax: str, measures: dict[tuple[str, str], str]) -> _Sql | None:
+    """A DAX measure → one SQL aggregate expression, or None when it isn't confidently
+    translatable. See _DaxTranslator for exactly what's covered."""
+    if not dax or not dax.strip():
         return None
-    m = _DAX_AGG_RE.match(dax.strip())
-    if not m:
+    try:
+        return _DaxTranslator(measures).translate(dax.strip())
+    except (_DaxUnsupported, RecursionError):
         return None
-    func, table_q, table_bare, col = m.groups()
-    sql_func, distinct = _DAX_FUNC_TO_SQL[func.upper()]
-    table = table_q or table_bare
-    if func.upper() == "COUNTROWS":
-        return sql_func, table, None, distinct
-    if col is None:
-        return None
-    return sql_func, table, col, distinct
 
 
 @dataclass
 class _Field:
     role: str
     is_value: bool
-    table: str
-    column: str | None   # None only for a COUNTROWS-based measure
-    sql_func: str | None  # None for a plain (non-aggregated) column
-    distinct: bool
-    out_name: str
+    label: str                       # the field's name as Power BI shows it
+    out_name: str                    # its SQL alias
+    expr: str                        # ready SQL: an aggregate for a value, a column otherwise
+    tables: set[str] = field(default_factory=set)
 
 
 def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
     """A ref is either already agg-wrapped by Power BI ('Sum(Sales.Amount)' — a raw
-    column auto-aggregated in a Values well), a named measure (looked up in `measures`
-    and its own DAX expression translated), or a plain dimension column. Returns None
-    when it's a named measure whose DAX isn't one of the safe patterns above — the
-    caller bails on the whole visual rather than half-drafting it."""
+    column auto-aggregated in a Values well), a named measure (whose own DAX gets
+    translated, see `translate_dax`), or a plain dimension column. Returns None only
+    when a named measure's DAX isn't confidently translatable; the caller then leaves
+    the whole visual as a TODO rather than half-drafting it."""
     agg, table, col = query_ref_parts(ref)
     if agg:
         sql_func, distinct = _REF_AGG_TO_SQL.get(agg.lower(), (None, False))
         if sql_func is None:
             return None
-        return _Field(role, True, table, col, sql_func, distinct, _sql_alias(col))
+        target = f"{_sql_alias(table)}.{_sql_alias(col)}"
+        expr = f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
+        return _Field(role, True, col, _sql_alias(col), expr, {table})
     measure_dax = measures.get((table, col))
     if measure_dax is not None:
-        parsed = _translate_measure_expression(measure_dax)
-        if parsed is None:
+        translated = translate_dax(measure_dax, measures)
+        if translated is None:
             return None
-        sql_func, base_table, base_col, distinct = parsed
-        out = _sql_alias(base_col) if base_col else _sql_alias(col)
-        return _Field(role, True, base_table, base_col, sql_func, distinct, out)
-    return _Field(role, False, table, col, None, False, _sql_alias(col))
+        return _Field(role, True, col, _sql_alias(col), translated.text, set(translated.tables))
+    return _Field(role, False, col, _sql_alias(col),
+                  f"{_sql_alias(table)}.{_sql_alias(col)}", {table})
 
 
 def _find_join_path(tables: list[str], relationships: list[dict]) -> list[tuple[str, str, str, str]] | None:
@@ -583,83 +832,36 @@ def _find_join_path(tables: list[str], relationships: list[dict]) -> list[tuple[
 
 
 _CHART_KINDS = {"bar", "column", "line", "pie"}
+_DRAFTABLE_KINDS = {"card", "kpi", "gauge", "table", "matrix", "multicard"} | _CHART_KINDS
 
 
-def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
-                       relationships: list[dict], parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
-    """Full auto-draft for the visual kinds whose data contract is simple enough to
-    build blind: card, pie, bar/column/line, and table (see skill html-renderer for
-    the column contract each expects). Returns (sql, params_used) or None — the
-    caller falls back to `_sql_stub` on None."""
-    if kind not in ({"card", "table"} | _CHART_KINDS):
-        return None
-    fields: list[_Field] = []
-    for role, refs in (v.get("projections") or {}).items():
-        for ref in refs:
-            f = _resolve_field(role, ref, measures)
-            if f is None:
-                return None
-            fields.append(f)
-    if not fields:
-        return None
-
-    values = [f for f in fields if f.is_value]
-    categories = [f for f in fields if not f.is_value]
-
-    if kind == "card":
-        if len(fields) != 1 or not values:
-            return None
-        select_cols = [(values[0], "value")]
-        group_positions: list[int] = []
-    elif kind == "pie":
-        if len(values) != 1 or len(categories) != 1:
-            return None
-        select_cols = [(categories[0], "category"), (values[0], "value")]
-        group_positions = [1]
-    elif kind in _CHART_KINDS:  # bar, column, line
-        if len(values) != 1 or not (1 <= len(categories) <= 2):
-            return None
-        names = ["category", "series"]
-        select_cols = [(c, names[i]) for i, c in enumerate(categories)] + [(values[0], "value")]
-        group_positions = list(range(1, len(categories) + 1))
-    else:  # table: every field becomes a column, in projection order
-        select_cols = [(f, f.out_name) for f in fields]
-        group_positions = [i + 1 for i, (f, _) in enumerate(select_cols) if not f.is_value] if values else []
-
-    tables_needed = list(dict.fromkeys(f.table for f, _ in select_cols))
-    if any(t not in table_map for t in tables_needed):
+def _draft_from_clause(tables_needed: list[str], table_map: dict[str, str],
+                       relationships: list[dict]) -> tuple[list[str], dict[str, str]] | None:
+    """FROM + JOINs for the tables a visual needs, or None if they can't be reached."""
+    if not tables_needed or any(t not in table_map for t in tables_needed):
         return None
     try:
-        # Defensive re-validation, same as _sql_stub: table_map is normally only ever
-        # written through the panel's step 2b (already validated then), but a hand-
-        # edited table_map.json could carry something that wouldn't have been accepted.
-        validated_map = {t: validate_read_only_sql(table_map[t]) for t in tables_needed}
+        # Defensive re-validation, same as _sql_stub: table_map is normally written only
+        # through the panel's step 2b (validated then), but a hand-edited
+        # table_map.json could carry something that wouldn't have been accepted.
+        validated = {t: validate_read_only_sql(table_map[t]) for t in tables_needed}
     except ValueError:
         return None
     join_path = _find_join_path(tables_needed, relationships)
     if join_path is None:
         return None
-
     aliases = {t: _sql_alias(t) for t in tables_needed}
-    sources = [f"({validated_map[tables_needed[0]]}) AS {aliases[tables_needed[0]]}"]
+    root = tables_needed[0]
+    sources = [f"({validated[root]}) AS {aliases[root]}"]
     for ft, fc, tt, tc in join_path:
-        sources.append(f"JOIN ({validated_map[tt]}) AS {aliases[tt]} "
-                        f"ON {aliases[ft]}.{_sql_alias(fc)} = {aliases[tt]}.{_sql_alias(tc)}")
+        sources.append(f"JOIN ({validated[tt]}) AS {aliases[tt]} "
+                       f"ON {aliases[ft]}.{_sql_alias(fc)} = {aliases[tt]}.{_sql_alias(tc)}")
+    return sources, aliases
 
-    select_parts = []
-    for f, out_name in select_cols:
-        if f.is_value:
-            if f.column is None:
-                expr = "COUNT(*)"
-            else:
-                col_ref = f"{aliases[f.table]}.{_sql_alias(f.column)}"
-                expr = f"{f.sql_func}({f'DISTINCT {col_ref}' if f.distinct else col_ref})"
-            select_parts.append(f"{expr} AS {out_name}")
-        else:
-            select_parts.append(f"{aliases[f.table]}.{_sql_alias(f.column)} AS {out_name}")
 
-    where_parts = []
-    params_used: list[str] = []
+def _draft_where(parameters: dict[str, dict], aliases: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Slicer parameters that apply to the tables this visual already reads."""
+    where_parts, params_used = [], []
     for pname, p in parameters.items():
         slicer_ref = (p or {}).get("from_slicer")
         if not slicer_ref:
@@ -670,13 +872,102 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             # single value or someone later turns on `multi` — see query.py's bind().
             where_parts.append(f"{aliases[ptable]}.{_sql_alias(pcol)} IN (:{pname})")
             params_used.append(pname)
+    return where_parts, params_used
 
-    sql = "SELECT " + ", ".join(select_parts) + "\nFROM " + "\n".join(sources)
-    if where_parts:
-        sql += "\nWHERE " + " AND ".join(where_parts)
-    if group_positions:
-        sql += "\nGROUP BY " + ", ".join(str(p) for p in group_positions)
-    return sql, params_used
+
+def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
+                       relationships: list[dict], parameters: dict[str, dict]) -> tuple[str, list[str]] | None:
+    """Auto-draft one visual's SQL, or None to leave it a TODO.
+
+    Covers card, kpi, gauge, pie, bar/column/line, table/matrix/multicard, returning
+    exactly the columns each kind expects (see skill html-renderer). Each field is
+    translated by `_resolve_field` → `translate_dax`, so a measure built out of other
+    measures (a ratio, a filtered total, a difference) drafts like any other; only a
+    field whose DAX isn't confidently translatable stops the whole visual.
+
+    A chart with several measures becomes one series per measure via UNION ALL — that
+    shape is common enough (revenue vs. cost vs. margin on one chart) that refusing it
+    was a large part of why people still wrote most queries by hand."""
+    if kind not in _DRAFTABLE_KINDS:
+        return None
+    fields: list[_Field] = []
+    for role, refs in (v.get("projections") or {}).items():
+        for ref in refs or []:
+            f = _resolve_field(role, ref, measures)
+            if f is None:
+                return None
+            fields.append(f)
+    if not fields:
+        return None
+
+    values = [f for f in fields if f.is_value]
+    categories = [f for f in fields if not f.is_value]
+    tables_needed = list(dict.fromkeys(t for f in fields for t in f.tables))
+    built = _draft_from_clause(tables_needed, table_map, relationships)
+    if built is None:
+        return None
+    sources, aliases = built
+    where_parts, params_used = _draft_where(parameters, aliases)
+
+    def assemble(select_parts: list[str], group_positions: list[int]) -> str:
+        sql = "SELECT " + ", ".join(select_parts) + "\nFROM " + "\n".join(sources)
+        if where_parts:
+            sql += "\nWHERE " + " AND ".join(where_parts)
+        if group_positions:
+            sql += "\nGROUP BY " + ", ".join(str(p) for p in group_positions)
+        return sql
+
+    if kind in ("card", "gauge"):
+        if len(values) != 1 or categories:
+            return None
+        return assemble([f"{values[0].expr} AS value"], []), params_used
+
+    if kind == "kpi":
+        # value + target, in field order; a kpi with only a value still renders.
+        if not 1 <= len(values) <= 2 or categories:
+            return None
+        parts = [f"{values[0].expr} AS value"]
+        if len(values) == 2:
+            parts.append(f"{values[1].expr} AS target")
+        return assemble(parts, []), params_used
+
+    if kind in _CHART_KINDS:
+        if not values or not categories:
+            return None
+        if kind == "pie" and len(categories) != 1:
+            return None
+        if len(categories) > 2:
+            return None
+        if len(values) == 1:
+            names = ["category", "series"]
+            parts = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)]
+            parts.append(f"{values[0].expr} AS value")
+            return assemble(parts, list(range(1, len(categories) + 1))), params_used
+        # Several measures: one arm per measure, the measure's own name as the series.
+        if len(categories) != 1 or kind == "pie":
+            return None
+        arms = []
+        for f in values:
+            label = f.label.replace("'", "''")
+            arms.append(assemble([f"{categories[0].expr} AS category",
+                                  f"'{label}' AS series",
+                                  f"{f.expr} AS value"], [1, 2]))
+        return "\nUNION ALL\n".join(arms), params_used
+
+    # table / matrix / multicard: every field becomes a column, in projection order.
+    parts, group_positions = [], []
+    for i, f in enumerate(fields, start=1):
+        parts.append(f"{f.expr} AS {f.out_name}")
+        if not f.is_value:
+            group_positions.append(i)
+    return assemble(parts, group_positions if values else []), params_used
+
+
+AUTOFILL_NOTE = ("Auto-drafted (rule-based, see skill dax-to-teradata-sql) — review the columns "
+                 "and any JOIN, then run validate before trusting it, same as a hand-written sql. "
+                 "A JOIN here can duplicate rows and inflate totals if the relationship's "
+                 "direction/multiplicity doesn't match what this visual needs (see skill "
+                 "validate-report, \"every value × k\").")
 
 
 def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict:
@@ -697,18 +988,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
 
     # Pass 1: parameters (from slicers), across every page — a visual auto-drafted
     # below may reference a slicer declared on a page processed later than its own.
-    parameters: dict[str, dict] = {}
-    for page in layout["pages"]:
-        for v in page["visuals"]:
-            if v.get("is_group"):
-                continue
-            kind = KIND_MAP.get(v["type"], "custom" if v.get("is_custom") else "unsupported")
-            if kind != "slicer":
-                continue
-            for ref in v["fields"]:
-                _, table, col = query_ref_parts(ref)
-                pname = re.sub(r"\W+", "_", col).lower()
-                parameters[pname] = {"type": "string", "default": None, "from_slicer": ref, "multi": False}
+    parameters: dict[str, dict] = _slicer_parameters(layout)
 
     # Pass 2: visuals, with the full parameter set already known.
     visuals: dict[str, dict] = {}
@@ -738,13 +1018,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
             draft = _draft_visual_sql(v, kind, measures, table_map, relationships, parameters)
             if draft:
                 entry["sql"], entry["params"] = draft
-                notes.append(
-                    "Auto-drafted (rule-based, see skill dax-to-teradata-sql) — review the columns "
-                    "and any JOIN, then run validate before trusting it, same as a hand-written sql. "
-                    "A JOIN here can duplicate rows and inflate totals if the relationship's "
-                    "direction/multiplicity doesn't match what this visual needs (see skill "
-                    "validate-report, \"every value × k\")."
-                )
+                notes.append(AUTOFILL_NOTE)
             else:
                 entry["sql"] = _sql_stub(_entities_used(v), table_map)
                 entry["params"] = []
@@ -768,6 +1042,80 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
                   for r in rls} or {"default": {"proxy_user": None, "where": None}},
         "visuals": visuals,
     }
+
+
+def _slicer_parameters(layout: dict) -> dict[str, dict]:
+    """Every slicer in the report as a named parameter."""
+    parameters: dict[str, dict] = {}
+    for page in layout["pages"]:
+        for v in page["visuals"]:
+            if v.get("is_group"):
+                continue
+            kind = KIND_MAP.get(v["type"], "custom" if v.get("is_custom") else "unsupported")
+            if kind != "slicer":
+                continue
+            for ref in v.get("fields") or []:
+                _, _table, col = query_ref_parts(ref)
+                pname = re.sub(r"\W+", "_", col).lower()
+                parameters[pname] = {"type": "string", "default": None, "from_slicer": ref, "multi": False}
+    return parameters
+
+
+def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict[str, Any]:
+    """Fills in what's still missing in an existing metrics yaml, touching nothing that
+    already has an answer. Returns {"raw": <updated>, "filled": [...], "already": [...],
+    "still_todo": [...], "parameters_added": [...]}.
+
+    This is the difference between this and regenerating: `write_scaffold(overwrite=True)`
+    rebuilds the file from the .pbix and throws away every hand-written query, so it was
+    the only way to pick up a better draft — including after the translator itself
+    improves. Here, a visual whose `sql` someone has actually written is left exactly as
+    it is, and only the `TODO`s get a draft.
+
+    Each visual is drafted against its *current* `kind` in the yaml, not the one the
+    .pbix implies — someone who retyped a custom visual as a `column` in the editor
+    should get a draft for a column chart, which is the whole point of that override."""
+    measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
+                for m in (model.get("measures") or []) if isinstance(m, dict)}
+    relationships = model.get("relationships") if isinstance(model.get("relationships"), list) else []
+    table_map = table_map or {}
+
+    raw = dict(raw)
+    parameters = dict(raw.get("parameters") or {})
+    added_parameters = []
+    for name, p in _slicer_parameters(layout).items():
+        if name not in parameters:          # never overwrite a default someone set
+            parameters[name] = p
+            added_parameters.append(name)
+    raw["parameters"] = parameters
+
+    visuals = dict(raw.get("visuals") or {})
+    by_id = {v["id"]: v for page in layout["pages"] for v in page["visuals"]}
+    filled, already, still_todo = [], [], []
+
+    for vid, entry in visuals.items():
+        entry = dict(entry or {})
+        kind = entry.get("kind") or KIND_MAP.get((by_id.get(vid) or {}).get("type", ""), "unsupported")
+        if kind in NO_DATA_KINDS:
+            continue
+        if not is_unwritten_sql(entry.get("sql")):
+            already.append(vid)
+            continue
+        source = by_id.get(vid)
+        draft = (_draft_visual_sql(source, kind, measures, table_map, relationships, parameters)
+                 if source else None)
+        if draft is None:
+            still_todo.append(vid)
+            continue
+        entry["sql"], entry["params"] = draft
+        notes = entry.get("notes") or ""
+        if "Auto-drafted" not in notes:
+            entry["notes"] = f"{notes} {AUTOFILL_NOTE}".strip()
+        visuals[vid] = entry
+        filled.append(vid)
+    raw["visuals"] = visuals
+    return {"raw": raw, "filled": filled, "already": already,
+            "still_todo": still_todo, "parameters_added": added_parameters}
 
 
 YAML_HEADER = ("# Report semantic layer. Edit by hand: this is where the migrated logic lives.\n"

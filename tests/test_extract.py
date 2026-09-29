@@ -30,6 +30,13 @@ def test_layout_structure(fake_pbix):
     assert by_id["v2"]["style"] == {}          # says nothing → renderer leaves it bare
     assert p0["background"] == "#202020"
     assert L["pages"][1]["background"] is None
+    # Visible text beyond the title: a subtitle, axis and legend titles, and the label
+    # on a button — all dropped before, so shapes/buttons rendered as blank boxes.
+    assert by_id["v2"]["texts"] == {"title": "Margin by Region", "subtitle": "FY2026, excl. tax",
+                                    "axis_x": "Region", "axis_y": "Margin %", "legend": "Segment"}
+    assert by_id["v10"]["texts"]["shape_text"] == "Back to summary"
+    # …and a title the report switches off must not come through at all.
+    assert "title" not in by_id["v10"]["texts"] and by_id["v10"]["title"] is None
     assert by_id["v9"]["image_ref"] == {"package": "RegisteredResources", "item": "logo.png"}
     assert by_id["v9"]["image_data_uri"].startswith("data:image/png;base64,")
     assert by_id["v1"].get("image_data_uri") is None

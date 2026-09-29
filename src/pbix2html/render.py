@@ -86,6 +86,10 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},
                 "text": _text_of(v),
                 "image": v.get("image_data_uri"),
+                # subtitle / button label / axis + legend titles, as the report sets
+                # them (see extract.py's visual_text). Absent keys mean "not set" —
+                # the renderer shows nothing rather than inventing a label.
+                "texts": v.get("texts") or {},
                 # {} when the .pbix says nothing about the frame — the template then
                 # leaves its own default in place instead of inventing a border.
                 "style": v.get("style") or {},
