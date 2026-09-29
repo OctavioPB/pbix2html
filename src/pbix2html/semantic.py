@@ -2873,7 +2873,7 @@ def slicers_section(layout: dict, parameters: dict[str, dict], table_map: dict[s
 def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | None = None) -> dict[str, Any]:
     """Fills in what's still missing in an existing metrics yaml, touching nothing that
     already has an answer. Returns {"raw": <updated>, "filled": [...], "already": [...],
-    "still_todo": [...], "parameters_added": [...]}.
+    "still_todo": [...], "parameters_added": [...], "slicers_added": [...]}.
 
     This is the difference between this and regenerating: `write_scaffold(overwrite=True)`
     rebuilds the file from the .pbix and throws away every hand-written query, so it was
@@ -2897,6 +2897,17 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
             parameters[name] = p
             added_parameters.append(name)
     raw["parameters"] = parameters
+    # `slicers:` (ADR-006) is written by scaffold only, so a yaml older than that feature has none and the
+    # live HTML's requests for slicer options found nothing (HTTP 404). Add the missing entries; never
+    # touch one that exists (someone may have hand-edited its options_sql).
+    slicers = dict(raw.get("slicers") or {})
+    added_slicers = []
+    for vid, entry in slicers_section(layout, parameters, table_map, model).items():
+        if vid not in slicers:
+            slicers[vid] = entry
+            added_slicers.append(vid)
+    if slicers:
+        raw["slicers"] = slicers
 
     visuals = dict(raw.get("visuals") or {})
     by_id = {v["id"]: v for page in layout["pages"] for v in page["visuals"]}
@@ -2927,7 +2938,7 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
         filled.append(vid)
     raw["visuals"] = visuals
     return {"raw": raw, "filled": filled, "already": already,
-            "still_todo": still_todo, "parameters_added": added_parameters}
+            "still_todo": still_todo, "parameters_added": added_parameters, "slicers_added": added_slicers}
 
 
 YAML_HEADER = ("# Report semantic layer. Edit by hand: this is where the migrated logic lives.\n"

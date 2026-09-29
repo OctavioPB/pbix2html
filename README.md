@@ -301,6 +301,11 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > terminal where `serve.py` runs (a Teradata error, a wrong table/column in a drafted SQL, a proxy user without
 > `GRANT CONNECT THROUGH`, or missing `TERADATA_*` in `.env`).
 >
+> **A slicer shows `HTTP 404`?** Older versions answered 404 when the yaml had no `slicers:` entry for
+> that slicer (a yaml written before slicers became widgets). It now answers "skipped" and the widget
+> takes typed values; to get real dropdowns run the panel's auto-draft (it adds the missing entries) or
+> `pbix2html scaffold <pbix> --overwrite`. If a *visual* also shows 404, that is the wrong-folder case above.
+>
 > **Visual shows `HTTP 401` instead?** This is expected, not a bug, when there's no
 > reverse proxy in front of `serve.py` injecting the `AUTH_HEADER` (`X-Authenticated-User`
 > by default) after SSO — which is exactly the case when previewing on your own machine.

@@ -424,6 +424,9 @@ def action_autofill(request: Request, name: str):
         if outcome["parameters_added"]:
             detail.append(f"Added {len(outcome['parameters_added'])} parameter(s) from slicers: "
                           f"{', '.join(outcome['parameters_added'])}.")
+        if outcome.get("slicers_added"):
+            detail.append(f"Added {len(outcome['slicers_added'])} slicer entr(y/ies) (their options queries), "
+                          "which a live report needs to fill its dropdowns.")
         if outcome["still_todo"]:
             detail.append(f"{len(outcome['still_todo'])} visual(s) still need SQL by hand — usually "
                           f"time intelligence, an unmapped table (step 2b), or a measure too "

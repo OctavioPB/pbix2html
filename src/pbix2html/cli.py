@@ -96,8 +96,11 @@ def cmd_convert(args):
     data = slicer_data = None
     if args.mode == "snapshot":
         backend = _backend(args)
-        data = run_report(spec, values, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
-        slicer_data = run_slicers(spec, backend, proxy_user=proxy_user, use_cache=not args.no_cache)
+        # fake data must never be cached: the cache key is the query, so a later live run of the same
+        # report would be served the fake rows as if they were Teradata's
+        use_cache = not args.no_cache and not args.fake_data
+        data = run_report(spec, values, backend, proxy_user=proxy_user, use_cache=use_cache)
+        slicer_data = run_slicers(spec, backend, proxy_user=proxy_user, use_cache=use_cache)
     if args.mode == "hah" and not args.hah_base:
         sys.exit("--mode hah needs --hah-base <url of the HTML App Host>")
     html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden,
