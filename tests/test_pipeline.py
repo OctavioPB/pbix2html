@@ -232,7 +232,7 @@ def test_scaffold_auto_drafts_single_table_card(fake_pbix):
     L = ex.extract_layout(fake_pbix)
     sc = semantic.scaffold(L, MODEL, TABLE_MAP)
     v1 = sc["visuals"]["v1"]
-    assert v1["sql"] == "SELECT SUM(sales.amount) AS value\nFROM (SELECT * FROM sales_fact\n) AS sales"
+    assert v1["sql"] == "SELECT SUM(sales.amount) AS \"value\"\nFROM (SELECT * FROM sales_fact\n) AS sales"
     assert v1["params"] == []
     assert "Auto-drafted" in v1["notes"]
 
@@ -242,7 +242,7 @@ def test_scaffold_auto_drafts_joined_bar_chart_with_slicer_filter(fake_pbix):
     sc = semantic.scaffold(L, MODEL, TABLE_MAP)
     v2 = sc["visuals"]["v2"]
     assert v2["sql"] == (
-        "SELECT region.name AS category, SUM(sales.marginamount) AS value\n"
+        "SELECT region.name AS category, SUM(sales.marginamount) AS \"value\"\n"
         "FROM (SELECT * FROM region_dim\n) AS region\n"
         "JOIN (SELECT * FROM sales_fact\n) AS sales ON region.id = sales.regionid\n"
         "GROUP BY 1"
@@ -315,9 +315,9 @@ def test_draft_applies_slicer_filters_to_every_union_arm():
 
 def test_draft_now_covers_kpi_gauge_and_matrix():
     kpi, _ = _draft("kpi", {"Values": ["Sales.Net Revenue", "Sales.Cost"]})
-    assert "AS value" in kpi and "AS target" in kpi
+    assert "AS \"value\"" in kpi and "AS target" in kpi
     assert _draft("gauge", {"Values": ["Sales.Net Revenue"]})[0].endswith("AS sales_fact") is False
-    assert "AS value" in _draft("gauge", {"Values": ["Sales.Net Revenue"]})[0]
+    assert "AS \"value\"" in _draft("gauge", {"Values": ["Sales.Net Revenue"]})[0]
     assert _draft("matrix", {"Values": ["Region.Name", "Sales.Net Revenue"]}) is not None
 
 

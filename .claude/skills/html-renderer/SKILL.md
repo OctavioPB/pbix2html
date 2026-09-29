@@ -66,7 +66,10 @@ value.
 | table / matrix | free-form | order = order of columns in the SELECT |
 | gauge | `value` | `min`, `max`, `target` |
 
-Lowercase aliases. Dates as ISO strings. Nulls: the renderer skips categories whose
+Lowercase aliases. **On Teradata write the value column as `AS "value"`**: `value` is a reserved word and
+`SELECT SUM(x) AS value` fails with error 3707 ("expected a name … between AS and value"); sqlglot's Teradata
+dialect does not flag it. The drafter quotes it, and `TeradataBackend` rewrites a bare `AS value|min|max` at run
+time (older yamls, hand-written SQL), but write it quoted. Dates as ISO strings. Nulls: the renderer skips categories whose
 `value` is null. Numeric formatting (`format: "#,##0.0%"`) goes in the yaml, not the SQL.
 
 ## 100 % stacked charts
