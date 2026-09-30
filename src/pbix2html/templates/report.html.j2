@@ -29,7 +29,7 @@
   .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
-  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 400; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
   .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
@@ -43,12 +43,16 @@
   .multicard .v { text-align: right; font-weight: 600; }
   .tablewrap { overflow: auto; height: 100%; }
   table { border-collapse: collapse; width: 100%; font-size: .8rem; }
-  th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-  th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: 600; }
+  th, td { padding: .25rem .5rem; border-bottom: var(--gh, 1px solid var(--border)); text-align: left; white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: var(--th-fw, 600); font-size: var(--th-fs, inherit); }
+  td { font-size: var(--tr-fs, inherit); }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
   .tablewrap.rh td:first-child { background: var(--rh-bg); color: var(--rh-fg, inherit); font-weight: 600; }
+  tfoot td { position: sticky; bottom: 0; font-weight: 700; background: var(--tt-bg, var(--bg)); color: var(--tt-fg, inherit); border-top: 2px solid var(--tt-bg, var(--border)); }
   tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th + th, td + td { border-left: var(--gv, none); }
+  th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
@@ -122,7 +126,7 @@
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}{{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}
-              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
+              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
               {# a "line" shape's rotation is Power BI's way of drawing a *vertical* line, not a
                  rotated box: a long, thin box rotated in place around its own centre swings far
                  outside that box (confirmed against a real report — a 1280x23 header line
@@ -196,6 +200,59 @@
     const d = Math.min(Math.max(st.value_decimals === undefined ? (div > 1 ? 1 : 0) : st.value_decimals, 0), 10);
     return (x / div).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) + (UNITS[div] || '');
   };
+  // Conditional formatting of a table's value columns (extract._cond_formats): a colour gradient, colour rules or an
+  // icon. Applied by field position, so only when the well has as many fields as the SQL has columns.
+  const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const rgbHex = c => '#' + c.map(x => Math.round(Math.max(0, Math.min(255, x))).toString(16).padStart(2, '0')).join('');
+  const lum = h => { const [r, g, b] = hexRgb(h).map(x => { x /= 255; return x <= .03928 ? x / 12.92 : Math.pow((x + .055) / 1.055, 2.4); }); return .2126 * r + .7152 * g + .0722 * b; };
+  const inkFor = bg => lum(bg) > .4 ? '#1F1F1F' : '#FFFFFF';
+  const holds = (w, x) => w.and ? w.and.every(t => holds(t, x)) : w.or ? w.or.some(t => holds(t, x))
+    : ({ '=': x === w.v, '>': x > w.v, '>=': x >= w.v, '<': x < w.v, '<=': x <= w.v })[w.op];
+  const ICONS = { High: ['\u2714', '#2E7D32'], Low: ['\u2716', '#C62828'], Medium: ['\u25CF', '#F9A825'] };
+  function condCell(rules, vals, x) {          // -> { bg, fg, icon } for the value x of one column
+    const out = {};
+    if (typeof x !== 'number') return out;
+    for (const r of rules) {
+      if (r.kind === 'gradient') {
+        const lo = r.stops[0].value ?? Math.min(...vals), hi = r.stops[r.stops.length - 1].value ?? Math.max(...vals);
+        const mid = r.stops.length === 3 ? (r.stops[1].value ?? (lo + hi) / 2) : null;
+        const pts = [[lo, r.stops[0].color], ...(mid === null ? [] : [[mid, r.stops[1].color]]), [hi, r.stops[r.stops.length - 1].color]];
+        let c = x <= pts[0][0] ? pts[0][1] : x >= pts[pts.length - 1][0] ? pts[pts.length - 1][1] : null;
+        for (let i = 1; c === null && i < pts.length; i++) if (x <= pts[i][0]) {
+          const t = (x - pts[i - 1][0]) / ((pts[i][0] - pts[i - 1][0]) || 1), a = hexRgb(pts[i - 1][1]), b2 = hexRgb(pts[i][1]);
+          c = rgbHex(a.map((v0, k) => v0 + (b2[k] - v0) * t));
+        }
+        if (r.prop === 'back') { out.bg = c; out.fg = inkFor(c); } else out.fg = c;
+      } else {
+        const hit = r.rules.find(z => holds(z.when, x));
+        if (!hit) continue;
+        if (r.prop === 'icon') out.icon = hit.icon;
+        else if (r.prop === 'back') { out.bg = hit.color; out.fg = inkFor(hit.color); } else out.fg = hit.color;
+      }
+    }
+    return out;
+  }
+  const iconOf = name => { const k = Object.keys(ICONS).find(n => name.includes(n)); return k ? ICONS[k] : null; };
+  // the grand-total row, computed by Teradata (yaml `sql_total`): blank where the measure is not additive
+  const totalRow = (v, b, isNum) => (b.total && b.total.length === b.columns.length)
+    ? '<tfoot><tr>' + b.total.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${x === null || x === undefined ? '' : (typeof x === 'number' ? fmt(x, v.format[b.columns[i]]) : x)}</td>`).join('') + '</tr></tfoot>' : '';
+  // Categories that are months ("June 2026", "Mar-25", "March") come back in whatever order the database likes; Power BI
+  // shows them in calendar order (the model sorts the label by its date). Reordered only when the report names no
+  // sort of its own and every category reads as a month, so a sort by value is never undone.
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const monthKey = c => {
+    const m = /(?:^|[^a-z])(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?![a-z])/i.exec(String(c));
+    if (!m) return null;
+    const y = /(?:^|\D)(\d{4}|\d{2})(?!\d)/.exec(String(c).replace(m[0], ' '));
+    const yr = y ? (y[1].length === 2 ? 2000 + +y[1] : +y[1]) : 0;
+    return yr * 12 + MONTHS.indexOf(m[1].toLowerCase());
+  };
+  const inCalendarOrder = (v, cats) => {
+    if (v.has_sort || cats.length < 2) return cats;
+    const keys = cats.map(monthKey);
+    return keys.every(k => k !== null) && new Set(keys).size === cats.length
+      ? cats.map((c, i) => [c, keys[i]]).sort((a, b) => a[1] - b[1]).map(x => x[0]) : cats;
+  };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -234,17 +291,31 @@
     },
     table(el, v, b) {
       const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
+      const applyCond = {}, colVals = {};
+      const ca = i => (v.col_align && v.n_fields === b.columns.length && v.col_align[i]) ? ` style="text-align:${v.col_align[i]}"` : '';
+      if (v.cond_formats && v.cond_formats.length && v.n_fields === b.columns.length) v.cond_formats.forEach(c => { (applyCond[c.col] = applyCond[c.col] || []).push(c); colVals[c.col] = b.rows.map(r => r[c.col]).filter(n => typeof n === 'number'); });
       const st = v.style || {};
       const vars = [
         st.table_header_bg && `--th-bg:${st.table_header_bg}`, st.table_header_fg && `--th-fg:${st.table_header_fg}`,
         st.table_row_bg && `--tr-bg:${st.table_row_bg}`, st.table_row_bg_alt && `--tr-bg-alt:${st.table_row_bg_alt}`,
         st.table_row_fg && `--tr-fg:${st.table_row_fg}`,
+        st.table_header_size && `--th-fs:calc(${(st.table_header_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`, st.table_row_size && `--tr-fs:calc(${(st.table_row_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`,
+        st.table_header_align && `--th-ta:${st.table_header_align}`, st.table_header_bold !== undefined && `--th-fw:${st.table_header_bold ? 700 : 400}`,
+        st.table_grid_h === false ? '--gh:none' : (st.table_grid_h_color || st.table_grid_h_weight) && `--gh:${st.table_grid_h_weight || 1}px solid ${st.table_grid_h_color || 'var(--border)'}`,
+        st.table_grid_v && `--gv:${st.table_grid_v_weight || 1}px solid ${st.table_grid_v_color || '#E1E1E1'}`,
+        st.table_total_bg && `--tt-bg:${st.table_total_bg}`, st.table_total_fg && `--tt-fg:${st.table_total_fg}`,
         st.table_rowhdr_bg && `--rh-bg:${st.table_rowhdr_bg}`, st.table_rowhdr_fg && `--rh-fg:${st.table_rowhdr_fg}`,
       ].filter(Boolean).join(';');
       el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
-        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || c}</th>`).join('') + '</tr></thead><tbody>' +
-        b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
-        '</tbody></table></div>';
+        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}"${ca(i)}>${v.headers?.[c] || (v.header_names && v.header_names.length === b.columns.length ? v.header_names[i] : c)}</th>`).join('') + '</tr></thead><tbody>' +
+        b.rows.map(r => '<tr>' + r.map((x, i) => {
+          const cf = applyCond[i] ? condCell(applyCond[i], colVals[i], x) : {};
+          const ic = cf.icon ? iconOf(cf.icon) : null;
+          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
+          const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
+          return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
+        }).join('') + '</tr>').join('') +
+        '</tbody>' + totalRow(v, b, isNum) + '</table></div>';
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
@@ -290,14 +361,36 @@
     },
   };
   function cartesian(v, b, type, horizontal, area) {
-    const { cats, groups } = series(b);
+    const { cats: seen, groups } = series(b);
+    const cats = inCalendarOrder(v, seen);
     // 100% stacked: every category's series are rescaled to share 100 (ECharts has no such mode)
     const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
     const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };
-    const ser = [...groups.entries()].map(([name, m]) => ({
-      name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
-      data: cats.map((c, i) => val(m, c, i)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? {} : undefined, smooth: false,
+    const cs = v.style || {};
+    // the report's own colours: per value of the series/category field (`value_colors`), per measure (`series_colors`,
+    // keyed by the field in the Y well, in well order = series order), else one fill for every bar (`point_color`)
+    const vc = cs.value_colors || {}, sc = cs.series_colors || {}, yr = v.y_refs || [];
+    // a measure series is labelled by the drafted SQL ("col" or "Table: col"); the report shows its own caption, in well order
+    const yf = v.y_fields || [];
+    const fieldOf = name => yf.findIndex(f => name === f.prop || name === f.entity + ': ' + f.prop);
+    const order = [...groups.keys()];
+    if (yf.length && order.every(n => fieldOf(n) >= 0)) order.sort((a, b) => fieldOf(a) - fieldOf(b));
+    const shown = n => { const k = fieldOf(n); return k >= 0 ? yf[k].name : n; };
+    const refOf = (i, n) => { const k = fieldOf(n); return k >= 0 ? yf[k].ref : yr[i]; };
+    const colorOf = (i, name) => vc[name] || (refOf(i, name) && sc[refOf(i, name)]) || (cs.point_color && (groups.size === 1 || Object.keys(sc).length) ? cs.point_color : null);
+    const labelPos = horizontal ? { OutsideEnd: 'right', InsideEnd: 'insideRight', InsideCenter: 'inside', InsideBase: 'insideLeft' }
+                                : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
+    const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
+      color: cs.labels_color || theme.muted, fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
+      formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
+    const ser = order.map(n => [n, groups.get(n)]).map(([name, m], i) => ({
+      name: shown(name), type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
+      // a colour the report gave to one value of the category field recolours that bar (single series only)
+      data: cats.map((c, k) => groups.size === 1 && vc[c] ? { value: val(m, c, k), itemStyle: { color: vc[c] } } : val(m, c, k)), stack: v.stacked ? 'total' : undefined,
+      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label,
+      ...(colorOf(i, name) ? { itemStyle: { color: colorOf(i, name) }, lineStyle: { color: colorOf(i, name) } } : {}),
+      ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));
     // Axis and legend titles as the report labels them (extract.py's visual_text).
     // Only set when the report actually names one — an axis titled by default in
@@ -305,11 +398,15 @@
     const t = v.texts || {};
     const axisTitle = name => name ? { name, nameLocation: 'middle', nameGap: 26,
                                        nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
-    const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x) };
-    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
+    const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x), show: horizontal ? cs.y_axis_show !== false && cs.x_axis_show !== false : cs.x_axis_show !== false };
+    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, show: cs.y_axis_show !== false,
+                      splitLine: { show: cs.gridlines !== false, lineStyle: { color: theme.border, type: 'dotted' } }, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
                       ...axisTitle(t.axis_y) };
-    const legend = groups.size > 1
-      ? { top: 0, textStyle: { color: theme.muted }, ...(t.legend ? { name: t.legend } : {}) }
+    const lp = cs.legend_pos || 'Top';
+    const legend = groups.size > 1 && cs.legend_show !== false
+      ? { icon: 'circle', itemWidth: 9, itemHeight: 9, textStyle: { color: theme.muted, fontSize: 11 }, ...(t.legend ? { name: t.legend } : {}),
+          ...(/Bottom/.test(lp) ? { bottom: 0 } : /Left/.test(lp) ? { left: 0, top: 'middle', orient: 'vertical' }
+             : /Right/.test(lp) ? { right: 0, top: 'middle', orient: 'vertical' } : { top: 0, left: /Center/.test(lp) ? 'center' : 0 }) }
       : undefined;
     // containLabel reserves room for tick labels but not for an axis *name*, so a title
     // on the bottom/left axis gets clipped at the edge unless the grid is opened up.

@@ -195,3 +195,17 @@ parameters; in `hah` the options run client-side from `options_sql`. The widget 
   theme's `visualStyles` (`extract.apply_theme_table_styles`). `ThemeDataColor` ColorId 2 + 0.6 = #FFBF9A on a
   #FF5F02 first data colour. Both `report.html.j2` and `report_hah.html.j2` apply them (the main template did not).
 
+
+## Chart and frame formatting (from the real-report comparison)
+
+- `extract._chart_style` → `style.point_color` (`dataPoint` fill), `series_colors` (by `selector.metadata`; used only when the report names as many as there are series), `labels*` (data labels: show, size, bold, position, unit), `legend_show/legend_pos`, `x_axis_show/y_axis_show/gridlines`. Keys are absent when the report says nothing; both templates' `cartesian()` read them.
+- Frame: `border_radius` (px, container) next to a shape's `round_edge`; `title_family` (a face named *Semibold* gets weight 600 since it may not be installed). Titles default to weight 400, not bold.
+- Built-in base themes carry no palette in their JSON: `extract._BASE_PALETTES` (only `CY18SU07`, "Classic", is known; add others from a real report, never guess).
+- Flat tables: `header_names` (column captions from `NativeReferenceName`, used only when the count matches the SQL columns), `table_header_size/align/bold`, `table_row_size`.
+- Conditional formatting of table/matrix value columns: `extract._cond_formats` (`FillRule` gradients, `Conditional` colour/icon rules; built-in `minColor/midColor/maxColor` = #F8696B/#FFEB84/#63BE7B) → `cond_formats` + `n_fields`; the table renderer applies them by field position, only when the wells have as many fields as the SQL has columns. Icons: `*High*` = green check, `*Low*` = red cross, `null`/unknown = blank (from one report: verify `SymbolLow` against the original).
+- Not read yet: rules on another field, multiRowCard layout, per-series names on charts, button selected state details, totals rows.
+- Series colours: `value_colors` (a colour per *value* of the series/category field, from `selector.data[].scopeId`; exact match by name), `series_colors` (per measure, keyed by its queryRef and matched through the visual's `Y` well order, `y_refs`), `point_color` (the rest). Tables: `col_align` (per field position), grid lines `table_grid_h/v` (+ `_weight`, `_color`). A `tableEx` formatted as big numbers with a small header ("multi-row card" look) is just a table: its header/value size and colour are read like any other.
+- Theme `visualStyles` (`extract.apply_theme_visual_styles`): frame (border colour/radius, background), title (face, size, colour, alignment), table and chart defaults come from the theme's `*` and per-type entries, converted to the `objects` shape and parsed by the same functions. Only keys the visual did not set are filled; `background_off` marks an explicit "show: false"; text boxes, images, shapes and buttons are skipped (decoration).
+- Chart measures: `y_fields` ({entity, prop, name, ref}) map the drafted series label (`col` or `Table: col`) to the caption the report shows and to the order of the Y well; the legend, colours and series order follow it.
+- Table totals (ADR-010): yaml `sql_total` (a wrapper over the detail query, additive measures only) → `block.total` → `tfoot` row; styled by `table_total_bg/fg`. Months as categories are put in calendar order in the browser (`inCalendarOrder`) only when the report names no sort (`has_sort`).
+- Not done: totals in `hah` mode and matrix sub-totals; sort-by-column from the model in general (only the month heuristic).

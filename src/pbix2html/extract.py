@@ -146,12 +146,27 @@ _IMAGE_MIME = {
 _PBI_DEFAULT_DATA_COLORS = ["#118DFF", "#12239E", "#E66C37", "#6B007B", "#E044A7", "#744EC2", "#D9B300", "#D64550"]
 
 
+# Built-in base themes ship as a JSON with only `visualStyles`: their colour palette is not in the file but fixed
+# in Power BI. Read from the real reports: "CY18SU07" is the Classic theme (ColorId 8 = #FE9666, the peach a
+# card number has in such a report; with the modern default palette it came out gold).
+_BASE_PALETTES = {
+    "CY18SU07": ["#01B8AA", "#374649", "#FD625E", "#F2C80F", "#5F6B6D", "#8AD4EB", "#FE9666", "#A66999"],
+}
+
+
+def data_colors(theme: dict | None) -> list[str]:
+    """The theme's data colours: the custom theme's, else the built-in base theme's, else Power BI's default."""
+    cj = (theme or {}).get("custom_json") or {}
+    base = ((theme or {}).get("base") or {}).get("name")
+    return list(cj.get("dataColors") or _BASE_PALETTES.get(base) or _PBI_DEFAULT_DATA_COLORS)
+
+
 def theme_palette(theme: dict | None) -> list[str] | None:
     """The palette `ThemeDataColor.ColorId` indexes into: 0 = background, 1 = foreground,
     then the theme's `dataColors` from index 2 (verified against a real report: a fill of
     ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). With no custom theme, Power BI's default palette."""
     cj = (theme or {}).get("custom_json") or {}
-    colors = cj.get("dataColors")
+    colors = data_colors(theme)
     if not colors:
         # A report without a custom theme uses Power BI's default one, whose palette is fixed: white, black and
         # these eight colours. Dropping the reference (as this used to) turned a title set to "background
@@ -233,6 +248,18 @@ def resolve_theme_markers(layout: dict) -> None:
                 fix(style, "table_row_fg")
                 fix(style, "table_rowhdr_bg")
                 fix(style, "table_rowhdr_fg")
+                fix(style, "point_color")
+                fix(style, "labels_color")
+                for meta in list((style.get("series_colors") or {})):
+                    fix(style["series_colors"], meta)
+                for meta in list((style.get("value_colors") or {})):
+                    fix(style["value_colors"], meta)
+                fix(style, "table_total_bg")
+                fix(style, "table_total_fg")
+                fix(style, "table_grid_h_color")
+                fix(style, "table_grid_v_color")
+                if "series_colors" in style and not style["series_colors"]:
+                    style.pop("series_colors")
             if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
                 fix(v["slicer"]["style"], "color")
                 fix(v["slicer"]["style"], "background")
@@ -345,6 +372,8 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     # A background that is switched off (`show: false`) keeps its colour and transparency in the file but is not
     # drawn: reading them anyway put a half-transparent black box behind every slicer on a dark panel.
     background_on = _object_flag(vc_objects, "background") is not False
+    if not background_on:
+        style["background_off"] = True            # explicit: a theme default must not bring a fill back
     background = _object_color(vc_objects, "background", theme_colors=theme_colors) if background_on else None
     if background:
         style["background"] = background
@@ -365,6 +394,13 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     align = (_object_text(vc_objects, "title", "alignment") or "").strip().lower()
     if align in ("left", "center", "right"):
         style["title_align"] = align
+    radius = _object_text(vc_objects, "border", "radius")
+    if radius and re.fullmatch(r"\s*\d+(\.\d+)?[DL]?\s*", radius):
+        style["border_radius"] = float(radius.strip().rstrip("DL"))                # px: the rounded corners of the frame
+    family = (_object_text(vc_objects, "title", "fontFamily") or "").strip("'\" ")
+    family = re.split(r"[,]", family.replace("''", "'"))[0].strip("'\" ")
+    if re.fullmatch(r"[\w .-]{1,60}", family):
+        style["title_family"] = family
     border = _object_flag(vc_objects, "border")
     if border is not None:
         style["border"] = border
@@ -375,7 +411,214 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     return style
 
 
+def _lit_number(raw: str | None) -> float | None:
+    if raw and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", raw):
+        return float(raw.strip().rstrip("DL"))
+    return None
+
+
+def _chart_style(objects: dict) -> dict:
+    """How a chart is formatted in the report (`objects`): the colour of its bars/lines (`dataPoint`), its data
+    labels, legend and axes. Keys are omitted when the report does not set them, so the renderer keeps its
+    default. Series colours are keyed by the field's queryRef (`selector.metadata`)."""
+    st: dict[str, Any] = {}
+    point: dict[str, str] = {}
+    by_value: dict[str, str] = {}
+    for entry in (objects or {}).get("dataPoint") or []:
+        props = (entry or {}).get("properties") or {}
+        colour = literal_color((((props.get("fill") or {}).get("solid") or {}).get("color") or {}).get("expr"))
+        if not colour:
+            continue
+        sel = entry.get("selector") or {}
+        meta = sel.get("metadata")
+        scope = next((((d or {}).get("scopeId") or {}).get("Comparison") for d in (sel.get("data") or [])
+                      if (d or {}).get("scopeId")), None)
+        if meta:
+            point.setdefault(meta, colour)
+        elif scope is not None:                 # a colour for one value of the series / category field
+            text = literal_to_text((scope.get("Right") or {}))
+            if text:
+                by_value.setdefault(text[:100], colour)
+        elif not sel.get("data"):
+            st.setdefault("point_color", colour)
+    if point:
+        st["series_colors"] = point
+    if by_value:
+        st["value_colors"] = by_value
+    if _object_flag(objects, "labels") is True:
+        st["labels"] = True
+        for key, prop in (("labels_size", "fontSize"), ("labels_units", "labelDisplayUnits"), ("labels_precision", "labelPrecision")):
+            n = _lit_number(_object_text(objects, "labels", prop))
+            if n is not None:
+                st[key] = n
+        if _object_flag(objects, "labels", "bold") is not None:
+            st["labels_bold"] = _object_flag(objects, "labels", "bold")
+        pos = (_object_text(objects, "labels", "labelPosition") or "").strip()
+        if pos in ("OutsideEnd", "InsideEnd", "InsideCenter", "InsideBase"):
+            st["labels_pos"] = pos
+        colour = _object_color(objects, "labels", "color")
+        if colour:
+            st["labels_color"] = colour
+    if _object_flag(objects, "legend") is False:
+        st["legend_show"] = False
+    pos = (_object_text(objects, "legend", "position") or "").strip()
+    if pos in ("Top", "Bottom", "Left", "Right", "TopCenter", "BottomCenter", "LeftCenter", "RightCenter"):
+        st["legend_pos"] = pos
+    for key, name in (("x_axis_show", "categoryAxis"), ("y_axis_show", "valueAxis")):
+        if _object_flag(objects, name) is False:
+            st[key] = False
+    if _object_flag(objects, "valueAxis", "gridlineShow") is False:
+        st["gridlines"] = False
+    return st
+
+
 _TABLE_KINDS = {"table", "tableEx", "matrix", "pivotTable"}
+
+
+# Power BI's built-in gradient ends, named by the file instead of given as a colour
+_GRADIENT_DEFAULTS = {"minColor": "#F8696B", "midColor": "#FFEB84", "maxColor": "#63BE7B"}
+_COMPARISON = {0: "=", 1: ">", 2: ">=", 3: "<", 4: "<="}
+_ICON_NAMES = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+
+
+def _cond_tree(cond: dict, prop: str) -> dict | None:
+    """A rule's condition as data: {"op": ">=", "v": 1} or {"and"|"or": [a, b]}. Only a comparison of the formatted
+    column itself with a number is understood; a rule on another field is dropped (it would colour the wrong cells)."""
+    if not isinstance(cond, dict):
+        return None
+    for key in ("And", "Or"):
+        if key in cond:
+            left, right = _cond_tree(cond[key].get("Left"), prop), _cond_tree(cond[key].get("Right"), prop)
+            return {key.lower(): [left, right]} if left and right else None
+    cmp_ = cond.get("Comparison")
+    if not isinstance(cmp_, dict) or cmp_.get("ComparisonKind") not in _COMPARISON:
+        return None
+    field = ((cmp_.get("Left") or {}).get("Aggregation") or cmp_.get("Left") or {})
+    col = ((field.get("Expression") or field).get("Column") or {}).get("Property")
+    raw = literal_to_text(cmp_.get("Right") or {})
+    try:
+        num = float((raw or "").rstrip("DLdl"))
+    except ValueError:
+        return None
+    return {"op": _COMPARISON[cmp_["ComparisonKind"]], "v": num} if col == prop else None
+
+
+def _stop(node: dict | None) -> dict | None:
+    color = literal_to_text(((node or {}).get("color") or {})) if isinstance((node or {}).get("color"), dict) else None
+    color = _GRADIENT_DEFAULTS.get(color, color)
+    if not (isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color)):
+        return None
+    raw = literal_to_text((node.get("value") or {})) if isinstance(node.get("value"), dict) else None
+    try:
+        value = float((raw or "").rstrip("DLdl")) if raw else None
+    except ValueError:
+        value = None
+    return {"color": color.upper(), "value": value}
+
+
+def _cond_formats(objects: dict, refs: list[str]) -> list[dict]:
+    """Conditional formatting of a table/matrix's value columns — `objects.values[]` entries whose selector names
+    a field (`selector.metadata`): a colour gradient (`FillRule`), colour rules or an icon rule (`Conditional`).
+    Each is {col: position in the field wells, prop: back|font|icon, kind: gradient|rules, ...}; the renderer
+    only applies them when the well has as many fields as the SQL has columns."""
+    out: list[dict] = []
+    for entry in (objects or {}).get("values") or []:
+        meta = ((entry or {}).get("selector") or {}).get("metadata")
+        if meta not in refs:
+            continue
+        prop_name = meta[meta.rfind(".") + 1:].rstrip(")")
+        props = entry.get("properties") or {}
+        for prop, key in (("backColor", "back"), ("fontColor", "font")):
+            expr = ((((props.get(prop) or {}).get("solid") or {}).get("color") or {}).get("expr")) or {}
+            rule = expr.get("FillRule")
+            if isinstance(rule, dict):
+                g = (rule.get("FillRule") or {})
+                grad = g.get("linearGradient3") or g.get("linearGradient2")
+                stops = [_stop(grad.get(n)) for n in ("min", "mid", "max") if grad and grad.get(n)]
+                if stops and all(stops) and len(stops) >= 2:
+                    out.append({"col": refs.index(meta), "prop": key, "kind": "gradient", "stops": stops})
+            cases = (expr.get("Conditional") or {}).get("Cases")
+            if cases:
+                rules = []
+                for c in cases:
+                    tree = _cond_tree(c.get("Condition"), prop_name)
+                    colour = literal_color(c.get("Value"))
+                    if tree and colour and re.fullmatch(r"#[0-9A-Fa-f]{6}", colour):
+                        rules.append({"when": tree, "color": colour.upper()})
+                if rules:
+                    out.append({"col": refs.index(meta), "prop": key, "kind": "rules", "rules": rules})
+        icon_expr = ((((props.get("icon") or {}).get("value") or {}).get("expr")) or {}).get("Conditional") or {}
+        rules = []
+        for c in icon_expr.get("Cases") or []:
+            tree = _cond_tree(c.get("Condition"), prop_name)
+            name = literal_to_text(c.get("Value") or {})
+            if tree and name and _ICON_NAMES.match(name):
+                rules.append({"when": tree, "icon": name})
+        if rules:
+            out.append({"col": refs.index(meta), "prop": "icon", "kind": "rules", "rules": rules})
+    return out
+
+
+def _flat_refs_classic(sv: dict) -> list[str]:
+    return [p.get("queryRef") for lst in (sv.get("projections") or {}).values() for p in (lst or []) if isinstance(p, dict)]
+
+
+def _flat_refs_pbir(vis: dict) -> list[str]:
+    qs = ((vis.get("query") or {}).get("queryState")) or {}
+    return [p.get("queryRef") for role in qs.values() for p in ((role or {}).get("projections") or [])]
+
+
+def _y_field(ref: str, name: str | None) -> dict | None:
+    """One measure of a chart's Y well as {entity, prop, name, ref}: `entity`/`prop` are how the drafted SQL labels the
+    series (the column, or `Entity: column` when two measures share it), `name` is the caption the report shows."""
+    if not isinstance(ref, str) or not ref:
+        return None
+    m = re.match(r"^\w+\((.*)\)$", ref)
+    inner = m.group(1) if m else ref
+    entity, _, prop = inner.rpartition(".")
+    return {"entity": entity, "prop": prop or inner, "name": name or prop or inner, "ref": ref}
+
+
+def _y_fields_classic(sv: dict) -> list[dict]:
+    names = {s.get("Name"): s.get("NativeReferenceName") for s in ((sv.get("prototypeQuery") or {}).get("Select") or [])}
+    out = []
+    for role in ("Y", "Y2"):
+        for p in (sv.get("projections") or {}).get(role) or []:
+            f = _y_field(p.get("queryRef"), names.get(p.get("queryRef"))) if isinstance(p, dict) else None
+            if f:
+                out.append(f)
+    return out
+
+
+def _y_fields_pbir(vis: dict) -> list[dict]:
+    qs = ((vis.get("query") or {}).get("queryState")) or {}
+    out = []
+    for role in ("Y", "Y2"):
+        for p in ((qs.get(role) or {}).get("projections") or []):
+            f = _y_field(p.get("queryRef"), p.get("displayName") or p.get("nativeQueryRef"))
+            if f:
+                out.append(f)
+    return out
+
+
+def _header_names_classic(sv: dict) -> list[str] | None:
+    """A flat table's column captions in field-well order, as the report names them
+    (`prototypeQuery.Select[].NativeReferenceName`); None unless every column has one."""
+    if (sv or {}).get("visualType") not in ("tableEx", "table"):
+        return None
+    names = {s.get("Name"): s.get("NativeReferenceName") for s in ((sv.get("prototypeQuery") or {}).get("Select") or [])
+             if s.get("Name") and s.get("NativeReferenceName")}
+    refs = [p.get("queryRef") for lst in (sv.get("projections") or {}).values() for p in (lst or []) if isinstance(p, dict)]
+    out = [names.get(r) for r in refs]
+    return out if out and all(out) else None
+
+
+def _header_names_pbir(vis: dict) -> list[str] | None:
+    if (vis or {}).get("visualType") not in ("tableEx", "table"):
+        return None
+    qs = ((vis.get("query") or {}).get("queryState")) or {}
+    out = [(p.get("displayName") or p.get("nativeQueryRef")) for role in qs.values() for p in ((role or {}).get("projections") or [])]
+    return out if out and all(out) else None
 
 
 def _table_style(objects: dict) -> dict:
@@ -390,7 +633,43 @@ def _table_style(objects: dict) -> dict:
         colour = _object_color(objects, obj, prop)
         if colour:
             style[key] = colour
+    # a theme file names the banding `backColor` / `backColorAlternate`; a visual's own objects `...Primary` / `...Secondary`
+    for key, (obj, prop) in (("table_row_bg", ("values", "backColor")), ("table_row_bg_alt", ("values", "backColorAlternate"))):
+        if key not in style:
+            colour = _object_color(objects, obj, prop)
+            if colour:
+                style[key] = colour
+    # type: header/row font size (pt), header alignment and weight, from the same two objects
+    for key, obj, prop in (("table_header_size", "columnHeaders", "fontSize"), ("table_row_size", "values", "fontSize")):
+        n = _lit_number(_object_text(objects, obj, prop))
+        if n is not None:
+            style[key] = n
+    align = (_object_text(objects, "columnHeaders", "alignment") or "").strip().lower()
+    if align in ("left", "center", "right"):
+        style["table_header_align"] = align
+    bold = _object_flag(objects, "columnHeaders", "bold")
+    if bold is not None:
+        style["table_header_bold"] = bold
+    # grid lines: each direction on/off, weight (px) and colour
+    for key, prop in (("table_grid_h", "gridHorizontal"), ("table_grid_v", "gridVertical")):
+        flag = _object_flag(objects, "grid", prop)
+        if flag is not None:
+            style[key] = flag
+        weight = _lit_number(_object_text(objects, "grid", prop + "Weight"))
+        if weight is not None:
+            style[key + "_weight"] = weight
     return style
+
+
+def _col_align(objects: dict, refs: list[str]) -> list[str | None]:
+    """Per-column alignment of a table's values (`objects.columnFormatting`, selector = the field), by field position."""
+    out: list[str | None] = [None] * len(refs)
+    for entry in (objects or {}).get("columnFormatting") or []:
+        meta = ((entry or {}).get("selector") or {}).get("metadata")
+        align = (_object_text({"x": [entry]}, "x", "alignment") or "").strip().lower()
+        if meta in refs and align in ("left", "center", "right"):
+            out[refs.index(meta)] = align
+    return out if any(out) else []
 
 
 # style key → (formatting object, property) — also where a theme's `visualStyles` keeps the same colours
@@ -399,7 +678,69 @@ _TABLE_COLOR_KEYS = {
     "table_row_bg": ("values", "backColorPrimary"), "table_row_bg_alt": ("values", "backColorSecondary"),
     "table_row_fg": ("values", "fontColorPrimary"),
     "table_rowhdr_bg": ("rowHeaders", "backColor"), "table_rowhdr_fg": ("rowHeaders", "fontColor"),
+    "table_total_bg": ("total", "backColor"), "table_total_fg": ("total", "fontColor"),
+    "table_grid_h_color": ("grid", "gridHorizontalColor"), "table_grid_v_color": ("grid", "gridVerticalColor"),
 }
+
+
+def _theme_value(v: Any) -> Any:
+    """A plain theme-file value as the expression shape a visual's own `objects` use, so one parser reads both."""
+    if isinstance(v, bool):
+        return {"expr": {"Literal": {"Value": "true" if v else "false"}}}
+    if isinstance(v, (int, float)):
+        return {"expr": {"Literal": {"Value": f"{v}D"}}}
+    if isinstance(v, str):
+        return {"expr": {"Literal": {"Value": "'" + v.replace("'", "''") + "'"}}}
+    if isinstance(v, dict) and isinstance(((v.get("solid") or {}).get("color")), str):
+        return {"solid": {"color": {"expr": {"Literal": {"Value": "'" + v["solid"]["color"] + "'"}}}}}
+    return v
+
+
+def _theme_objects(groups: dict) -> dict:
+    """`visualStyles[type]["*"]` ({group: [ {prop: value} ]}) → the `objects` shape (`{group: [{properties: {...}}]}`)."""
+    out: dict[str, list] = {}
+    for group, entries in (groups or {}).items():
+        if not isinstance(entries, list):
+            continue
+        out[group] = [{"properties": {k: _theme_value(val) for k, val in e.items() if not k.startswith("$")}}
+                      for e in entries if isinstance(e, dict) and not e.get("$id")]
+    return out
+
+
+# the visuals whose frame and type the theme styles by default; a shape, image or text box is decoration and keeps
+# what it says itself (a theme background on a logo would put a white box behind it)
+_THEMED_SKIP = {"textbox", "image", "shape", "basicShape", "actionButton", "__group__", "dynamicTooltip"}
+
+
+def apply_theme_visual_styles(layout: dict) -> None:
+    """A visual that says nothing about its frame, title, table or chart formatting inherits the theme's
+    `visualStyles` (`*` for every visual, then its own type on top): the border colour and radius, the title's
+    face, size, colour and alignment, a table's header and banding, a chart's labels and axes. Only keys the
+    visual did not set itself are filled, and an explicit "off" (`background_off`) is respected."""
+    vs = ((layout.get("theme") or {}).get("custom_json") or {}).get("visualStyles") or {}
+    if not vs:
+        return
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            vtype = v.get("type") or ""
+            if vtype in _THEMED_SKIP or v.get("is_group") or not isinstance(v.get("style"), dict):
+                continue
+            groups = {**((vs.get("*") or {}).get("*") or {}), **((vs.get(vtype) or {}).get("*") or {})}
+            if not groups:
+                continue
+            objs = _theme_objects(groups)
+            derived = container_style(objs)
+            if vtype in _TABLE_KINDS:
+                derived.update(_table_style(objs))
+            if "Chart" in vtype:
+                derived.update(_chart_style(objs))
+            own = v["style"]
+            if own.get("background") or own.get("background_off"):
+                derived.pop("background", None)
+                derived.pop("transparency", None)
+            derived.pop("background_off", None)
+            for key, val in derived.items():
+                own.setdefault(key, val)
 
 
 def apply_theme_table_styles(layout: dict) -> None:
@@ -899,10 +1240,17 @@ def _parse_visual(vc: dict) -> dict:
         "filters": parse_filters(vc.get("filters")),
         "has_drill_other_visuals": bool(sv.get("drillFilterOtherVisuals")),
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
+        "header_names": _header_names_classic(sv),
+        "y_fields": _y_fields_classic(sv) if "Chart" in vtype else [],
+        "cond_formats": _cond_formats(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
+        "n_fields": len(_flat_refs_classic(sv)) if vtype in _TABLE_KINDS else None,
+        "show_total": _object_flag(sv.get("objects") or {}, "total", "totals") is not False,
+        "col_align": _col_align(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": {**_style_with_fill(container_style(vco), sv.get("objects") or {}),
-                  **(_table_style(sv.get("objects") or {}) if vtype in _TABLE_KINDS else {})},
+                  **(_table_style(sv.get("objects") or {}) if vtype in _TABLE_KINDS else {}),
+                  **(_chart_style(sv.get("objects") or {}) if "Chart" in vtype else {})},
         "texts": texts,
         "action": _visual_link(vco),
         "sort": _proto_sort(sv),
@@ -1276,6 +1624,7 @@ def extract_layout(pbix: Path) -> dict:
         }
         resolve_theme_markers(result)
         apply_theme_table_styles(result)
+        apply_theme_visual_styles(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
 
@@ -1456,11 +1805,18 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "filters": parse_filters((vdata.get("filterConfig") or {}).get("filters")),
             "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
+            "header_names": _header_names_pbir(vis),
+            "y_fields": _y_fields_pbir(vis) if "Chart" in vtype else [],
+            "cond_formats": _cond_formats(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
+            "n_fields": len(_flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else None,
+            "show_total": _object_flag(vis.get("objects") or {}, "total", "totals") is not False,
+            "col_align": _col_align(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
             "texts": _pbir_texts(vco, vis),
             "style": {**_style_with_fill(container_style(vco), vis.get("objects") or {}),
-                      **(_table_style(vis.get("objects") or {}) if vtype in _TABLE_KINDS else {})},
+                      **(_table_style(vis.get("objects") or {}) if vtype in _TABLE_KINDS else {}),
+                  **(_chart_style(vis.get("objects") or {}) if "Chart" in vtype else {})},
             "action": _visual_link(vco),
             "sort": _pbir_sort(vis),
             **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
@@ -1564,6 +1920,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
     }
     resolve_theme_markers(result)
     apply_theme_table_styles(result)
+    apply_theme_visual_styles(result)
     embed_image_resources(z, result)
     return result
 

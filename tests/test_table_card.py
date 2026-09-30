@@ -133,3 +133,63 @@ def test_shape_style_reaches_the_page_as_px_and_a_rotated_line_is_not_transforme
         assert "border: 4.0px solid #333333" in html and "border-radius: 8.0px" in html and "rotate(15deg)" in html, mode
         assert "rotate(90deg)" not in html, mode                        # the line, not rotated
         assert '"line_weight": 8.0' in html                              # 6pt -> 8px, reaches the spec for the JS renderer
+
+
+def test_table_total_row_is_drawn_from_the_block_total(fake_pbix, tmp_path):
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    from pbix2html.semantic import VisualSpec
+    layout = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    base = layout["pages"][0]
+    tab = {**base["visuals"][0], "id": "t", "type": "tableEx", "hidden": False, "is_group": False, "parent_group": None, "groups": [],
+           "x": 20, "y": 20, "width": 400, "height": 200, "z": 1, "title": None,
+           "style": {"table_total_bg": "#00233C", "table_total_fg": "#FFFFFF"}}
+    spec.visuals = {"t": VisualSpec(id="t", kind="table", title=None, sql="select 1")}
+    data = {"t": {"columns": ["a", "b"], "rows": [["x", 1], ["y", 2]], "total": ["Total", 3]}}
+    html = tmp_path / "r.html"
+    html.write_text(render_html({**layout, "pages": [{**base, "visuals": [tab]}]}, spec, {}, data, mode="snapshot"), encoding="utf-8")
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page(viewport={"width": 1280, "height": 800})
+        pg.goto(html.as_uri())
+        pg.wait_for_timeout(400)
+        got = pg.evaluate("""() => { const td = [...document.querySelectorAll('#v-t tfoot td')];
+            return [td.map(x => x.textContent), td.length ? getComputedStyle(td[0]).backgroundColor : null]; }""")
+        br.close()
+    assert got == [["Total", "3"], "rgb(0, 35, 60)"]
+
+
+def test_month_categories_come_back_in_calendar_order_unless_the_report_sorts():
+    from pathlib import Path
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    tpl = (Path(__file__).parent.parent / "src" / "pbix2html" / "templates" / "report.html.j2").read_text(encoding="utf-8")
+    snippet = tpl[tpl.index("  const MONTHS = "):tpl.index("  const col = (block, name) =>")]
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page()
+        pg.set_content("<html></html>")
+        res = pg.evaluate("(src) => { const f = new Function(src + '; return inCalendarOrder;')(); return ["
+                          "f({}, ['August 2026', 'June 2026', 'July 2026']),"
+                          "f({}, ['Mar-25', 'Jan-25', 'Dec-24']),"
+                          "f({}, ['March', 'January', 'February']),"
+                          "f({ has_sort: true }, ['August 2026', 'June 2026']),"
+                          "f({}, ['North', 'June 2026']),"
+                          "f({}, ['June 2026', 'June 2026'])]; }", snippet)
+        br.close()
+    assert res[0] == ["June 2026", "July 2026", "August 2026"]
+    assert res[1] == ["Dec-24", "Jan-25", "Mar-25"]
+    assert res[2] == ["January", "February", "March"]
+    assert res[3] == ["August 2026", "June 2026"]                      # the report sorts: untouched
+    assert res[4] == ["North", "June 2026"] and res[5] == ["June 2026", "June 2026"]
