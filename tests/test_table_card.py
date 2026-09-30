@@ -77,3 +77,23 @@ def test_card_title_and_number_shrink_to_fit_and_table_is_banded(fake_pbix, tmp_
         br.close()
     assert fit and all(fit)
     assert rows == ["rgb(255, 255, 255)", "rgb(255, 191, 154)", "rgb(255, 255, 255)", "rgb(255, 159, 103)"]
+
+
+def test_background_switched_off_is_not_drawn_and_line_shapes_are_rules():
+    lit = lambda v: {"expr": {"Literal": {"Value": v}}}                                   # noqa: E731
+    vco = {"background": [{"properties": {"show": lit("false"), "transparency": lit("50D"),
+                                          "color": {"solid": {"color": lit("'#000000'")}}}}]}
+    assert "background" not in ex.container_style(vco) and "transparency" not in ex.container_style(vco)
+    on = {"background": [{"properties": {"show": lit("true"), "color": {"solid": {"color": lit("'#123456'")}}}}]}
+    assert ex.container_style(on)["background"] == "#123456"
+    objects = {"shape": [{"properties": {"tileShape": lit("'line'")}}],
+               "fill": [{"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": lit("'#808080'")}}}}]}
+    assert ex._style_with_fill({}, objects) == {"background": "#808080", "line": True}
+
+
+def test_font_stack_reaches_the_css_unescaped_and_dropdown_sits_above_every_visual(fake_pbix):
+    layout = ex.extract_layout(fake_pbix)
+    html = render_html(layout, semantic.load("Executive_Dashboard"), {}, None, mode="live")
+    assert "--font: 'Segoe UI'," in html and "&#39;" not in html.split("</style>")[0]
+    assert ".sl-panel { position: fixed; z-index: 2147483000;" in html            # Power BI z values reach 20001
+    assert resolve_theme({"custom_json": {"fontFamily": "x;}</style>"}})["font_family"] == _FONT_STACK

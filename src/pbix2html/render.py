@@ -55,6 +55,7 @@ def resolve_theme(layout_theme: dict | None) -> dict:
     # internal alias (its own per-language Segoe UI stack), not a real, installable font
     # name — using it as a CSS font-family resolves to nothing and silently falls back
     # to the browser's serif default instead of Segoe UI. Treat it the same as "segoe".
+    face = face if isinstance(face, str) and re.fullmatch(r"[\w .-]{1,60}", face.strip()) else None   # goes into CSS: plain names only
     if face and not face.lower().startswith(("segoe", "wf_standard-font")):
         t["font_family"] = f"'{face}', {_FONT_STACK}"     # the report's own face first, Segoe UI behind it
     return t
@@ -437,6 +438,10 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 st["background"] = _rgba(st["background"], st["transparency"]) if st["transparency"] < 100 else None
                 if not st["background"]:
                     st.pop("background")
+            if st.pop("line", None) and st.get("background"):
+                st["line_color"] = st.pop("background")      # drawn as a rule, not as a filled box
+                if not _HEX6.match(st["line_color"]):
+                    st.pop("line_color")
             for k in _TABLE_STYLE_KEYS:                # only plain hex colours reach the template's style attribute
                 if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
                     st.pop(k)

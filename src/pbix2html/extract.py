@@ -341,10 +341,13 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     when the report doesn't specify them, so the renderer can tell "explicitly set" from
     "not mentioned"."""
     style: dict[str, Any] = {}
-    background = _object_color(vc_objects, "background", theme_colors=theme_colors)
+    # A background that is switched off (`show: false`) keeps its colour and transparency in the file but is not
+    # drawn: reading them anyway put a half-transparent black box behind every slicer on a dark panel.
+    background_on = _object_flag(vc_objects, "background") is not False
+    background = _object_color(vc_objects, "background", theme_colors=theme_colors) if background_on else None
     if background:
         style["background"] = background
-    transparency = _object_text(vc_objects, "background", "transparency")
+    transparency = _object_text(vc_objects, "background", "transparency") if background_on else None
     if transparency and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", transparency):
         style["transparency"] = float(transparency.strip().rstrip("DL"))          # 0-100: 100 means the fill is invisible
     # the title's own look: a slicer on a dark panel usually has a white title, which the theme's
@@ -538,6 +541,9 @@ def _style_with_fill(style: dict, objects: dict) -> dict:
     """A shape/button's own fill is its background unless the container sets one."""
     if "background" not in style and (fill := _fill_color(objects)):
         style["background"] = fill
+    # a shape drawn as a line (`objects.shape.tileShape = 'line'`) is a rule across the middle of its box, not a filled box
+    if _object_text(objects, "shape", "tileShape") == "line":
+        style["line"] = True
     # a card's number: its own colour (objects.labels, older; objects.calloutValue, newer)
     for name in ("labels", "calloutValue"):
         color = _object_color(objects, name, "color")

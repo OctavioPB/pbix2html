@@ -14,7 +14,7 @@
     --muted: {{ theme.muted }};
     --border: {{ theme.border }};
     --accent: {{ theme.data_colors[0] }};
-    --font: {{ theme.font_family }};
+    --font: {{ theme.font_family|safe }};
     --td-teal: #00C7B1;
     --td-orange: #FF6D00;
     --td-navy: #1A1A2E;
@@ -73,11 +73,12 @@
   .sl-btn:disabled { cursor: default; opacity: .8; }
   .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
   .sl-range { display: flex; gap: .3rem; align-items: center; }
+  .sl-range input { flex: 1 1 0; min-width: 0; }
   .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
   .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
   .sl-item:hover { background: rgba(127,127,127,.12); }
   .sl-parent { font-weight: 600; }
-  .sl-panel { position: fixed; z-index: 10000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
+  .sl-panel { position: fixed; z-index: 2147483000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
   .sl-panel .sl-list { overflow: auto; }
   .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
   .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.3rem; height: 1.3rem; margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 .8rem serif; color: var(--accent, #666); cursor: help; }
@@ -119,7 +120,7 @@
 {% for p in spec.pages %}
 <section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: 1px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}">
     {% if v.title %}<div class="title"{% if v.title_css %} style="{{ v.title_css }}"{% endif %}>{{ v.title }}</div>{% endif %}
     <div class="body"></div>
@@ -297,7 +298,9 @@
       // v.image: a data: URI for the embedded picture (extract.py's embed_image_resources),
       // for an `image`-kind visual; a shape or button instead carries a label
       // (extract.py's visual_text) — same as the standard template.
-      if (v.image) {
+      if (v.style && v.style.line_color) {
+        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:2px;margin-top:-1px;background:${v.style.line_color}"></div>`;
+      } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {
         el.innerHTML = '<div class="shape-text"></div>';

@@ -12,7 +12,7 @@
     --muted: {{ theme.muted }};
     --border: {{ theme.border }};
     --accent: {{ theme.data_colors[0] }};
-    --font: {{ theme.font_family }};
+    --font: {{ theme.font_family|safe }};
   }
   * { box-sizing: border-box; }
   button, input, select, textarea { font-family: inherit; }
@@ -72,11 +72,12 @@
   .sl-btn:disabled { cursor: default; opacity: .8; }
   .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
   .sl-range { display: flex; gap: .3rem; align-items: center; }
+  .sl-range input { flex: 1 1 0; min-width: 0; }
   .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
   .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
   .sl-item:hover { background: rgba(127,127,127,.12); }
   .sl-parent { font-weight: 600; }
-  .sl-panel { position: fixed; z-index: 10000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
+  .sl-panel { position: fixed; z-index: 2147483000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
   .sl-panel .sl-list { overflow: auto; }
   .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -113,7 +114,7 @@
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
@@ -234,7 +235,9 @@
       // An `image` visual has its picture embedded as a data: URI; a shape or button
       // instead carries a label (extract.py's visual_text). Either way the point is not
       // to leave the box blank, which is what happened to both until now.
-      if (v.image) {
+      if (v.style && v.style.line_color) {
+        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:2px;margin-top:-1px;background:${v.style.line_color}"></div>`;
+      } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {
         el.innerHTML = '<div class="shape-text"></div>';
