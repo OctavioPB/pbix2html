@@ -350,7 +350,8 @@
       const ci = col(b, 'category'), vi = col(b, 'value');
       chart(el, v, { ...base, tooltip: { trigger: 'item', valueFormatter: x => fmt(x) },
         series: [{ type: 'pie', radius: v.inner_radius ? ['45%', '75%'] : '75%',
-                   data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi] })),
+                   data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi],
+                   ...(((v.style || {}).value_colors || {})[String(r[ci])] ? { itemStyle: { color: v.style.value_colors[String(r[ci])] } } : {}) })),
                    label: { color: theme.foreground, fontSize: 11 } }] });
     },
     gauge(el, v, b) {
@@ -380,15 +381,17 @@
     const colorOf = (i, name) => vc[name] || (refOf(i, name) && sc[refOf(i, name)]) || (cs.point_color && (groups.size === 1 || Object.keys(sc).length) ? cs.point_color : null);
     const labelPos = horizontal ? { OutsideEnd: 'right', InsideEnd: 'insideRight', InsideCenter: 'inside', InsideBase: 'insideLeft' }
                                 : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
+    const insideLabel = v.stacked || /^inside/.test(labelPos[cs.labels_pos] || '');
+    const labelFor = (i, name) => { const bar = colorOf(i, name); return cs.labels_color || (insideLabel && bar ? inkFor(bar) : insideLabel ? '#FFFFFF' : theme.muted); };
     const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
-      color: cs.labels_color || theme.muted, fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      color: undefined, fontWeight: cs.labels_bold ? 'bold' : 'normal',
       fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
       formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
     const ser = order.map(n => [n, groups.get(n)]).map(([name, m], i) => ({
       name: shown(name), type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
       // a colour the report gave to one value of the category field recolours that bar (single series only)
       data: cats.map((c, k) => groups.size === 1 && vc[c] ? { value: val(m, c, k), itemStyle: { color: vc[c] } } : val(m, c, k)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label,
+      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label: label && { ...label, color: labelFor(i, name) },
       ...(colorOf(i, name) ? { itemStyle: { color: colorOf(i, name) }, lineStyle: { color: colorOf(i, name) } } : {}),
       ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));

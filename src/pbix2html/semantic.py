@@ -2491,6 +2491,23 @@ def _multi_value_table(categories: list["_Field"], values: list["_Field"], kind:
     return sql + _order_by(sort, pos), used
 
 
+_CONST_CATEGORY = "CAST(' ' AS VARCHAR(1)) AS category"
+
+
+def chart_dimensions(categories: list["_Field"]) -> tuple[list[tuple["_Field", str]], bool]:
+    """A chart's non-measure fields as [(field, "category" | "series")], by the role the report gave them, plus
+    whether a constant category is needed. The order of the roles in the file says nothing (a `Series` well can
+    be listed before `Category`), and a chart with only a `Series` has ONE x-axis slot: a 100 % stacked column with
+    just a legend field is a single column split in the legend's values, not one column per value. More than one
+    field in a role (or an unknown layout) keeps the old by-order naming."""
+    cats = [c for c in categories if (c.role or "").lower() not in ("series", "legend")]
+    ser = [c for c in categories if (c.role or "").lower() in ("series", "legend")]
+    if len(cats) <= 1 and len(ser) <= 1 and categories:
+        ordered = [(c, "category") for c in cats] + [(c, "series") for c in ser]
+        return ordered, not cats
+    return [(c, ["category", "series"][i]) for i, c in enumerate(categories)], False
+
+
 def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, sort: list[dict] | None, *,
                expand_fn, table_map: dict[str, str], relationships: list[dict],
                parameters: dict[str, dict], filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
@@ -2589,10 +2606,11 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
         if mwhere:
             sql += "\nWHERE " + " AND ".join(mwhere)
         return sql + _order_by(sort, pos), used
-    names = ["category", "series"]
-    cols = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)] + [f'{outer.expr} AS "value"']
+    dims, const_category = chart_dimensions(categories)
+    categories = [c for c, _ in dims]
+    cols = [f"{c.expr} AS {n}" for c, n in dims] + ([_CONST_CATEGORY] if const_category else []) + [f'{outer.expr} AS "value"']
     pos = {c.key: i for i, c in enumerate(categories, start=1)}
-    pos.setdefault(f.key, len(categories) + 1)
+    pos.setdefault(f.key, len(categories) + 1 + (1 if const_category else 0))
     where = mwhere + [f"({outer.expr}) IS NOT NULL"]
     sql = ("SELECT DISTINCT " + ", ".join(cols) + "\nFROM " + "\n".join(msrcs)
            + "\nWHERE " + " AND ".join(where))
@@ -2727,14 +2745,17 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         if len(categories) > 2:
             return None
         if len(values) == 1:
-            names = ["category", "series"]
-            parts = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)]
+            dims, const_category = chart_dimensions(categories) if kind != "pie" else ([(categories[0], "category")], False)
+            categories = [c for c, _ in dims]
+            parts = [f"{c.expr} AS {n}" for c, n in dims]
+            if const_category:
+                parts.append(_CONST_CATEGORY)       # series only: one x-axis slot, split by the legend field
             parts.append(f'{values[0].expr} AS "value"')
             pos = {c.key: i for i, c in enumerate(categories, start=1)}
-            pos.setdefault(values[0].key, len(categories) + 1)
+            pos.setdefault(values[0].key, len(parts))
             return assemble(parts, list(range(1, len(categories) + 1)), _order_by(sort, pos)), params_used
         # Several measures: one arm per measure, the measure's own name as the series.
-        if len(categories) != 1 or kind == "pie":
+        if len(categories) != 1 or kind == "pie" or (categories[0].role or "").lower() in ("series", "legend"):
             return None
         arms, all_params = [], []
         # two measures with the same column name (Sum of x over table A / table B): tell them apart

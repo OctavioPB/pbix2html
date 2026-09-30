@@ -149,3 +149,30 @@ def test_table_total_sql_wraps_the_detail_query_and_blanks_non_additive_measures
     assert semantic.table_total_sql({"projections": {"Values": ["T.site"]}}, sql, {}) is None            # nothing to add up
     assert semantic.table_total_sql(v, "WITH a AS (SELECT 1) SELECT * FROM a", {}) is None              # cannot sit in a derived table
     assert semantic._strip_final_order_by("SELECT a FROM (SELECT b FROM c ORDER BY 1) AS t ORDER BY 1") == "SELECT a FROM (SELECT b FROM c ORDER BY 1) AS t"
+
+
+def test_series_only_chart_is_one_column_split_by_the_series_not_one_column_per_value():
+    from pbix2html import semantic
+    F = semantic._Field
+    series = F(role="Series", is_value=False, label="gender", out_name="gender", expr="g.gender_name")
+    category = F(role="Category", is_value=False, label="lvl", out_name="lvl", expr="m.level")
+    # only a legend field: one constant x-axis slot
+    dims, const = semantic.chart_dimensions([series])
+    assert [n for _, n in dims] == ["series"] and const is True
+    # the order of the wells in the file does not decide which is which
+    dims, const = semantic.chart_dimensions([series, category])
+    assert [(c.expr, n) for c, n in dims] == [("m.level", "category"), ("g.gender_name", "series")] and const is False
+    # two fields in one role: unknown layout, the by-order naming stays
+    dims, _ = semantic.chart_dimensions([category, F(role="Category", is_value=False, label="b", out_name="b", expr="x.b")])
+    assert [n for _, n in dims] == ["category", "series"]
+
+
+def test_per_value_colours_only_count_for_the_fields_the_chart_uses_now():
+    def scope(entity, prop, text):
+        return {"data": [{"scopeId": {"Comparison": {"Left": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},
+                                                     "Right": {"Literal": {"Value": f"'{text}'"}}}}}]}
+    objects = {"dataPoint": [{"selector": scope("old", "Gender", "Male"), "properties": {"fill": _color("'#AAAAAA'")}},
+                             {"selector": scope("Gender map", "gender_name", "Male"), "properties": {"fill": _color("'#FF5F02'")}}]}
+    projections = {"Series": [{"queryRef": "Gender map.gender_name"}], "Y": [{"queryRef": "Sum(T.x)"}]}
+    assert ex._chart_style(objects, ex._dim_refs(projections))["value_colors"] == {"Male": "#FF5F02"}
+    assert ex._chart_style(objects)["value_colors"] == {"Male": "#AAAAAA"}         # without the chart's fields: first wins (theme)
