@@ -17,6 +17,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .config import settings
 from . import semantic
+from .extract import data_colors
 from .semantic import KIND_MAP, ReportSpec
 
 log = logging.getLogger(__name__)
@@ -38,8 +39,7 @@ def resolve_theme(layout_theme: dict | None) -> dict:
     """Merges the .pbix custom theme with the defaults; never invents colors."""
     t = dict(DEFAULT_THEME)
     cj = (layout_theme or {}).get("custom_json") or {}
-    if cj.get("dataColors"):
-        t["data_colors"] = list(cj["dataColors"])
+    t["data_colors"] = data_colors(layout_theme)        # custom theme, else the built-in base theme's palette
     if cj.get("background"):
         t["background"] = cj["background"]
     if cj.get("foreground"):
@@ -186,6 +186,11 @@ def _title_css(style: dict, readable: str | None) -> str:
         parts.append(f"font-weight:{700 if style['title_bold'] else 400}")
     if style.get("title_align"):
         parts.append(f"text-align:{style['title_align']}")
+    family = style.get("title_family")
+    if isinstance(family, str) and re.fullmatch(r"[\w .-]{1,60}", family):
+        parts.append(f"font-family:'{family}',{_FONT_STACK}")
+        if style.get("title_bold") is None and re.search(r"semibold|bold", family, re.I):
+            parts.append("font-weight:600")               # the face is named after its weight; ours may not be installed
     return ";".join(parts)
 
 
@@ -411,7 +416,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "left": round(100 * (v["x"] or 0) / W, 3), "top": round(100 * (v["y"] or 0) / H, 3),
                 "w": round(100 * (v["width"] or 0) / W, 3), "h": round(100 * (v["height"] or 0) / H, 3),
                 "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
-                "format": (vs.format if vs else {}), "headers": r.get("headers") or {},
+                "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
                 "stacked": "stacked" in v["type"].lower(),
                 "percent": v["type"].lower().startswith("hundredpercent"),
                 "area": "area" in v["type"].lower(),
@@ -445,6 +450,20 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                         st[key] = _rgba(st[key], st["transparency"]) if st["transparency"] < 100 else None
                         if not st[key]:
                             st.pop(key)
+            if isinstance(st.get("border_radius"), (int, float)):
+                st["border_radius"] = min(max(st["border_radius"], 0), 60)
+            else:
+                st.pop("border_radius", None)
+            for k in ("point_color", "labels_color"):
+                if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
+                    st.pop(k)
+            if isinstance(st.get("series_colors"), dict):
+                st["series_colors"] = [c for c in st["series_colors"].values() if isinstance(c, str) and _HEX6.match(c)]
+            for k in ("table_header_size", "table_row_size"):
+                if k in st and not (isinstance(st[k], (int, float)) and 1 <= st[k] <= 100):
+                    st.pop(k)
+            if st.get("table_header_align") not in (None, "left", "center", "right"):
+                st.pop("table_header_align")
             for k in _TABLE_STYLE_KEYS:                # only plain hex colours reach the template's style attribute
                 if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
                     st.pop(k)

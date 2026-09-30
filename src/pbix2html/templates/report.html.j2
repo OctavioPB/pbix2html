@@ -29,7 +29,7 @@
   .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
-  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 400; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
   .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
@@ -44,11 +44,13 @@
   .tablewrap { overflow: auto; height: 100%; }
   table { border-collapse: collapse; width: 100%; font-size: .8rem; }
   th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-  th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: 600; }
+  th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: var(--th-fw, 600); font-size: var(--th-fs, inherit); }
+  td { font-size: var(--tr-fs, inherit); }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
   .tablewrap.rh td:first-child { background: var(--rh-bg); color: var(--rh-fg, inherit); font-weight: 600; }
   tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
@@ -122,7 +124,7 @@
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}{{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}
-              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
+              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
               {# a "line" shape's rotation is Power BI's way of drawing a *vertical* line, not a
                  rotated box: a long, thin box rotated in place around its own centre swings far
                  outside that box (confirmed against a real report — a 1280x23 header line
@@ -239,10 +241,12 @@
         st.table_header_bg && `--th-bg:${st.table_header_bg}`, st.table_header_fg && `--th-fg:${st.table_header_fg}`,
         st.table_row_bg && `--tr-bg:${st.table_row_bg}`, st.table_row_bg_alt && `--tr-bg-alt:${st.table_row_bg_alt}`,
         st.table_row_fg && `--tr-fg:${st.table_row_fg}`,
+        st.table_header_size && `--th-fs:calc(${(st.table_header_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`, st.table_row_size && `--tr-fs:calc(${(st.table_row_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`,
+        st.table_header_align && `--th-ta:${st.table_header_align}`, st.table_header_bold !== undefined && `--th-fw:${st.table_header_bold ? 700 : 400}`,
         st.table_rowhdr_bg && `--rh-bg:${st.table_rowhdr_bg}`, st.table_rowhdr_fg && `--rh-fg:${st.table_rowhdr_fg}`,
       ].filter(Boolean).join(';');
       el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
-        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || c}</th>`).join('') + '</tr></thead><tbody>' +
+        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || (v.header_names && v.header_names.length === b.columns.length ? v.header_names[i] : c)}</th>`).join('') + '</tr></thead><tbody>' +
         b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
         '</tbody></table></div>';
     },
@@ -294,10 +298,22 @@
     // 100% stacked: every category's series are rescaled to share 100 (ECharts has no such mode)
     const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
     const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };
-    const ser = [...groups.entries()].map(([name, m]) => ({
+    const cs = v.style || {};
+    // the report's own colours: one fill for every bar (`point_color`), or one per series when it names as many
+    const palette = cs.series_colors && cs.series_colors.length >= groups.size ? cs.series_colors : null;
+    const colorOf = i => palette ? palette[i] : (cs.point_color && groups.size === 1 ? cs.point_color : null);
+    const labelPos = horizontal ? { OutsideEnd: 'right', InsideEnd: 'insideRight', InsideCenter: 'inside', InsideBase: 'insideLeft' }
+                                : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
+    const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
+      color: cs.labels_color || theme.muted, fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
+      formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
+    const ser = [...groups.entries()].map(([name, m], i) => ({
       name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
       data: cats.map((c, i) => val(m, c, i)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? {} : undefined, smooth: false,
+      areaStyle: area ? (colorOf(i) ? { color: colorOf(i) } : {}) : undefined, smooth: false, label,
+      ...(colorOf(i) ? { itemStyle: { color: colorOf(i) }, lineStyle: { color: colorOf(i) } } : {}),
+      ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));
     // Axis and legend titles as the report labels them (extract.py's visual_text).
     // Only set when the report actually names one — an axis titled by default in
@@ -305,11 +321,15 @@
     const t = v.texts || {};
     const axisTitle = name => name ? { name, nameLocation: 'middle', nameGap: 26,
                                        nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
-    const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x) };
-    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
+    const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x), show: horizontal ? cs.y_axis_show !== false && cs.x_axis_show !== false : cs.x_axis_show !== false };
+    const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, show: cs.y_axis_show !== false,
+                      splitLine: { show: cs.gridlines !== false, lineStyle: { color: theme.border, type: 'dotted' } }, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
                       ...axisTitle(t.axis_y) };
-    const legend = groups.size > 1
-      ? { top: 0, textStyle: { color: theme.muted }, ...(t.legend ? { name: t.legend } : {}) }
+    const lp = cs.legend_pos || 'Top';
+    const legend = groups.size > 1 && cs.legend_show !== false
+      ? { icon: 'circle', itemWidth: 9, itemHeight: 9, textStyle: { color: theme.muted, fontSize: 11 }, ...(t.legend ? { name: t.legend } : {}),
+          ...(/Bottom/.test(lp) ? { bottom: 0 } : /Left/.test(lp) ? { left: 0, top: 'middle', orient: 'vertical' }
+             : /Right/.test(lp) ? { right: 0, top: 'middle', orient: 'vertical' } : { top: 0, left: /Center/.test(lp) ? 'center' : 0 }) }
       : undefined;
     // containLabel reserves room for tick labels but not for an axis *name*, so a title
     // on the bottom/left axis gets clipped at the edge unless the grid is opened up.

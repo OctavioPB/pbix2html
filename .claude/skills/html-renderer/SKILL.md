@@ -195,3 +195,11 @@ parameters; in `hah` the options run client-side from `options_sql`. The widget 
   theme's `visualStyles` (`extract.apply_theme_table_styles`). `ThemeDataColor` ColorId 2 + 0.6 = #FFBF9A on a
   #FF5F02 first data colour. Both `report.html.j2` and `report_hah.html.j2` apply them (the main template did not).
 
+
+## Chart and frame formatting (from the real-report comparison)
+
+- `extract._chart_style` → `style.point_color` (`dataPoint` fill), `series_colors` (by `selector.metadata`; used only when the report names as many as there are series), `labels*` (data labels: show, size, bold, position, unit), `legend_show/legend_pos`, `x_axis_show/y_axis_show/gridlines`. Keys are absent when the report says nothing; both templates' `cartesian()` read them.
+- Frame: `border_radius` (px, container) next to a shape's `round_edge`; `title_family` (a face named *Semibold* gets weight 600 since it may not be installed). Titles default to weight 400, not bold.
+- Built-in base themes carry no palette in their JSON: `extract._BASE_PALETTES` (only `CY18SU07`, "Classic", is known; add others from a real report, never guess).
+- Flat tables: `header_names` (column captions from `NativeReferenceName`, used only when the count matches the SQL columns), `table_header_size/align/bold`, `table_row_size`.
+- Not read yet: conditional formatting (FillRule / icon rules), multiRowCard layout, per-series names on charts, button selected state details, totals rows.
