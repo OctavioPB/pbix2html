@@ -81,6 +81,10 @@
   .sl-panel { position: fixed; z-index: 2147483000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
   .sl-panel .sl-list { overflow: auto; }
   .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
+  .sl-tiles { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; height: 100%; overflow: auto; }
+  .sl-tile { font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 999px; padding: .2rem .7rem; cursor: pointer; }
+  .sl-tile:disabled { cursor: default; opacity: .8; }
+  .sl-tile.on { background: var(--td-teal); color: #fff; border-color: var(--td-teal); }
   .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.3rem; height: 1.3rem; margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 .8rem serif; color: var(--accent, #666); cursor: help; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }

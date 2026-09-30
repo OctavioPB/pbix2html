@@ -411,6 +411,22 @@ def test_data_model_downloads_in_both_formats(tmp_path, monkeypatch, fake_pbix):
     assert c.get("/reports/NoSuchReport/model.json").status_code == 404
 
 
+def test_mapping_report_is_downloadable_from_the_panel(tmp_path, monkeypatch, fake_pbix):
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    # Before Extract there's nothing to build the report from, and the link isn't offered.
+    assert c.get(f"/reports/{name}/mapping.md").status_code == 404
+    assert "Read the mapping report" not in c.get(f"/reports/{name}").text
+
+    c.post(f"/reports/{name}/extract")
+    assert "Read the mapping report" in c.get(f"/reports/{name}").text
+
+    r = c.get(f"/reports/{name}/mapping.md")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert "text/markdown" in r.headers["content-type"]
+    assert "mapping" in r.text.lower()
+    assert c.get("/reports/NoSuchReport/mapping.md").status_code == 404
+
+
 def test_data_model_download_explains_a_thin_report(tmp_path, monkeypatch, fake_pbix):
     # A report with no local model (live connection to a published dataset) is the
     # common real case — the download must explain that, not hand over a bare error key.

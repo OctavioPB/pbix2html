@@ -132,14 +132,24 @@ The generated SQL repeats the visual's WHERE inside the derived table (bind para
 
 ## One measure over several fact tables (`IF(cond, SUM(A[x]), CALCULATE(SUM(B[x]), ...))`)
 
-Drafted by `multi_fact` for a single-value card/kpi/gauge or a chart with 1–2 categories. The translator
-re-runs in *split* mode (`{AGG:n}` per aggregate, each tied to its table); every fact table gets its own
-derived table (its aggregates per category, over that table joined only to the category tables and the
-slicers reaching it), and the expression is evaluated on a query whose FROM is just the category tables
-(`SELECT DISTINCT`, groups whose value is blank dropped, as Power BI does). A card is the arms CROSS JOINed.
-Left manual: an aggregate that filters on another table, a `Promotions-Slicer`-style marker mixed in,
-table/matrix visuals, several such values in one visual. Every fact table must relate to every category table.
-Note the category domain is the category table's rows (after slicers on it), not "values that have facts".
+Drafted by `multi_fact` for a single-value card/kpi/gauge, a chart with 1–2 categories, or a table/matrix
+with any number of category (row/column) fields. The translator re-runs in *split* mode (`{AGG:n}` per
+aggregate, each tied to its table); every fact table gets its own derived table (its aggregates per
+category, over that table joined only to the category tables and the slicers reaching it), and the
+expression is evaluated on a query whose FROM is just the category tables (`SELECT DISTINCT`). A card
+is the arms CROSS JOINed. A table/matrix keeps every category row even where the composite measure comes
+back blank (a table doesn't drop rows just because one cell is empty) and names its column after the
+measure's own name, not the synthetic `value`/`category`/`series` a chart uses; a chart drops a blank
+group instead, as Power BI's own charts do.
+Left manual: an aggregate that filters on another table, a `Promotions-Slicer`-style marker mixed in
+(a selection-dependent `MIN`/`MAX` needs the fact table itself for its join, which the per-fact split
+can't provide), several such composite values in one visual (mixing a composite total with a plain
+single-table measure in the same table/matrix is not modelled either — it's still one composite value
+at a time). Every fact table must relate to every category table, **and every pair of category tables
+must be directly reachable from each other** for the categories-only outer query — two categories that
+are only related to each other *through* a fact table (the common case for two unrelated dimensions)
+still can't be composed; two columns of the *same* dimension table can. Note the category domain is the
+category table's rows (after slicers on it), not "values that have facts".
 
 ## Filter-pane filters (report / page / visual level)
 

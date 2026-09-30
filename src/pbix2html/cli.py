@@ -92,7 +92,11 @@ def cmd_mapping(args):
     layout, model = _layout_and_model(Path(args.pbix), Path(args.out))
     table_map = semantic.preview_table_map(layout["report"], model)
     rep = semantic.mapping_report(layout, model, table_map)
-    path = Path(args.out) / layout["report"] / "mapping_report.md"
+    # `_layout_and_model` wrote layout.json/model.json under the *sanitized* name
+    # (`ex.safe_name`, e.g. spaces stripped) — this must land in the same folder, or a report
+    # name with a space (or any other character `safe_name` changes) crashes here with a bare
+    # FileNotFoundError, the folder it's trying to write into having never been created.
+    path = Path(args.out) / ex.safe_name(layout["report"]) / "mapping_report.md"
     path.write_text(semantic.render_mapping_report(rep), encoding="utf-8")
     v = rep["visuals"]
     print(f"mapping report: {path}  (data visuals {v['data_visuals']}, drafted {v['drafted']})")

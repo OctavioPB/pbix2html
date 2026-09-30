@@ -2329,15 +2329,20 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
     of both tables would multiply rows. So every fact table gets its own derived table (its aggregates
     per category, over that table joined only to the category tables), and the measure's expression is
     evaluated over those, on a query whose FROM is just the category tables. A group whose measure
-    is blank is dropped, as in Power BI. Single value, cards and charts only; anything with a
-    selection-level marker (`selmins`) is left manual, since that join needs the fact table."""
+    is blank is dropped for a chart, as in Power BI's own charts; a table/matrix keeps the row (a
+    blank cell, not a missing one — Power BI's table doesn't drop rows just because one measure came
+    back blank). Single value; anything with a selection-level marker (`selmins`) is left manual,
+    since that join needs the fact table."""
     if len(values) != 1 or not values[0].aggs or values[0].selmins:
         return None
     f = values[0]
     is_chart = kind in _CHART_KINDS
+    is_table = kind in ("table", "matrix", "multicard")
     if is_chart:
         if not 1 <= len(categories) <= 2 or (kind == "pie" and len(categories) != 1):
             return None
+    elif is_table:
+        pass                                  # any number of category (row/column) fields
     elif kind not in ("card", "gauge", "kpi") or categories:
         return None
     cat_tables = list(dict.fromkeys(t for c in categories for t in c.tables))
@@ -2401,7 +2406,18 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
     msrcs, ps, _extra = done
     used += [p for p in ps if p not in used]
     if not categories:
-        return f'SELECT {outer.expr} AS "value"\nFROM ' + "\n".join(msrcs), used
+        col = outer.out_name if is_table else '"value"'
+        return f'SELECT {outer.expr} AS {col}\nFROM ' + "\n".join(msrcs), used
+    if is_table:
+        # free-form columns, in the field's own name — a table/matrix keeps every category
+        # row even where the composite measure comes back blank (no IS NOT NULL filter).
+        cols = [f"{c.expr} AS {c.out_name}" for c in categories] + [f"{outer.expr} AS {outer.out_name}"]
+        pos = {c.key: i for i, c in enumerate(categories, start=1)}
+        pos.setdefault(f.key, len(categories) + 1)
+        sql = "SELECT DISTINCT " + ", ".join(cols) + "\nFROM " + "\n".join(msrcs)
+        if mwhere:
+            sql += "\nWHERE " + " AND ".join(mwhere)
+        return sql + _order_by(sort, pos), used
     names = ["category", "series"]
     cols = [f"{c.expr} AS {names[i]}" for i, c in enumerate(categories)] + [f'{outer.expr} AS "value"']
     pos = {c.key: i for i, c in enumerate(categories, start=1)}

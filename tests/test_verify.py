@@ -53,9 +53,24 @@ def test_a_report_without_the_embedded_spec_is_refused():
 
 
 def _browser():
+    """A Chromium executable to run the rendered checks against, or None to skip them.
+
+    `/opt/pw-browsers` is the sandboxed-CI location; a plain `playwright install
+    chromium` on a dev machine instead lands in Playwright's own per-OS cache dir, so
+    that's checked too — the point is that installing the browser is enough, nobody
+    should have to go find and export `PBIX2HTML_BROWSER` themselves."""
     pytest.importorskip("playwright")
-    found = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"))
-    return os.getenv("PBIX2HTML_BROWSER") or (found[-1] if found else None)
+    if os.getenv("PBIX2HTML_BROWSER"):
+        return os.getenv("PBIX2HTML_BROWSER")
+    roots = [r for r in (os.getenv("PLAYWRIGHT_BROWSERS_PATH"), "/opt/pw-browsers",
+                         os.path.join(os.getenv("LOCALAPPDATA") or "", "ms-playwright"),
+                         os.path.expanduser("~/.cache/ms-playwright"),
+                         os.path.expanduser("~/Library/Caches/ms-playwright")) if r]
+    patterns = [os.path.join(r, "chromium-*", *rest) for r in roots for rest in (
+        ("chrome-linux", "chrome"), ("chrome-win64", "chrome.exe"), ("chrome-win", "chrome.exe"),
+        ("chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"))]
+    found = sorted(p for pat in patterns for p in glob.glob(pat))
+    return found[-1] if found else None
 
 
 PAGE = """<!doctype html><meta charset=utf-8><style>

@@ -978,6 +978,28 @@ def download_model(name: str, fmt: str):
                     headers={"Content-Disposition": f'attachment; filename="{name}.model.md"'})
 
 
+@app.get("/reports/{name}/mapping.md")
+def download_mapping_report(name: str):
+    """Which visuals could/couldn't be drafted and why, filters not applied, drill-through
+    and hidden pages — the same report `pbix2html mapping` writes to a file, generated
+    on demand from what's already on disk (layout.json, model.json, the saved table map)
+    so there's no separate "run mapping" step to remember in the panel."""
+    _find_pbix(name)
+    rdir = OUT_DIR / ex.safe_name(name)
+    layout_path, model_path = rdir / "layout.json", rdir / "model.json"
+    if not layout_path.exists():
+        raise HTTPException(404, f"Run Extract on '{name}' first — there's no layout.json yet.")
+    try:
+        layout = json.loads(layout_path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise HTTPException(500, f"out/{ex.safe_name(name)}/layout.json isn't readable JSON: {e}")
+    model = _load_model(name) if model_path.exists() else {}
+    table_map = _load_table_map(name)
+    rep = semantic.mapping_report(layout, model, table_map)
+    return Response(semantic.render_mapping_report(rep), media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.mapping_report.md"'})
+
+
 @app.get("/reports/{name}/layout.json")
 def download_layout(name: str):
     """The extracted report structure: pages, visuals, positions, fields, theme."""

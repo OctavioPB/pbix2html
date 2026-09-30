@@ -217,9 +217,47 @@ def test_multi_fact_sql_parses_as_teradata():
         sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
 
 
-def test_multi_fact_with_two_values_or_a_table_visual_stays_manual():
-    v = {"projections": {"Values": ["A.Ending"]}}
-    assert S._draft_visual_sql(v, "table", MF_MEASURES, MF_MAP, MF_RELS, MF_PARAMS) is None
+def test_multi_fact_with_two_independent_single_table_values_stays_manual():
+    # Two separate measures, each its own single fact table (not one composite expression
+    # spanning both) — multi_fact only ever resolves one composite value at a time.
+    v = {"projections": {"Values": ["A.Ending", "Dim.name"]}}
+    measures = {**MF_MEASURES, ("A", "Ending"): "SUM(A[n])", ("Dim", "name"): "SUM(Dim[n])"}
+    assert S._draft_visual_sql(v, "table", measures, MF_MAP, MF_RELS, MF_PARAMS) is None
+
+
+# `Grand Total = [A]+[B]` over two unrelated fact tables (arithmetic between measures, no
+# VAR/selection-context involved — that combination is covered separately above).
+GRAND_MEASURES = {("A", "Grand"): "SUM(A[n]) + SUM(B[n])"}
+
+
+def test_multi_fact_composite_measure_drafts_for_a_table_visual_with_categories():
+    v = {"projections": {"Rows": ["Dim.name"], "Values": ["A.Grand"]}}
+    sql, params = S._draft_visual_sql(v, "table", GRAND_MEASURES, MF_MAP, MF_RELS, MF_PARAMS)
+    assert sql.startswith("SELECT DISTINCT dim.name AS name")
+    assert "AS grand\nFROM" in sql                                  # the field's own name, not "value"
+    assert "LEFT JOIN (SELECT dim.name AS k1, SUM(a.n) AS a0" in sql
+    assert "IS NOT NULL" not in sql                                 # blanks stay in the table, unlike a chart
+    assert {"dim_name"} <= set(params)
+
+
+def test_multi_fact_composite_measure_drafts_for_a_matrix_with_two_row_fields():
+    # Two category fields — a chart's arm-joining is capped at two, but a matrix's row
+    # grouping isn't capped at all; here two columns of the same dimension prove it goes
+    # through the "more than 2" path without also hitting the separate, pre-existing
+    # limitation that two categories from *unrelated* dimension tables (joinable only
+    # through the fact) can't be composed for the categories-only outer FROM.
+    v = {"projections": {"Rows": ["Dim.name", "Dim.k"], "Values": ["A.Grand"]}}
+    sql, params = S._draft_visual_sql(v, "matrix", GRAND_MEASURES, MF_MAP, MF_RELS, MF_PARAMS)
+    assert "dim.name AS name" in sql and "dim.k AS k" in sql
+    assert "AS grand\nFROM" in sql
+    assert {"dim_name"} <= set(params)
+
+
+def test_multi_fact_composite_measure_with_no_categories_drafts_for_a_table_visual():
+    v = {"projections": {"Values": ["A.Grand"]}}
+    sql, params = S._draft_visual_sql(v, "table", GRAND_MEASURES, MF_MAP, MF_RELS, MF_PARAMS)
+    assert sql.startswith("SELECT (") and "AS grand\nFROM" in sql
+    assert "CROSS JOIN" in sql
 
 
 # ---- FORMAT with time parts, TIME(), NOW() ----------------------------------------------------

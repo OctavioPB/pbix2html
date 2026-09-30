@@ -1,4 +1,4 @@
-// Slicer widgets (dropdown, list, hierarchy tree, date range). Shared by both templates.
+// Slicer widgets (dropdown, list, tile, hierarchy tree, date range). Shared by both templates.
 // The host supplies: host.interactive, host.get(name), host.set({name: value}), host.options(visualId)
 // (a Promise of {columns, rows}); values are arrays for multi-select parameters, scalars otherwise.
 function slicerWidget(el, v, host) {
@@ -123,6 +123,26 @@ function slicerWidget(el, v, host) {
       const cur = asList(host.get(S.params[0])); inp.value = cur.join(', ');
       inp.addEventListener('change', () => { const parts = inp.value.split(',').map(x => x.trim()).filter(Boolean); host.set({ [S.params[0]]: S.single ? (parts[0] || null) : parts }); });
       el.replaceChildren(inp); return;
+    }
+    if (S.mode === 'tile' && levels === 1) {      // a row of toggle chips, not a dropdown or a checkbox list
+      const wrap = document.createElement('div'); wrap.className = 'sl-tiles';
+      if (!rows) { wrap.textContent = error ? '⚠ ' + error : '…'; }
+      else {
+        const keys = selectedKeys();
+        rows.forEach(r => {
+          const chip = document.createElement('button'); chip.type = 'button';
+          chip.className = 'sl-tile' + (keys.has(keyOf(r)) ? ' on' : '');
+          chip.textContent = String(r[0]); chip.disabled = !host.interactive;
+          chip.addEventListener('click', () => {
+            const on = !keys.has(keyOf(r));
+            const next = new Set(S.single && on ? [] : keys);
+            on ? next.add(keyOf(r)) : next.delete(keyOf(r));
+            commit(next);
+          });
+          wrap.appendChild(chip);
+        });
+      }
+      el.replaceChildren(wrap); return;
     }
     const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'sl-btn';
     btn.textContent = summary(); btn.title = label();

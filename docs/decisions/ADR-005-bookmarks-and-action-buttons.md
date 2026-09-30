@@ -97,8 +97,15 @@ is trivial, add when seen), drill-through buttons.
 ## Consequences
 - Phase 1 removed the overlap on the sample report and 2a made the monthly/historical switch work; 2b makes the view switchers work.
 - Parsing is tied to the classic `Layout`; PBIR stores bookmarks in
-  `Report/definition/bookmarks/*.bookmark.json` — **unverified**, so phase 2 ships for
-  classic first and PBIR is added once a real PBIR sample exists.
+  `Report/definition/bookmarks/*.bookmark.json`. A parser for it was added 2026-09-30
+  (`extract._parse_bookmarks_pbir`) from a documented-but-third-party PBIR bookmark schema
+  (an index file `bookmarks.json` plus one `<id>.bookmark.json` per bookmark, each with
+  `explorationState.activeSection`/`sections[*].visualContainers[*].singleVisual.display.mode`
+  instead of classic's `visualContainerGroups[*].isHidden`) — into the same
+  `{id, name, page, groups, targets, apply_only_to_targets}` shape, so `render._bookmark_action`
+  needs no changes. **Still unverified**: every real PBIR sample seen so far had no bookmarks,
+  so nobody has confirmed this shape (or that a *group's* hidden state in PBIR is carried
+  through `visualContainers` the same way a leaf visual's is) against an actual file.
 - `layout.json` gains two keys; consumers must tolerate their absence (older extracts).
 
 ## Acceptance (against a real report)

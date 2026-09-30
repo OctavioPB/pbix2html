@@ -351,7 +351,7 @@ def test_snapshot_html(fake_pbix, tmp_path):
     assert 'id="v-v1"' in html and 'id="v-v2"' in html and 'id="v-v3"' in html   # a slicer is a widget now
     assert "#0F2B46" in html                                                        # pbix theme
     assert '"kind": "column"' in html                                              # custom reinterpreted
-    (tmp_path / "r.html").write_text(html)
+    (tmp_path / "r.html").write_text(html, encoding="utf-8")
 
 
 def test_unsupported_kind_renders_a_friendly_placeholder_not_a_raw_error():
@@ -565,3 +565,70 @@ def test_parse_bookmarks_reads_group_state_and_targets():
                                      "groups": {"g1": False, "g2": True}, "targets": ["g1"],
                                      "apply_only_to_targets": True}]
     assert parse_bookmarks({}) == []
+
+
+def test_pbir_bookmarks_read_into_the_same_shape_as_classic(tmp_path):
+    """PBIR keys per a documented (unverified — ADR-005) bookmark.json schema: one file per
+    bookmark under Report/definition/bookmarks/, an index listing their ids, each carrying
+    explorationState.sections[*].visualContainers[*].singleVisual.display.mode instead of
+    classic's visualContainerGroups[*].isHidden."""
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    bm = {"name": "b1", "displayName": "By Org", "options": {
+        "targetVisualNames": ["g1"], "applyOnlyToTargetVisuals": True},
+        "explorationState": {"activeSection": "p1", "sections": {"p1": {"visualContainers": {
+            "g1": {"singleVisual": {"display": {"mode": "visible"}}},
+            "g2": {"singleVisual": {"display": {"mode": "hidden"}}}}}}}}
+    pbix = tmp_path / "R.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/definition/report.json", json.dumps({}))
+        z.writestr("Report/definition/pages/pages.json", json.dumps({"pageOrder": ["p1"]}))
+        z.writestr("Report/definition/pages/p1/page.json", json.dumps({"displayName": "P"}))
+        z.writestr("Report/definition/bookmarks/bookmarks.json", json.dumps({"items": [{"name": "b1"}]}))
+        z.writestr("Report/definition/bookmarks/b1.bookmark.json", json.dumps(bm))
+    assert extract_layout(pbix)["bookmarks"] == [{"id": "b1", "name": "By Org", "page": "p1",
+                                                  "groups": {"g1": False, "g2": True}, "targets": ["g1"],
+                                                  "apply_only_to_targets": True}]
+
+
+def test_pbir_group_hidden_flag_is_read_like_classics_ishidden(tmp_path):
+    """PBIR carries a group's hidden state as `isHidden` on the group's own visual.json, same
+    key as a leaf visual — unverified against a real file (every real PBIR sample seen so far
+    had no hidden groups), but it's the same field the PBIR schema already confirms for leaf
+    visuals (test_pbir_filters_hidden_and_custom_visuals)."""
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    pbix = tmp_path / "R.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/definition/report.json", json.dumps({}))
+        z.writestr("Report/definition/pages/pages.json", json.dumps({"pageOrder": ["p1"]}))
+        z.writestr("Report/definition/pages/p1/page.json", json.dumps({"displayName": "P"}))
+        z.writestr("Report/definition/pages/p1/visuals/g1/visual.json", json.dumps({
+            "position": {"x": 0, "y": 0, "width": 10, "height": 10}, "isHidden": True,
+            "visualGroup": {"displayName": "Alt view"}}))
+    g = extract_layout(pbix)["pages"][0]["visuals"][0]
+    assert g["is_group"] is True and g["hidden"] is True and g["title"] == "Alt view"
+
+
+def test_pbir_bookmarks_fall_back_to_the_files_present_without_an_index(tmp_path):
+    import json
+    import zipfile
+
+    from pbix2html.extract import extract_layout
+
+    bm = {"name": "b1", "displayName": "Solo", "explorationState": {"sections": {"p1": {}}}}
+    pbix = tmp_path / "R.pbix"
+    with zipfile.ZipFile(pbix, "w") as z:
+        z.writestr("Report/definition/report.json", json.dumps({}))
+        z.writestr("Report/definition/pages/pages.json", json.dumps({"pageOrder": ["p1"]}))
+        z.writestr("Report/definition/pages/p1/page.json", json.dumps({"displayName": "P"}))
+        z.writestr("Report/definition/bookmarks/b1.bookmark.json", json.dumps(bm))
+    bms = extract_layout(pbix)["bookmarks"]
+    assert bms == [{"id": "b1", "name": "Solo", "page": "p1", "groups": {}, "targets": [],
+                    "apply_only_to_targets": False}]

@@ -119,7 +119,7 @@ def test_slicers_section_lists_params_and_options_per_slicer_visual():
     assert sec["s"]["params"] == ["region"] and sec["s"]["page"] == "P" and "options_sql" in sec["s"]
 
 
-@pytest.mark.parametrize("mode", ["relative", "other", "tile"])
+@pytest.mark.parametrize("mode", ["relative", "other"])
 def test_modes_without_a_widget_are_not_drawn(mode):
     from pbix2html import render
 
@@ -127,6 +127,14 @@ def test_modes_without_a_widget_are_not_drawn(mode):
     assert render._slicer_entry(_slicer("s", ["T.c"], mode=mode), "P", spec, False) is None
     entry = render._slicer_entry(_slicer("s", ["T.c"]), "P", spec, True)
     assert entry["params"] == ["c"] and entry["mode"] == "dropdown" and entry["options_sql"] is None
+
+
+def test_tile_mode_drives_a_plain_widget_like_list_or_dropdown():
+    from pbix2html import render
+
+    spec = type("S", (), {"parameters": {"c": {"from_slicer": "T.c", "pages": ["P"]}}, "raw": {}})()
+    entry = render._slicer_entry(_slicer("s", ["T.c"], mode="tile"), "P", spec, False)
+    assert entry is not None and entry["params"] == ["c"] and entry["mode"] == "tile"
 
 
 def test_snapshot_html_draws_the_widget_embeds_options_and_keeps_it_out_of_the_top_bar(fake_pbix):
@@ -145,6 +153,50 @@ def test_snapshot_html_draws_the_widget_embeds_options_and_keeps_it_out_of_the_t
     spec_json = html.split('id="spec" type="application/json">')[1].split("</script>")[0]
     assert '"slicer": {"mode"' in spec_json
     assert "<label>year" not in html                       # the widget edits it: no duplicate in the top bar
+
+
+def test_tile_slicer_renders_chips_for_the_saved_selection_without_js_errors(fake_pbix, tmp_path):
+    from tests.test_verify import _browser
+
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    from pbix2html.render import render_html
+
+    layout = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    sid = next(v["id"] for p in layout["pages"] for v in p["visuals"] if v["type"] == "slicer")
+    for p in layout["pages"]:
+        for v in p["visuals"]:
+            if v["id"] == sid:
+                v["slicer"]["mode"] = "tile"
+    block = {"columns": ["level1"], "rows": [["2025"], ["2026"]]}
+    html = tmp_path / "r.html"
+    # A snapshot's slicer widgets are read-only by design (ADR-006) — the saved selection (year
+    # 2025, the yaml's default) should still show as the chip already "on", not just render inert.
+    html.write_text(render_html(layout, spec, {"year": 2025}, {}, mode="snapshot", slicer_data={sid: block}),
+                    encoding="utf-8")
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        errors = []
+        pg = br.new_page(viewport={"width": 1280, "height": 800})
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(html.as_uri())
+        pg.wait_for_timeout(300)
+        chips = pg.locator(f"#v-{sid} .sl-tile")
+        count = chips.count()
+        labels = [chips.nth(i).inner_text() for i in range(count)]
+        classes = [chips.nth(i).get_attribute("class") for i in range(count)]
+        disabled = [chips.nth(i).is_disabled() for i in range(count)]
+        br.close()
+    assert not errors
+    assert labels == ["2025", "2026"]
+    assert all(disabled)                                    # read-only in snapshot mode
+    assert "on" in classes[0] and "on" not in classes[1]     # the saved selection (year=2025) shows selected
 
 
 def test_custom_visuals_get_a_standard_meaning():

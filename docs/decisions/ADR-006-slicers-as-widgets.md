@@ -37,8 +37,10 @@ Power BI unless they share a sync group.
 - **Hierarchy selection** is normalised to "fully selected parents" (`p1`) or leaves (`p1` + `p2`):
   picking children of several parents at once yields a superset (`p1 × p2`), because independent
   `IN` predicates cannot express pairs.
-- Range slicers exist for `between` / `before` / `after`; relative-date and tile slicers draw
-  nothing yet. Cross-page slicer *sync of fields* (`fieldChanges`) is not modelled, only grouping.
+- Range slicers exist for `between` / `before` / `after`; relative-date slicers draw nothing yet
+  (2026-09-30: `tile` now draws a row of toggle chips — same plain value parameter as `list`/
+  `dropdown`, only the layout differs). Cross-page slicer *sync of fields* (`fieldChanges`) is not
+  modelled, only grouping.
 - Options are not cascading (a child list doesn't narrow by the parent selection) and are not
   filtered by other slicers, unlike Power BI's "filter the other slicers".
 - Snapshot widgets are read-only; interactivity needs `live` or `hah`.

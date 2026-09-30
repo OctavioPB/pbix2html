@@ -91,8 +91,10 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - [x] **Slicers as real widgets** (`docs/decisions/ADR-006`): dropdown / list / hierarchy tree / date
       range, page- or sync-group-scoped parameters, saved selection as default, `slicers:` in the yaml
       with `options_sql`, and `/reports/{r}/slicers/{visual}` for `live`. Verified in a browser on
-      both reports with a simulated backend (`live` and `hah`). Open: relative-date and tile
-      slicers, cascading options, pair-accurate hierarchy selection, a real Teradata / HAH run.
+      both reports with a simulated backend (`live` and `hah`). `tile` mode now draws a real widget
+      too (2026-09-30: a row of toggle chips, same parameter as `list`/`dropdown`). Open:
+      relative-date slicers, cascading options, pair-accurate hierarchy selection, a real
+      Teradata / HAH run.
 - [x] **`Calendar` (a DAX `CALENDAR(start, end)` table)** is rebuilt on `sys_calendar.calendar`
       (`detect_calendar_tables`; owner-confirmed pattern, e.g. `CALENDAR("2017-01-01", NOW())`),
       together with its calculated columns (`FORMAT`, `YEAR/MONTH/DAY`, `VALUE`, `IF`, `&&`/`||`,
@@ -107,12 +109,23 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
       "04/01/2026" is read as MM/DD/YYYY and noted in the SQL; slicer parameters are named after the
       column only, so two slicers on same-named columns of different tables collide; date-*range*
       slicers (`BETWEEN`) are not modelled, only `IN`.
-- [ ] Composite measures over unrelated fact tables (`Grand Total = [A] + [B] + ...`): one scalar
-      subquery per term instead of a join.
+- [x] Composite measures over unrelated fact tables (`Grand Total = [A] + [B] + ...`) for
+      table/matrix visuals (2026-09-30): `multi_fact` (already used by cards/charts) now also
+      drafts table/matrix, with any number of category fields, keeping blank-measure rows
+      instead of dropping them and naming its column after the measure rather than a chart's
+      synthetic `value`. Still left manual: mixing a composite total with a plain single-table
+      measure in the same table, and two category fields that are only related to each other
+      *through* a fact table (not directly) — see skill `dax-to-teradata-sql`.
 - [ ] DAX with `VAR`/`EOMONTH`/time intelligence (`Projected Monthly Avg Spend`) stays manual.
 - [ ] Two hidden pages are reachable from no button (drill-through? a bookmark?): listed nowhere yet.
-- [ ] PBIR bookmarks and hidden visuals/groups: this file had none, so still unverified.
-- [ ] Mapping report in the panel (only the CLI writes it).
+- [x] PBIR bookmarks (2026-09-30): `extract._parse_bookmarks_pbir` reads
+      `Report/definition/bookmarks/*.bookmark.json` into the same shape `parse_bookmarks`
+      produces for classic (ADR-005). Hidden visuals/groups were already read for PBIR
+      (`isHidden`) — both are still **unverified against a real file**: every real PBIR sample
+      seen so far had neither bookmarks nor hidden groups to check against.
+- [x] Mapping report in the panel (2026-09-30): `GET /reports/{r}/mapping.md` renders it on
+      demand from the already-extracted layout/model/table-map (no separate "run mapping"
+      step), linked from step 1 once Extract has run.
 
 ## Findings from a third real report, composite model (2026-09-29)
 
@@ -210,12 +223,13 @@ Teradata/HAH, which is the actual gate for every "implemented" line above.
   PBIR filter types `Range/Passthrough/Include/Exclude/Tuple/RelativeTime`.
 - Filters not applied: on an aggregate or a measure, relative date, booleans, multi-column `In`, multi-hop.
 - Drill-through navigation with a value from the source page; hidden pages reachable only via `--include-hidden`.
-- Slicers: relative-date and tile modes, cascading options, pair-accurate hierarchy selection (ADR-006).
-- Measures: `CALCULATE` shorthand override vs `FILTER` intersect, table/matrix over several fact tables,
-  time intelligence beyond the recognised idioms.
-- PBIR: bookmarks, hidden visuals and groups unverified on a real file.
-- Mapping report exists only as CLI/markdown, not in the panel; the packaged skill's renderer is a simplified
-  standard-library one (no slicer widgets, buttons, tooltips, 100 % stacked).
+- Slicers: relative-date mode, cascading options, pair-accurate hierarchy selection (ADR-006).
+- Measures: `CALCULATE` shorthand override vs `FILTER` intersect, mixing a composite multi-fact value with
+  a plain measure in the same table/matrix, two category fields related only through a fact table (not
+  directly), time intelligence beyond the recognised idioms.
+- PBIR: bookmarks (now parsed, see ADR-005) and hidden visuals/groups still unverified on a real file.
+- The packaged skill's renderer is a simplified standard-library one (no slicer widgets, buttons, tooltips,
+  100 % stacked) — unlike the main package, which now also surfaces the mapping report in the panel.
 - A table with no relationship path to its visual's tables (`Open Reqs` + `Workday codes`) needs a decision
   from the report owner.
 

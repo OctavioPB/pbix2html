@@ -256,10 +256,12 @@ def _button_css(button: dict | None) -> str | None:
 def _slicer_entry(v: dict, page_name: str | None, spec: ReportSpec, include_sql: bool) -> dict | None:
     """What the template needs to draw a slicer widget: its mode, the parameters it drives (one per
     hierarchy level, or one per range bound) and, for `hah`, the SQL of its values. None when the
-    slicer drives no parameter (e.g. a relative-date slicer, which has no widget yet)."""
+    slicer drives no parameter (e.g. a relative-date slicer, which has no widget yet). `tile` drives
+    a plain value parameter exactly like `list`/`dropdown` — only its on-screen layout differs
+    (slicer.js draws it as a row of toggle chips instead of a list or a dropdown panel)."""
     d = semantic.slicer_descriptor(v)
     names = semantic.slicer_params(v, page_name or "", spec.parameters)
-    if not names or d.get("mode") in ("relative", "other", "tile"):
+    if not names or d.get("mode") in ("relative", "other"):
         return None
     params = spec.parameters
     out = {"mode": d.get("mode"), "params": names, "single": bool(d.get("single")),

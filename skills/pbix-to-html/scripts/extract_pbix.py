@@ -1050,6 +1050,56 @@ def parse_bookmarks(root_config: dict) -> list[dict]:
     return out
 
 
+def _parse_bookmarks_pbir(z: zipfile.ZipFile, names: list[str]) -> list[dict]:
+    """PBIR's `Report/definition/bookmarks/*.bookmark.json`, one file per bookmark, into the
+    same `[{id, name, page, groups, targets, apply_only_to_targets}]` shape `parse_bookmarks`
+    produces for classic — so `render._bookmark_action` needs no changes to consume either.
+
+    **Unverified against a real PBIR file** (ADR-005): every real PBIR sample seen so far had
+    no bookmarks. The shape below (`explorationState.activeSection`/`sections[*].
+    visualContainers[*].singleVisual.display.mode`, `options.targetVisualNames`/
+    `applyOnlyToTargetVisuals`) follows the documented PBIR bookmark schema, by analogy with
+    classic's `explorationState.sections[*].visualContainerGroups[*].isHidden` — a *group*'s own
+    hidden state in PBIR is presumably carried the same way as any other visual's, but that
+    analogy is exactly the part nobody has checked against a real file yet."""
+    prefix = "Report/definition/bookmarks/"
+    index = _pbir_read_json(z, prefix + "bookmarks.json")
+
+    def ids_in(items: Any) -> list[str]:
+        out: list[str] = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name"):
+                out.append(item["name"])
+            out += ids_in(item.get("children"))
+        return out
+
+    ids = ids_in(index.get("items")) if index else []
+    if not ids:
+        ids = sorted({n[len(prefix):-len(".bookmark.json")] for n in names
+                     if n.startswith(prefix) and n.endswith(".bookmark.json") and n != prefix + "bookmarks.json"})
+    out: list[dict] = []
+    for bid in ids:
+        data = _pbir_read_json(z, f"{prefix}{bid}.bookmark.json")
+        if not data.get("name"):
+            continue
+        es = data.get("explorationState") or {}
+        sections = es.get("sections") or {}
+        sid = es.get("activeSection") if es.get("activeSection") in sections else next(iter(sections), None)
+        sec = sections.get(sid) or {}
+        groups: dict[str, bool] = {}
+        for vid, vc in (sec.get("visualContainers") or {}).items():
+            mode = (((vc or {}).get("singleVisual") or {}).get("display") or {}).get("mode")
+            if mode is not None:
+                groups[vid] = mode == "hidden"
+        opts = data.get("options") or {}
+        out.append({"id": data["name"], "name": data.get("displayName"), "page": sid, "groups": groups,
+                    "targets": list(opts.get("targetVisualNames") or []),
+                    "apply_only_to_targets": bool(opts.get("applyOnlyToTargetVisuals"))})
+    return out
+
+
 def parse_page(section: dict) -> dict:
     cfg = loads_maybe(section.get("config", "{}")) or {}
     objects = cfg.get("objects") or {}
@@ -1419,6 +1469,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "pages": [_parse_page_pbir(z, names, pid) for pid in page_order],
         "filters": parse_filters((report_meta.get("filterConfig") or {}).get("filters")),
         "format": "pbir",
+        "bookmarks": _parse_bookmarks_pbir(z, names),
     }
     resolve_theme_markers(result)
     apply_theme_table_styles(result)
