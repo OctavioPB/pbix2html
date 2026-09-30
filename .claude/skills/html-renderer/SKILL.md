@@ -154,3 +154,14 @@ group, and a range slicer (`between`/`before`/`after`) drives `<name>_from` / `<
 from `GET /reports/{report}/slicers/{id}` and a change reloads only the visuals using the changed
 parameters; in `hah` the options run client-side from `options_sql`. The widget code is
 `templates/slicer.js`, shared by both templates (`slicerWidget(el, v, host)`).
+
+## Text fit, tables and font (both templates)
+
+- Default face is Segoe UI (`render._FONT_STACK`); a theme face goes first with Segoe UI behind it. Buttons and inputs inherit it.
+- `fitText` shrinks a title / card value / label that does not fit (titles to 11px, then two lines and "…"; numbers
+  to 9px) instead of cutting it; it re-runs on resize and page change. Do not size cards with `vw`.
+- Table/matrix colours: `style.table_header_bg/fg`, `table_row_bg`, `table_row_bg_alt`, `table_row_fg`, matrix
+  `table_rowhdr_bg/fg`. Read from the visual's `objects` (`columnHeaders`, `values`, `rowHeaders`), else from the
+  theme's `visualStyles` (`extract.apply_theme_table_styles`). `ThemeDataColor` ColorId 2 + 0.6 = #FFBF9A on a
+  #FF5F02 first data colour. Both `report.html.j2` and `report_hah.html.j2` apply them (the main template did not).
+

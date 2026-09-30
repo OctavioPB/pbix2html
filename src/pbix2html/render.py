@@ -23,11 +23,14 @@ log = logging.getLogger(__name__)
 TEMPLATES = Path(__file__).parent / "templates"
 _SLICER_JS = (TEMPLATES / "slicer.js").read_text(encoding="utf-8") if (TEMPLATES / "slicer.js").exists() else ""
 
+# Segoe UI is Power BI's own default face; where it is not installed (Mac, Linux) the closest system faces follow.
+_FONT_STACK = "'Segoe UI', 'Segoe UI Web (West European)', Tahoma, system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+
 # Default Power BI palette (baseTheme with no customization).
 DEFAULT_THEME = {
     "data_colors": ["#118DFF", "#12239E", "#E66C37", "#6B007B", "#E044A7", "#744EC2", "#D9B300", "#D64550"],
     "background": "#FFFFFF", "foreground": "#252423", "muted": "#605E5C", "border": "#E1DFDD",
-    "font_family": "'Segoe UI', system-ui, -apple-system, sans-serif",
+    "font_family": _FONT_STACK,
 }
 
 
@@ -52,8 +55,9 @@ def resolve_theme(layout_theme: dict | None) -> dict:
     # internal alias (its own per-language Segoe UI stack), not a real, installable font
     # name — using it as a CSS font-family resolves to nothing and silently falls back
     # to the browser's serif default instead of Segoe UI. Treat it the same as "segoe".
+    face = face if isinstance(face, str) and re.fullmatch(r"[\w .-]{1,60}", face.strip()) else None   # goes into CSS: plain names only
     if face and not face.lower().startswith(("segoe", "wf_standard-font")):
-        t["font_family"] = f"'{face}', system-ui, sans-serif"
+        t["font_family"] = f"'{face}', {_FONT_STACK}"     # the report's own face first, Segoe UI behind it
     return t
 
 
@@ -137,6 +141,9 @@ def _blend(top: tuple[int, int, int, float], under_hex: str) -> str:
     u = _rgb(under_hex) or (255, 255, 255, 1.0)
     a = top[3]
     return "#%02X%02X%02X" % tuple(round(top[i] * a + u[i] * (1 - a)) for i in range(3))
+
+
+_TABLE_STYLE_KEYS = ("table_header_bg", "table_header_fg", "table_row_bg", "table_row_bg_alt", "table_row_fg", "table_rowhdr_bg", "table_rowhdr_fg")
 
 
 def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict, _depth: int = 0) -> str:
@@ -431,6 +438,17 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 st["background"] = _rgba(st["background"], st["transparency"]) if st["transparency"] < 100 else None
                 if not st["background"]:
                     st.pop("background")
+            if st.pop("line", None) and st.get("background"):
+                st["line_color"] = st.pop("background")      # drawn as a rule, not as a filled box
+                if not _HEX6.match(st["line_color"]):
+                    st.pop("line_color")
+            for k in _TABLE_STYLE_KEYS:                # only plain hex colours reach the template's style attribute
+                if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
+                    st.pop(k)
+            if st.get("table_header_bg") and not st.get("table_header_fg"):
+                st["table_header_fg"] = _readable_fg(st["table_header_bg"], theme) or theme["foreground"]
+            if st.get("table_row_bg") and not st.get("table_row_fg"):
+                st["table_row_fg"] = _readable_fg(st["table_row_bg"], theme) or theme["foreground"]
             entry["style"] = st
             readable = _readable_fg(_backdrop({**v, "btn_css": entry.get("btn_css")}, painted, p.get("background"), theme), theme)
             if entry.get("btn_css") and readable and "--fg:" not in entry["btn_css"]:
@@ -438,6 +456,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             entry["title_css"] = _title_css(v.get("style") or {}, readable)
             value_color = (v.get("style") or {}).get("value_color") or readable       # a card's number
             entry["value_css"] = f"color:{value_color}" if value_color and _rgb(value_color) else ''
+            vsize = (v.get("style") or {}).get("value_size")
+            if isinstance(vsize, (int, float)) and 1 <= vsize <= 200:       # pt → px, scaled with the page like everything else
+                entry["value_css"] += (";" if entry["value_css"] else "") + f"font-size:calc({round(vsize * 4 / 3, 1)}px * var(--scale, 1))"
             entry["fg"] = readable                      # default text colour of the visual's own content (slicer widget)
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses

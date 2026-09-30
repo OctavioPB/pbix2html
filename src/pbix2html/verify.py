@@ -246,6 +246,20 @@ def _contrast_findings(texts: list[dict], stats: list[dict | None], page: str, b
     return out
 
 
+def _known_browsers() -> list[str]:
+    """Where a Chrome / Edge / Chromium usually lives, for machines where Playwright's own download is missing
+    (the usual case on a locked-down Windows PC, where Edge is always installed)."""
+    import glob
+    roots = [os.getenv(k) for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    win = [os.path.join(r, *rest) for r in roots if r for rest in (
+        ("Microsoft", "Edge", "Application", "msedge.exe"), ("Google", "Chrome", "Application", "chrome.exe"))]
+    pw = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "/opt/pw-browsers"
+    found = sorted(glob.glob(os.path.join(pw, "chromium-*", "chrome-linux", "chrome")))
+    posix = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome",
+             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    return [c for c in [*win, *found, *posix] if os.path.exists(c)]
+
+
 def _launch(p, browser: str | None):
     """A Chromium: an explicit path, then Playwright's own, then an installed Chrome / Edge."""
     errors = []
@@ -254,6 +268,7 @@ def _launch(p, browser: str | None):
     if path:
         attempts.append({"executable_path": path})
     attempts += [{}, {"channel": "chrome"}, {"channel": "msedge"}]
+    attempts += [{"executable_path": c} for c in _known_browsers()]
     for kw in attempts:
         try:
             return p.chromium.launch(**kw), (kw.get("executable_path") or kw.get("channel") or "playwright chromium")
@@ -367,6 +382,22 @@ def verify_html(html_path: Path, out_dir: Path | None = None, *, static_only: bo
         json.dumps({"report": spec.get("report"), "browser": res.browser, "findings": [asdict(f) for f in res.findings]},
                    ensure_ascii=False, indent=2), encoding="utf-8")
     return res
+
+
+def verify_after_convert(html_path: Path, mode: str) -> tuple[list[str], VerifyResult | None]:
+    """The check `convert` runs on every HTML it writes (ADR-009): the lines to show the user, and the result.
+    A `live` or `hah` page has no data until its service answers, so only the static checks run there (a
+    rendered run would report every visual as failed). Never raises: a verifier problem must not lose the HTML."""
+    try:
+        res = verify_html(html_path, static_only=mode != "snapshot")
+    except Exception as e:  # noqa: BLE001
+        return [f"HTML check couldn't run: {type(e).__name__}: {e}"], None
+    head = (f"HTML check: {res.count('error')} error(s), {res.count('warn')} warning(s), {res.count('info')} note(s)"
+            f" [rendered checks: {res.browser or 'not run for ' + mode + ' mode'}]")
+    lines = [head] + [f"  {f.severity.upper():5} {f.page} / {f.title or f.kind or ''} [{f.rule}] {f.message}"
+                      for f in res.findings if f.severity != "info"][:15]
+    lines.append(f"  report: {res.report}")
+    return lines, res
 
 
 _ICON = {"error": "🔴", "warn": "🟠", "info": "🔵"}

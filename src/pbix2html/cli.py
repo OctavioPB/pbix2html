@@ -138,6 +138,10 @@ def cmd_convert(args):
     n_ok = sum(1 for d in (data or {}).values() if d.get("rows")) if data else 0
     n_err = sum(1 for d in (data or {}).values() if d.get("error")) if data else 0
     print(f"HTML: {out}  ({args.mode}; visuals with data: {n_ok}; errors: {n_err})")
+    if not args.no_verify:
+        from . import verify
+        for line in verify.verify_after_convert(out, args.mode)[0]:
+            print(line)
 
 
 def cmd_gui(args):
@@ -195,6 +199,7 @@ def main(argv=None) -> int:
     p.add_argument("--theme", help="path to a theme JSON overriding the extracted one "
                                     "(default: metrics/<report>.theme.json if it exists)")
     p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--no-verify", action="store_true", help="skip the HTML check that normally runs after converting (ADR-009)")
     p.add_argument("--include-hidden", action="store_true")
     p.set_defaults(fn=cmd_convert)
 
