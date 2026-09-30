@@ -550,6 +550,13 @@ def _style_with_fill(style: dict, objects: dict) -> dict:
         if color:
             style["value_color"] = color
             break
+    # ... its size in points, display unit (1 none, 1000 thousands, 1000000 millions...; 0 auto) and decimals
+    for name in ("labels", "calloutValue"):
+        for key, prop, pattern in (("value_size", "fontSize", r"\d+(\.\d+)?"), ("value_units", "labelDisplayUnits", r"\d+"),
+                                   ("value_decimals", "labelPrecision", r"\d+")):
+            raw = _object_text(objects, name, prop)
+            if key not in style and raw and re.fullmatch(r"\s*" + pattern + r"[DL]?\s*", raw):
+                style[key] = float(raw.strip().rstrip("DL"))
     return style
 
 

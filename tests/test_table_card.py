@@ -97,3 +97,17 @@ def test_font_stack_reaches_the_css_unescaped_and_dropdown_sits_above_every_visu
     assert "--font: 'Segoe UI'," in html and "&#39;" not in html.split("</style>")[0]
     assert ".sl-panel { position: fixed; z-index: 2147483000;" in html            # Power BI z values reach 20001
     assert resolve_theme({"custom_json": {"fontFamily": "x;}</style>"}})["font_family"] == _FONT_STACK
+
+
+def test_card_value_size_units_and_decimals_are_read_and_rendered(fake_pbix):
+    lit = lambda v: {"expr": {"Literal": {"Value": v}}}                                   # noqa: E731
+    objects = {"labels": [{"properties": {"fontSize": lit("17D"), "labelDisplayUnits": lit("1D"), "labelPrecision": lit("0L")}}]}
+    st = ex._style_with_fill({}, objects)
+    assert (st["value_size"], st["value_units"], st["value_decimals"]) == (17.0, 1.0, 0.0)
+    assert "value_size" not in ex._style_with_fill({}, {"labels": [{"properties": {"fontSize": lit("'big;}'")}}]})
+    layout = ex.extract_layout(fake_pbix)
+    base = layout["pages"][0]
+    card = {**base["visuals"][0], "id": "c", "type": "card", "style": st}
+    spec = semantic.load("Executive_Dashboard")
+    html = render_html({**layout, "pages": [{**base, "visuals": [card]}]}, spec, {}, None, mode="live")
+    assert "font-size:calc(22.7px * var(--scale, 1))" in html and 'data-w="' in html

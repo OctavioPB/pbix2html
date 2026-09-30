@@ -456,6 +456,9 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             entry["title_css"] = _title_css(v.get("style") or {}, readable)
             value_color = (v.get("style") or {}).get("value_color") or readable       # a card's number
             entry["value_css"] = f"color:{value_color}" if value_color and _rgb(value_color) else ''
+            vsize = (v.get("style") or {}).get("value_size")
+            if isinstance(vsize, (int, float)) and 1 <= vsize <= 200:       # pt → px, scaled with the page like everything else
+                entry["value_css"] += (";" if entry["value_css"] else "") + f"font-size:calc({round(vsize * 4 / 3, 1)}px * var(--scale, 1))"
             entry["fg"] = readable                      # default text colour of the visual's own content (slicer widget)
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses

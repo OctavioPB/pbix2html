@@ -118,7 +118,7 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
+<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
   <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: 1px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}">
@@ -219,6 +219,18 @@
     if (Math.abs(v) >= 1e4) return (v / 1e3).toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' k';
     return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
   };
+  // A card's number as the report formats it: display unit (1 none, 1000 K, 1000000 M, 1e9 bn, 1e12 T; 0/unset auto)
+  // and decimals. Without either it falls back to fmt().
+  const UNITS = { 1000: ' K', 1e6: ' M', 1e9: ' bn', 1e12: ' T' };
+  const fmtCard = (v, x) => {
+    const st = v.style || {};
+    if (typeof x !== 'number' || (st.value_units === undefined && st.value_decimals === undefined) || (v.format.value || '').includes('%')) return fmt(x, v.format.value);
+    let u = st.value_units, div = 1;
+    if (!u) { const a = Math.abs(x); u = a >= 1e12 ? 1e12 : a >= 1e9 ? 1e9 : a >= 1e6 ? 1e6 : a >= 1e3 ? 1000 : 1; }
+    if (u > 1) div = u;
+    const d = Math.min(Math.max(st.value_decimals === undefined ? (div > 1 ? 1 : 0) : st.value_decimals, 0), 10);
+    return (x / div).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) + (UNITS[div] || '');
+  };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -242,6 +254,7 @@
   // absolute while the page here scales with the window, so a title or a big number that fit at design size
   // would otherwise be truncated on a narrower screen.
   function fitText(vis) {
+    scalePage(vis.closest('.page'));
     vis.querySelectorAll('.title, .subtitle, .card .value, .card .label, .kpi .target').forEach(n => {
       if (n.dataset.fs === undefined) n.dataset.fs = n.style.fontSize || '';
       n.style.fontSize = n.dataset.fs; n.classList.remove('wrap');
@@ -252,19 +265,21 @@
       if (title && over()) n.classList.add('wrap');          // still too long: two lines, then "…"
     });
   }
-  const fitAll = () => document.querySelectorAll('.visual').forEach(fitText);
+  // Power BI sizes are px at the page's design width: --scale is how much the page is shrunk or grown here
+  const scalePage = pg => { if (pg && pg.clientWidth) pg.style.setProperty('--scale', (pg.clientWidth / (parseFloat(pg.dataset.w) || pg.clientWidth)).toFixed(4)); };
+  const fitAll = () => { document.querySelectorAll('.visual').forEach(fitText); };
 
   // ---------- renderers (same contract as report.html.j2) ----------
   const R = {
     card(el, v, b) {
       const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
-      el.innerHTML = `<div class="card"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmtCard(v, r[vi])}</div>` +
         (li >= 0 && r[li] ? `<div class="label">${r[li]}</div>` : '') + `</div>`;
     },
     kpi(el, v, b) {
       const r = b.rows[0] || []; const vi = col(b, 'value'), ti = col(b, 'target');
       const delta = (ti >= 0 && r[ti]) ? (r[vi] - r[ti]) / r[ti] : null;
-      el.innerHTML = `<div class="card kpi"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card kpi"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmtCard(v, r[vi])}</div>` +
         (ti >= 0 ? `<div class="target">Target ${fmt(r[ti], v.format.value)}${delta !== null ? ' · ' + fmt(delta, '%') : ''}</div>` : '') + `</div>`;
     },
     multicard(el, v, b) {
