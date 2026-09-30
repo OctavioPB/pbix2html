@@ -106,3 +106,34 @@ def test_colours_by_series_value_column_alignment_and_grid_lines():
     assert ex._col_align(tbl, ["T.a", "T.b"]) == [None, "center"] and ex._col_align({}, ["T.a"]) == []
     g = ex._table_style(tbl)
     assert g["table_grid_h"] is False and g["table_grid_v"] is True and g["table_grid_v_weight"] == 5.0
+
+
+def test_theme_visual_styles_are_inherited_unless_the_visual_says_otherwise():
+    theme = {"custom_json": {"visualStyles": {
+        "*": {"*": {"border": [{"show": True, "color": {"solid": {"color": "#E1E1E1"}}, "radius": 12}],
+                    "background": [{"show": True, "color": {"solid": {"color": "#FFFFFF"}}, "transparency": 0}],
+                    "title": [{"show": True, "fontFamily": "Segoe UI Semibold", "fontSize": 14, "fontColor": {"solid": {"color": "#00233C"}}, "alignment": "Left"}]}},
+        "tableEx": {"*": {"total": [{"fontSize": 12}], "values": [{"backColor": {"solid": {"color": "#FFBF9A"}},
+                                                                    "backColorAlternate": {"solid": {"color": "#FFFFFF"}}}]}}}}}
+    layout = {"theme": theme, "pages": [{"visuals": [
+        {"type": "columnChart", "style": {}},
+        {"type": "slicer", "style": {"background_off": True, "border_color": "#111111", "border": True}},
+        {"type": "tableEx", "style": {}},
+        {"type": "image", "style": {}}]}]}
+    ex.apply_theme_visual_styles(layout)
+    chart, slicer, table, image = (v["style"] for v in layout["pages"][0]["visuals"])
+    assert chart["border_radius"] == 12.0 and chart["border_color"] == "#E1E1E1" and chart["background"] == "#FFFFFF"
+    assert chart["title_family"] == "Segoe UI Semibold" and chart["title_size"] == 14.0 and chart["title_align"] == "left"
+    assert "background" not in slicer and slicer["border_color"] == "#111111"     # its own "off" and its own colour win
+    assert table["table_row_bg"] == "#FFBF9A" and table["table_row_bg_alt"] == "#FFFFFF"
+    assert image == {}                                                              # decoration keeps what it says itself
+
+
+def test_chart_measure_fields_carry_the_caption_the_report_shows():
+    assert ex._y_field("Sum(AI Studio Mnthly.ttl)", "AI Studio Node Pool Units") == {
+        "entity": "AI Studio Mnthly", "prop": "ttl", "name": "AI Studio Node Pool Units", "ref": "Sum(AI Studio Mnthly.ttl)"}
+    assert ex._y_field("Aggregations.Unstructured Total", None)["prop"] == "Unstructured Total"
+    vis = {"query": {"queryState": {"Y": {"projections": [{"queryRef": "Sum(T.a)", "displayName": "A"}, {"queryRef": "T.m", "nativeQueryRef": "M"}]}}}}
+    assert [f["name"] for f in ex._y_fields_pbir(vis)] == ["A", "M"]
+    sv = {"projections": {"Y": [{"queryRef": "Sum(T.a)"}]}, "prototypeQuery": {"Select": [{"Name": "Sum(T.a)", "NativeReferenceName": "Total A"}]}}
+    assert ex._y_fields_classic(sv)[0]["name"] == "Total A"

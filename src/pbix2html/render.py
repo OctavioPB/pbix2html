@@ -419,6 +419,8 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
                 "cond_formats": v.get("cond_formats") or [], "n_fields": v.get("n_fields"),
                 "y_refs": [r for r in ((v.get("projections") or {}).get("Y") or []) if isinstance(r, str)],
+                "y_fields": [{k: str(f.get(k) or "")[:200] for k in ("entity", "prop", "name", "ref")}
+                             for f in (v.get("y_fields") or []) if isinstance(f, dict)],
                 "col_align": [a if a in ("left", "center", "right") else None for a in (v.get("col_align") or [])],
                 "stacked": "stacked" in v["type"].lower(),
                 "percent": v["type"].lower().startswith("hundredpercent"),

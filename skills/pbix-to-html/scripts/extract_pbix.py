@@ -370,6 +370,8 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     # A background that is switched off (`show: false`) keeps its colour and transparency in the file but is not
     # drawn: reading them anyway put a half-transparent black box behind every slicer on a dark panel.
     background_on = _object_flag(vc_objects, "background") is not False
+    if not background_on:
+        style["background_off"] = True            # explicit: a theme default must not bring a fill back
     background = _object_color(vc_objects, "background", theme_colors=theme_colors) if background_on else None
     if background:
         style["background"] = background
@@ -564,6 +566,39 @@ def _flat_refs_pbir(vis: dict) -> list[str]:
     return [p.get("queryRef") for role in qs.values() for p in ((role or {}).get("projections") or [])]
 
 
+def _y_field(ref: str, name: str | None) -> dict | None:
+    """One measure of a chart's Y well as {entity, prop, name, ref}: `entity`/`prop` are how the drafted SQL labels the
+    series (the column, or `Entity: column` when two measures share it), `name` is the caption the report shows."""
+    if not isinstance(ref, str) or not ref:
+        return None
+    m = re.match(r"^\w+\((.*)\)$", ref)
+    inner = m.group(1) if m else ref
+    entity, _, prop = inner.rpartition(".")
+    return {"entity": entity, "prop": prop or inner, "name": name or prop or inner, "ref": ref}
+
+
+def _y_fields_classic(sv: dict) -> list[dict]:
+    names = {s.get("Name"): s.get("NativeReferenceName") for s in ((sv.get("prototypeQuery") or {}).get("Select") or [])}
+    out = []
+    for role in ("Y", "Y2"):
+        for p in (sv.get("projections") or {}).get(role) or []:
+            f = _y_field(p.get("queryRef"), names.get(p.get("queryRef"))) if isinstance(p, dict) else None
+            if f:
+                out.append(f)
+    return out
+
+
+def _y_fields_pbir(vis: dict) -> list[dict]:
+    qs = ((vis.get("query") or {}).get("queryState")) or {}
+    out = []
+    for role in ("Y", "Y2"):
+        for p in ((qs.get(role) or {}).get("projections") or []):
+            f = _y_field(p.get("queryRef"), p.get("displayName") or p.get("nativeQueryRef"))
+            if f:
+                out.append(f)
+    return out
+
+
 def _header_names_classic(sv: dict) -> list[str] | None:
     """A flat table's column captions in field-well order, as the report names them
     (`prototypeQuery.Select[].NativeReferenceName`); None unless every column has one."""
@@ -596,6 +631,12 @@ def _table_style(objects: dict) -> dict:
         colour = _object_color(objects, obj, prop)
         if colour:
             style[key] = colour
+    # a theme file names the banding `backColor` / `backColorAlternate`; a visual's own objects `...Primary` / `...Secondary`
+    for key, (obj, prop) in (("table_row_bg", ("values", "backColor")), ("table_row_bg_alt", ("values", "backColorAlternate"))):
+        if key not in style:
+            colour = _object_color(objects, obj, prop)
+            if colour:
+                style[key] = colour
     # type: header/row font size (pt), header alignment and weight, from the same two objects
     for key, obj, prop in (("table_header_size", "columnHeaders", "fontSize"), ("table_row_size", "values", "fontSize")):
         n = _lit_number(_object_text(objects, obj, prop))
@@ -637,6 +678,66 @@ _TABLE_COLOR_KEYS = {
     "table_rowhdr_bg": ("rowHeaders", "backColor"), "table_rowhdr_fg": ("rowHeaders", "fontColor"),
     "table_grid_h_color": ("grid", "gridHorizontalColor"), "table_grid_v_color": ("grid", "gridVerticalColor"),
 }
+
+
+def _theme_value(v: Any) -> Any:
+    """A plain theme-file value as the expression shape a visual's own `objects` use, so one parser reads both."""
+    if isinstance(v, bool):
+        return {"expr": {"Literal": {"Value": "true" if v else "false"}}}
+    if isinstance(v, (int, float)):
+        return {"expr": {"Literal": {"Value": f"{v}D"}}}
+    if isinstance(v, str):
+        return {"expr": {"Literal": {"Value": "'" + v.replace("'", "''") + "'"}}}
+    if isinstance(v, dict) and isinstance(((v.get("solid") or {}).get("color")), str):
+        return {"solid": {"color": {"expr": {"Literal": {"Value": "'" + v["solid"]["color"] + "'"}}}}}
+    return v
+
+
+def _theme_objects(groups: dict) -> dict:
+    """`visualStyles[type]["*"]` ({group: [ {prop: value} ]}) → the `objects` shape (`{group: [{properties: {...}}]}`)."""
+    out: dict[str, list] = {}
+    for group, entries in (groups or {}).items():
+        if not isinstance(entries, list):
+            continue
+        out[group] = [{"properties": {k: _theme_value(val) for k, val in e.items() if not k.startswith("$")}}
+                      for e in entries if isinstance(e, dict) and not e.get("$id")]
+    return out
+
+
+# the visuals whose frame and type the theme styles by default; a shape, image or text box is decoration and keeps
+# what it says itself (a theme background on a logo would put a white box behind it)
+_THEMED_SKIP = {"textbox", "image", "shape", "basicShape", "actionButton", "__group__", "dynamicTooltip"}
+
+
+def apply_theme_visual_styles(layout: dict) -> None:
+    """A visual that says nothing about its frame, title, table or chart formatting inherits the theme's
+    `visualStyles` (`*` for every visual, then its own type on top): the border colour and radius, the title's
+    face, size, colour and alignment, a table's header and banding, a chart's labels and axes. Only keys the
+    visual did not set itself are filled, and an explicit "off" (`background_off`) is respected."""
+    vs = ((layout.get("theme") or {}).get("custom_json") or {}).get("visualStyles") or {}
+    if not vs:
+        return
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            vtype = v.get("type") or ""
+            if vtype in _THEMED_SKIP or v.get("is_group") or not isinstance(v.get("style"), dict):
+                continue
+            groups = {**((vs.get("*") or {}).get("*") or {}), **((vs.get(vtype) or {}).get("*") or {})}
+            if not groups:
+                continue
+            objs = _theme_objects(groups)
+            derived = container_style(objs)
+            if vtype in _TABLE_KINDS:
+                derived.update(_table_style(objs))
+            if "Chart" in vtype:
+                derived.update(_chart_style(objs))
+            own = v["style"]
+            if own.get("background") or own.get("background_off"):
+                derived.pop("background", None)
+                derived.pop("transparency", None)
+            derived.pop("background_off", None)
+            for key, val in derived.items():
+                own.setdefault(key, val)
 
 
 def apply_theme_table_styles(layout: dict) -> None:
@@ -1137,6 +1238,7 @@ def _parse_visual(vc: dict) -> dict:
         "has_drill_other_visuals": bool(sv.get("drillFilterOtherVisuals")),
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
         "header_names": _header_names_classic(sv),
+        "y_fields": _y_fields_classic(sv) if "Chart" in vtype else [],
         "cond_formats": _cond_formats(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "n_fields": len(_flat_refs_classic(sv)) if vtype in _TABLE_KINDS else None,
         "col_align": _col_align(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
@@ -1518,6 +1620,7 @@ def extract_layout(pbix: Path) -> dict:
         }
         resolve_theme_markers(result)
         apply_theme_table_styles(result)
+        apply_theme_visual_styles(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
 
@@ -1699,6 +1802,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "header_names": _header_names_pbir(vis),
+            "y_fields": _y_fields_pbir(vis) if "Chart" in vtype else [],
             "cond_formats": _cond_formats(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "n_fields": len(_flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else None,
             "col_align": _col_align(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
@@ -1811,6 +1915,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
     }
     resolve_theme_markers(result)
     apply_theme_table_styles(result)
+    apply_theme_visual_styles(result)
     embed_image_resources(z, result)
     return result
 
