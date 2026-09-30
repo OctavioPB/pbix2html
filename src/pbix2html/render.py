@@ -143,7 +143,7 @@ def _blend(top: tuple[int, int, int, float], under_hex: str) -> str:
     return "#%02X%02X%02X" % tuple(round(top[i] * a + u[i] * (1 - a)) for i in range(3))
 
 
-_TABLE_STYLE_KEYS = ("table_header_bg", "table_header_fg", "table_row_bg", "table_row_bg_alt", "table_row_fg", "table_rowhdr_bg", "table_rowhdr_fg")
+_TABLE_STYLE_KEYS = ("table_grid_h_color", "table_grid_v_color", "table_header_bg", "table_header_fg", "table_row_bg", "table_row_bg_alt", "table_row_fg", "table_rowhdr_bg", "table_rowhdr_fg")
 
 
 def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict, _depth: int = 0) -> str:
@@ -418,6 +418,8 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
                 "cond_formats": v.get("cond_formats") or [], "n_fields": v.get("n_fields"),
+                "y_refs": [r for r in ((v.get("projections") or {}).get("Y") or []) if isinstance(r, str)],
+                "col_align": [a if a in ("left", "center", "right") else None for a in (v.get("col_align") or [])],
                 "stacked": "stacked" in v["type"].lower(),
                 "percent": v["type"].lower().startswith("hundredpercent"),
                 "area": "area" in v["type"].lower(),
@@ -459,7 +461,12 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
                     st.pop(k)
             if isinstance(st.get("series_colors"), dict):
-                st["series_colors"] = [c for c in st["series_colors"].values() if isinstance(c, str) and _HEX6.match(c)]
+                st["series_colors"] = {str(k): c for k, c in st["series_colors"].items() if isinstance(c, str) and _HEX6.match(c)}
+            if isinstance(st.get("value_colors"), dict):
+                st["value_colors"] = {str(k): c for k, c in st["value_colors"].items() if isinstance(c, str) and _HEX6.match(c)}
+            for k in ("table_grid_h_weight", "table_grid_v_weight"):
+                if k in st and not (isinstance(st[k], (int, float)) and 0 <= st[k] <= 20):
+                    st.pop(k)
             for k in ("table_header_size", "table_row_size"):
                 if k in st and not (isinstance(st[k], (int, float)) and 1 <= st[k] <= 100):
                     st.pop(k)

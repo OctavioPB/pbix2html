@@ -252,6 +252,10 @@ def resolve_theme_markers(layout: dict) -> None:
                 fix(style, "labels_color")
                 for meta in list((style.get("series_colors") or {})):
                     fix(style["series_colors"], meta)
+                for meta in list((style.get("value_colors") or {})):
+                    fix(style["value_colors"], meta)
+                fix(style, "table_grid_h_color")
+                fix(style, "table_grid_v_color")
                 if "series_colors" in style and not style["series_colors"]:
                     style.pop("series_colors")
             if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
@@ -415,18 +419,28 @@ def _chart_style(objects: dict) -> dict:
     default. Series colours are keyed by the field's queryRef (`selector.metadata`)."""
     st: dict[str, Any] = {}
     point: dict[str, str] = {}
+    by_value: dict[str, str] = {}
     for entry in (objects or {}).get("dataPoint") or []:
         props = (entry or {}).get("properties") or {}
         colour = literal_color((((props.get("fill") or {}).get("solid") or {}).get("color") or {}).get("expr"))
         if not colour:
             continue
-        meta = ((entry.get("selector") or {}).get("metadata"))
+        sel = entry.get("selector") or {}
+        meta = sel.get("metadata")
+        scope = next((((d or {}).get("scopeId") or {}).get("Comparison") for d in (sel.get("data") or [])
+                      if (d or {}).get("scopeId")), None)
         if meta:
             point.setdefault(meta, colour)
-        elif not (entry.get("selector") or {}).get("data"):
+        elif scope is not None:                 # a colour for one value of the series / category field
+            text = literal_to_text((scope.get("Right") or {}))
+            if text:
+                by_value.setdefault(text[:100], colour)
+        elif not sel.get("data"):
             st.setdefault("point_color", colour)
     if point:
         st["series_colors"] = point
+    if by_value:
+        st["value_colors"] = by_value
     if _object_flag(objects, "labels") is True:
         st["labels"] = True
         for key, prop in (("labels_size", "fontSize"), ("labels_units", "labelDisplayUnits"), ("labels_precision", "labelPrecision")):
@@ -593,7 +607,26 @@ def _table_style(objects: dict) -> dict:
     bold = _object_flag(objects, "columnHeaders", "bold")
     if bold is not None:
         style["table_header_bold"] = bold
+    # grid lines: each direction on/off, weight (px) and colour
+    for key, prop in (("table_grid_h", "gridHorizontal"), ("table_grid_v", "gridVertical")):
+        flag = _object_flag(objects, "grid", prop)
+        if flag is not None:
+            style[key] = flag
+        weight = _lit_number(_object_text(objects, "grid", prop + "Weight"))
+        if weight is not None:
+            style[key + "_weight"] = weight
     return style
+
+
+def _col_align(objects: dict, refs: list[str]) -> list[str | None]:
+    """Per-column alignment of a table's values (`objects.columnFormatting`, selector = the field), by field position."""
+    out: list[str | None] = [None] * len(refs)
+    for entry in (objects or {}).get("columnFormatting") or []:
+        meta = ((entry or {}).get("selector") or {}).get("metadata")
+        align = (_object_text({"x": [entry]}, "x", "alignment") or "").strip().lower()
+        if meta in refs and align in ("left", "center", "right"):
+            out[refs.index(meta)] = align
+    return out if any(out) else []
 
 
 # style key → (formatting object, property) — also where a theme's `visualStyles` keeps the same colours
@@ -602,6 +635,7 @@ _TABLE_COLOR_KEYS = {
     "table_row_bg": ("values", "backColorPrimary"), "table_row_bg_alt": ("values", "backColorSecondary"),
     "table_row_fg": ("values", "fontColorPrimary"),
     "table_rowhdr_bg": ("rowHeaders", "backColor"), "table_rowhdr_fg": ("rowHeaders", "fontColor"),
+    "table_grid_h_color": ("grid", "gridHorizontalColor"), "table_grid_v_color": ("grid", "gridVerticalColor"),
 }
 
 
@@ -1105,6 +1139,7 @@ def _parse_visual(vc: dict) -> dict:
         "header_names": _header_names_classic(sv),
         "cond_formats": _cond_formats(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "n_fields": len(_flat_refs_classic(sv)) if vtype in _TABLE_KINDS else None,
+        "col_align": _col_align(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": {**_style_with_fill(container_style(vco), sv.get("objects") or {}),
@@ -1666,6 +1701,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "header_names": _header_names_pbir(vis),
             "cond_formats": _cond_formats(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "n_fields": len(_flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else None,
+            "col_align": _col_align(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
             "texts": _pbir_texts(vco, vis),

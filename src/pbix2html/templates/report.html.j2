@@ -43,13 +43,14 @@
   .multicard .v { text-align: right; font-weight: 600; }
   .tablewrap { overflow: auto; height: 100%; }
   table { border-collapse: collapse; width: 100%; font-size: .8rem; }
-  th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th, td { padding: .25rem .5rem; border-bottom: var(--gh, 1px solid var(--border)); text-align: left; white-space: nowrap; }
   th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: var(--th-fw, 600); font-size: var(--th-fs, inherit); }
   td { font-size: var(--tr-fs, inherit); }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
   .tablewrap.rh td:first-child { background: var(--rh-bg); color: var(--rh-fg, inherit); font-weight: 600; }
   tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th + th, td + td { border-left: var(--gv, none); }
   th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
@@ -270,6 +271,7 @@
     table(el, v, b) {
       const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
       const applyCond = {}, colVals = {};
+      const ca = i => (v.col_align && v.n_fields === b.columns.length && v.col_align[i]) ? ` style="text-align:${v.col_align[i]}"` : '';
       if (v.cond_formats && v.cond_formats.length && v.n_fields === b.columns.length) v.cond_formats.forEach(c => { (applyCond[c.col] = applyCond[c.col] || []).push(c); colVals[c.col] = b.rows.map(r => r[c.col]).filter(n => typeof n === 'number'); });
       const st = v.style || {};
       const vars = [
@@ -278,14 +280,16 @@
         st.table_row_fg && `--tr-fg:${st.table_row_fg}`,
         st.table_header_size && `--th-fs:calc(${(st.table_header_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`, st.table_row_size && `--tr-fs:calc(${(st.table_row_size * 4 / 3).toFixed(1)}px * var(--scale, 1))`,
         st.table_header_align && `--th-ta:${st.table_header_align}`, st.table_header_bold !== undefined && `--th-fw:${st.table_header_bold ? 700 : 400}`,
+        st.table_grid_h === false ? '--gh:none' : (st.table_grid_h_color || st.table_grid_h_weight) && `--gh:${st.table_grid_h_weight || 1}px solid ${st.table_grid_h_color || 'var(--border)'}`,
+        st.table_grid_v && `--gv:${st.table_grid_v_weight || 1}px solid ${st.table_grid_v_color || '#E1E1E1'}`,
         st.table_rowhdr_bg && `--rh-bg:${st.table_rowhdr_bg}`, st.table_rowhdr_fg && `--rh-fg:${st.table_rowhdr_fg}`,
       ].filter(Boolean).join(';');
       el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
-        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || (v.header_names && v.header_names.length === b.columns.length ? v.header_names[i] : c)}</th>`).join('') + '</tr></thead><tbody>' +
+        b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}"${ca(i)}>${v.headers?.[c] || (v.header_names && v.header_names.length === b.columns.length ? v.header_names[i] : c)}</th>`).join('') + '</tr></thead><tbody>' +
         b.rows.map(r => '<tr>' + r.map((x, i) => {
           const cf = applyCond[i] ? condCell(applyCond[i], colVals[i], x) : {};
           const ic = cf.icon ? iconOf(cf.icon) : null;
-          const style = [cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
+          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
           const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
           return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
         }).join('') + '</tr>').join('') +
@@ -340,9 +344,10 @@
     const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
     const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };
     const cs = v.style || {};
-    // the report's own colours: one fill for every bar (`point_color`), or one per series when it names as many
-    const palette = cs.series_colors && cs.series_colors.length >= groups.size ? cs.series_colors : null;
-    const colorOf = i => palette ? palette[i] : (cs.point_color && groups.size === 1 ? cs.point_color : null);
+    // the report's own colours: per value of the series/category field (`value_colors`), per measure (`series_colors`,
+    // keyed by the field in the Y well, in well order = series order), else one fill for every bar (`point_color`)
+    const vc = cs.value_colors || {}, sc = cs.series_colors || {}, yr = v.y_refs || [];
+    const colorOf = (i, name) => vc[name] || (yr[i] && sc[yr[i]]) || (cs.point_color && (groups.size === 1 || yr.some(r => sc[r])) ? cs.point_color : null);
     const labelPos = horizontal ? { OutsideEnd: 'right', InsideEnd: 'insideRight', InsideCenter: 'inside', InsideBase: 'insideLeft' }
                                 : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
     const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
@@ -351,9 +356,10 @@
       formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
     const ser = [...groups.entries()].map(([name, m], i) => ({
       name, type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
-      data: cats.map((c, i) => val(m, c, i)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? (colorOf(i) ? { color: colorOf(i) } : {}) : undefined, smooth: false, label,
-      ...(colorOf(i) ? { itemStyle: { color: colorOf(i) }, lineStyle: { color: colorOf(i) } } : {}),
+      // a colour the report gave to one value of the category field recolours that bar (single series only)
+      data: cats.map((c, k) => groups.size === 1 && vc[c] ? { value: val(m, c, k), itemStyle: { color: vc[c] } } : val(m, c, k)), stack: v.stacked ? 'total' : undefined,
+      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label,
+      ...(colorOf(i, name) ? { itemStyle: { color: colorOf(i, name) }, lineStyle: { color: colorOf(i, name) } } : {}),
       ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));
     // Axis and legend titles as the report labels them (extract.py's visual_text).

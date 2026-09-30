@@ -89,3 +89,20 @@ def test_conditional_formatting_gradient_and_icon_rules_are_read_by_field_positi
     assert i["col"] == 2 and i["rules"][0]["when"] == {"and": [{"op": ">=", "v": 1.0}, {"op": "<=", "v": 100.0}]}
     assert [r["icon"] for r in i["rules"]] == ["SymbolHigh", "SymbolLow"] and len(out) == 2
     assert ex._cond_formats({}, []) == []
+
+
+def test_colours_by_series_value_column_alignment_and_grid_lines():
+    scope = lambda text: {"data": [{"scopeId": {"Comparison": {"ComparisonKind": 0, "Left": {"Column": {}}, "Right": {"Literal": {"Value": f"'{text}'"}}}}}]}  # noqa: E731
+    objects = {"dataPoint": [
+        {"properties": {"fill": _color("'#f37440'")}},
+        {"selector": scope("White"), "properties": {"fill": _color("'#FF5F02'")}},
+        {"selector": {"data": [{"dataViewWildcard": {"matchingOption": 1}}]}, "properties": {"fill": _color("'#123456'")}},   # wildcard: no value
+        {"selector": {"metadata": "CountNonNull(T.id)"}, "properties": {"fill": _color("'#00233C'")}}]}
+    st = ex._chart_style(objects)
+    assert st["value_colors"] == {"White": "#FF5F02"} and st["point_color"] == "#f37440" and st["series_colors"] == {"CountNonNull(T.id)": "#00233C"}
+    assert "#123456" not in str(st)
+    tbl = {"columnFormatting": [{"selector": {"metadata": "T.b"}, "properties": {"alignment": _lit("'Center'")}}],
+           "grid": [{"properties": {"gridHorizontal": _lit("false"), "gridVertical": _lit("true"), "gridVerticalWeight": _lit("5D")}}]}
+    assert ex._col_align(tbl, ["T.a", "T.b"]) == [None, "center"] and ex._col_align({}, ["T.a"]) == []
+    g = ex._table_style(tbl)
+    assert g["table_grid_h"] is False and g["table_grid_v"] is True and g["table_grid_v_weight"] == 5.0
