@@ -15,10 +15,12 @@ Be straight with the user about this up front — it shapes everything that foll
 
 - **Layout, theme, text and images: fully automatic.** Pages, visual positions, colours,
   fonts, textbox content and embedded logos all come out of the file exactly.
-- **Numbers: not automatic.** A `.pbix` in DirectQuery mode contains *no data* — only
-  metadata. Even an Import-mode file stores data compressed in a way these scripts don't
-  read. So the HTML needs its numbers from somewhere, and there are exactly three
-  honest options (see "Getting the numbers in" below).
+- **Numbers: not automatic**, unless a Teradata MCP server/connector is available in this
+  session. A `.pbix` in DirectQuery mode contains *no data* — only metadata. Even an
+  Import-mode file stores data compressed in a way these scripts don't read. So the HTML
+  needs its numbers from somewhere: run the translated SQL yourself through a Teradata
+  MCP tool when one is available, otherwise there are three honest fallbacks (see
+  "Getting the numbers in" below).
 - **DAX is rewritten, not ported.** There's no reliable automatic DAX→SQL converter.
   You translate the measures yourself using `reference/dax-to-sql.md`, and you say so —
   a translated measure is a draft until someone checks it against the original report.
@@ -68,7 +70,20 @@ Power BI; a filter with no `definition` only lists a field. See "Filter-pane fil
 
 ### 3. Getting the numbers in
 
-Pick one with the user; don't guess:
+**Check first whether a Teradata MCP server or Teradata connector is available in this
+session** (a tool such as `base_readQuery` / `baseReadQuery` that runs a read-only SQL
+query and returns rows). If one is, use it: translate each visual's measure with
+`reference/dax-to-sql.md`, run the translated SQL yourself through that tool, and build
+`data.json` (below) straight from what comes back — no need to hand the user anything to
+run by hand. Still tell them, per visual, which DAX you translated; a translated measure
+is a draft until they check it against the original report, MCP or not. The numbers
+you get back also carry whatever row-level security applies to *that connection's*
+credentials, not necessarily the report viewer's — say so if the report has RLS roles
+(`model.json`'s `rls`) and the connection isn't scoped the same way. Only ever issue the
+read-only `SELECT`s you translated; don't let this path turn into writing to the
+warehouse.
+
+If no such tool is available, pick one of these with the user instead; don't guess:
 
 - **Demo data** — `--demo` fills every visual with obviously fake numbers. Right for
   reviewing layout and styling. Label it as fake in what you hand back; never present
@@ -123,6 +138,10 @@ unless they host a local copy (`--echarts <url>`).
 
 ## Notes that save time
 
+- **A Teradata MCP/connector, when present, replaces the CSV/paste-back dance** — you run
+  the read-only SQL yourself and get rows straight back. It doesn't change anything else:
+  DAX translation is still yours to verify, and the numbers still reflect the querying
+  connection's own row-level security, not the report viewer's.
 - **Charts need internet.** ECharts loads from a CDN. For a fully offline file, point
   `--echarts` at an internal copy of `echarts.min.js`.
 - **Row-level security does not come along.** If the original filtered by role, the HTML

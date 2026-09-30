@@ -114,13 +114,18 @@ section 4 describes with typed commands — you don't need that section unless y
 installing the tool or want the command-line version.
 
 **Before you start (one time, done by someone technical):** the tool is installed on the
-machine and you're left an **`Open_Panel.bat`** file. Everything after that is yours.
+machine and you're left an **`Open_Panel.bat`** (Windows), **`Open_Panel.command`**
+(macOS) or **`Open_Panel.sh`** (Linux) file. Everything after that is yours.
 
 ### Step by step
 
-1. **Open the panel.** Double-click `Open_Panel.bat`. A black window opens — leave it
-   open, that's the program running — and your browser opens at `http://127.0.0.1:8765`.
-   Closing that black window is how you shut everything down at the end.
+1. **Open the panel.** Double-click `Open_Panel.bat` / `Open_Panel.command` /
+   `Open_Panel.sh` for your platform. A terminal window opens — leave it open, that's the
+   program running — and your browser opens at `http://127.0.0.1:8765`. Closing that
+   window is how you shut everything down at the end.
+   *macOS/Linux, first time only:* if double-clicking opens the file in a text editor
+   instead of running it, it needs the executable bit set once from a terminal:
+   `chmod +x Open_Panel.command` (or `Open_Panel.sh`).
 
 2. **Add the report.** The first page lists the reports already there. Use **Upload
    .pbix** to add yours, then click **Open** next to it.
@@ -176,9 +181,10 @@ machine and you're left an **`Open_Panel.bat`** file. Everything after that is y
 ### Everything the panel can do
 
 1. Someone technical installs the tool once (see section 4) and leaves you an
-   **`Open_Panel.bat`** file on the desktop or in a shared folder.
-2. Double-click `Open_Panel.bat`. A black window opens (leave it open, that's the
-   program running) and the browser opens on its own at `http://127.0.0.1:8765`.
+   **`Open_Panel.bat`** (Windows), **`Open_Panel.command`** (macOS) or
+   **`Open_Panel.sh`** (Linux) file on the desktop or in a shared folder.
+2. Double-click it. A terminal window opens (leave it open, that's the program running)
+   and the browser opens on its own at `http://127.0.0.1:8765`.
 3. There you'll see the list of available reports (`.pbix`). You can upload a new one
    with the corresponding button, or open an existing one to:
    - **Extract** its structure (pages, visuals, measures). This also tries to auto-fill
@@ -235,7 +241,7 @@ machine and you're left an **`Open_Panel.bat`** file. Everything after that is y
 > operating tool for whoever builds the reports, with the same trust level as running the
 > terminal by hand. Everything above — mapping, SQL, parameters, roles, starting/stopping
 > the live service — is meant to be done from the panel; the only thing done outside it is
-> the very first double-click on `Open_Panel.bat`.
+> the very first double-click on `Open_Panel.bat` / `Open_Panel.command` / `Open_Panel.sh`.
 
 ---
 
@@ -273,7 +279,7 @@ pbix2html convert reports/X.pbix --mode live
 pbix2html convert reports/X.pbix --include-hidden  # also render pages hidden in Power BI
 pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
 pbix2html validate X
-pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat
+pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat / .command / .sh
 python -m uvicorn pbix2html.serve:app   # live mode (needs SSO in front; see serve.py)
 ```
 
