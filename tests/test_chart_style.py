@@ -167,6 +167,21 @@ def test_series_only_chart_is_one_column_split_by_the_series_not_one_column_per_
     assert [n for _, n in dims] == ["category", "series"]
 
 
+def test_hundred_percent_stacked_column_with_only_a_legend_field_drafts_one_blank_category():
+    """End-to-end (`_draft_visual_sql`), not just `chart_dimensions` in isolation: a real "100 %
+    stacked column" visual with nothing in Axis/Category, only a Legend/Series field, must draft a
+    single constant category column plus the legend field as `series` — one Power BI column split
+    into segments, not one 100 % column per legend value (the bug `chart_dimensions` fixed)."""
+    from pbix2html import semantic
+    table_map = {"Dim": "SELECT key, name FROM db.dim", "Fact": "SELECT key, id FROM db.fact"}
+    relationships = [{"FromTable": "Fact", "FromColumn": "key", "ToTable": "Dim", "ToColumn": "key", "IsActive": True}]
+    v = {"projections": {"Series": ["Dim.name"], "Y": ["Count(Fact.id)"]}}
+    sql, _ = semantic._draft_visual_sql(v, "column", {}, table_map, relationships, {})
+    assert sql is not None
+    assert "AS series" in sql and "AS category" in sql and 'AS "value"' in sql
+    assert "CAST(' ' AS VARCHAR(1))" in sql        # the constant category: one x-axis slot for every legend value
+
+
 def test_per_value_colours_only_count_for_the_fields_the_chart_uses_now():
     def scope(entity, prop, text):
         return {"data": [{"scopeId": {"Comparison": {"Left": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},

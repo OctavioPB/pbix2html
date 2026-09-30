@@ -8,6 +8,7 @@ __pycache__/
 fixv2/
 .scratch/
 TracebackV4/
+VisualReference/
 metrics/backups/          # panel-kept copies of metrics/*.yaml before an overwrite
 !reports/Executive_Dashboard.pbix
 BusinessReport.md

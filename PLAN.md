@@ -406,6 +406,60 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## A card counting a text column showed the first value, 2026-09-30
+
+Reported from a real report: a card that counts the text values of a column showed the *first*
+value instead of the count. The cause was in `query_ref_parts`, one level below the card.
+
+- [x] **An aggregation wrapper outside the translatable list was left glued to the table name.**
+  The regex only stripped `Sum|Count|CountNonNull|Min|Max|Avg|Average|DistinctCount`, so
+  `First(T.name)` split into the table `First(T` and the column `name)`. Both then *sanitised
+  clean* — `_sql_alias("First(T")` is `first_t`, `_sql_col("name)")` is `name` — so nothing ever
+  looked malformed: a table that does not exist reached the mapping report as
+  `unknown_table:First(T` and, worse, the panel's table-map step (`gui.py`, step 2b) listed it as
+  a Power BI table for someone to paste a query against. Mapped, it drafts `first_t.name` — a raw
+  text column where a count belonged. Now *any* `Agg(...)` wrapper is stripped before the
+  table/column split; `_REF_AGG_TO_SQL` stays the list of the ones that actually translate.
+- [x] **`CountAll` now drafts** (`COUNT(*)` — Power BI's "Count (All)" includes blanks, so
+  `COUNT(col)` would be wrong). `Count`/`CountNonNull`/`DistinctCount` on a text column already
+  worked and are now covered by a test, since that is the exact shape reported.
+- [x] **`First`/`Last` are refused with an honest reason** (`unsupported_aggregation:First(name)`)
+  rather than being reported as a missing table or an untranslatable measure. They mean "the first
+  value in the column's own order" and a SQL table has no inherent order — MIN/MAX would be a
+  different number that merely looks plausible.
+- **Not confirmed against the reporter's file.** The reasoning above explains the symptom exactly,
+  but the `.pbix` isn't here; if that card was instead left manual and its SQL hand-written, the
+  fix won't change it. `pbix2html mapping <pbix>` now names the real reason for such a visual —
+  check what it says for that card.
+
+## Wider DAX coverage: row iterators, SWITCH, conditions over a measure, 2026-09-30
+
+The drafter's reach is bounded by `_DaxTranslator`, and across the real reports reviewed here the
+measures left manual were mostly not exotic — they were everyday shapes the grammar simply didn't
+have. Added (see skill `dax-to-teradata-sql` for the full boundary and the reasoning per pattern):
+
+- [x] **`SUMX/AVERAGEX/MINX/MAXX/COUNTX(T, expr)` over a plain table** → `SUM(expr)`. Row context
+  over a *physical* table is exactly SQL's, so this is a one-to-one mapping, not an interpretation.
+  `FILTER`/`VALUES`/`SUMMARIZE`/`ALL` as the iterated table (a virtual table), and an aggregate or
+  measure inside the row expression (context transition), still raise — that boundary is where a
+  plausible-looking wrong number would come from. `RELATED(D[c])` is allowed inside, since DAX only
+  permits it from the many side and so it can never fan out; a bare `Other[c]` raises instead.
+- [x] **`SWITCH`**, both forms, → `CASE`.
+- [x] **A measure or aggregate inside an `IF`/`SWITCH` condition** (`IF([Margin] > 0, [Margin], 0)`,
+  `IF(ISBLANK([M]), 0, [M])`) — previously a condition took only columns and literals, so these
+  common shapes took their whole visual down to a TODO. An enclosing `CALCULATE`'s filters are
+  threaded into the condition's aggregates. Still refused in a `CALCULATE`/`FILTER` argument, where
+  an aggregate is a table filter, not a value.
+- [x] **`T[c] IN {…}`**, prefix `NOT`, `ISBLANK`, `BLANK()`, `IFERROR`, and the scalar functions
+  with exact Teradata equivalents (`YEAR/MONTH/DAY`, `INT`, `CEILING/FLOOR` at significance 1 only,
+  `MOD/POWER/SQRT/EXP/LN`, `UPPER/LOWER/TRIM/LEN`, `CONCATENATE`).
+
+All additive: every measure that translated before translates identically (the 326 existing tests
+pass unchanged). The refusals are tested as explicitly as the translations
+(`test_translate_dax_refuses_the_iterators_that_are_not_a_plain_sum`), since the refusals are the
+safety property. **Not yet measured against a real report** — the gain in drafted visuals should be
+counted with `pbix2html mapping` on a real `.pbix` next; that is the number that matters.
+
 ## Design shapes (line/rectangle/oval) barely captured, 2026-09-30
 
 A user flagged that static design shapes (lines, rectangles, other shapes used only for layout —

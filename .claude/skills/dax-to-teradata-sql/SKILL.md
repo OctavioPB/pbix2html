@@ -122,6 +122,41 @@ columns`; `kpi → value, target`. Aliases always lowercase.
   (`untranslatable_calc_column:<name>` in the mapping report) instead of drafting a
   plausible-looking wrong reference.
 
+## Row iterators, SWITCH, and conditions over a measure (2026-09-30)
+
+Four additions to `_DaxTranslator`, each with the same test: does it have *one* exact SQL
+equivalent, or does it need the filter context rebuilt? Only the first kind is drafted.
+
+- **`SUMX/AVERAGEX/MINX/MAXX/COUNTX(T, expr)` over a plain table** (`_iterator`) → `SUM(expr)`.
+  DAX's row context over a *physical* table is exactly SQL's own, so the expression maps across
+  untouched: `SUMX(Sales, Sales[Qty] * Sales[Price])` is `SUM(sales.qty * sales.price)`. The whole
+  safety of this rests on the table being physical, so **only a bare table name is accepted**.
+  `FILTER(...)`, `VALUES(...)`, `SUMMARIZE(...)`, `ALL(...)` build a *virtual* table whose rows are
+  not T's — re-deriving one in SQL is guesswork, so they still raise. Inside the row expression an
+  aggregate (`SUMX(T, SUM(...))`) or a measure (`SUMX(T, [M])`) is a **context transition**, which
+  re-evaluates per row and has no single-SELECT form: both raise. Another table's column is reached
+  only through `RELATED(D[c])`, which DAX allows only from the many side — so the join it implies
+  can never multiply T's rows. A bare `Other[c]` inside the iterator raises instead of silently
+  joining (that one *would* fan out).
+- **`SWITCH`** (`_switch`), both the value form and the `SWITCH(TRUE(), cond, result, …)` if/else-if
+  idiom → `CASE`. Arguments are spanned before being parsed (`_argument_spans`), because only the
+  count tells you whether a trailing argument is the last condition or the default value.
+- **A measure or an aggregate inside an `IF`/`SWITCH` condition** (`_value_condition`). `IF([Margin]
+  > 0, [Margin], 0)` and `IF(ISBLANK([M]), 0, [M])` are everyday shapes that used to take their whole
+  visual down to a TODO, because a condition only accepted columns and literals. The enclosing
+  `CALCULATE`'s filters are threaded into any aggregate the condition contains, so
+  `CALCULATE(IF([Net] > 0, [Net], 0), Region[Name]="North")` filters *both* occurrences. This is
+  deliberately **not** allowed in a `CALCULATE`/`FILTER` argument, where an aggregate is a table
+  filter needing context transition, not a value — that still raises. `MIN/MAX(T[c])` keep their
+  scalar "over the current selection" meaning (`{CTX:…}`) and are untouched by this.
+- **`T[c] IN {"a","b"}`** → `c IN ('a','b')` (`_value_set`), plus prefix `NOT`, `ISBLANK`, `BLANK()`,
+  `IFERROR(a,b)` → `COALESCE` (the only error this translator can produce is a divide-by-zero, which
+  `/` and `DIVIDE` already turn into NULL). `IN` over a table expression (`IN VALUES(...)`) raises.
+- Scalar functions that map one-to-one: `YEAR/MONTH/DAY`, `INT` (CAST to BIGINT — both truncate
+  toward zero), `CEILING/FLOOR` **only with significance 1**, `MOD`, `POWER`, `SQRT`, `EXP`, `LN`,
+  `UPPER/LOWER/TRIM`, `LEN` (→ `CHARACTER_LENGTH`), `CONCATENATE`. `CEILING(x, 0.5)` raises: DAX
+  rounds to a multiple of the second argument and SQL's `CEILING` does not.
+
 ## Selection-dependent measures: `FILTER(T, T[c] = MIN(T[c]))`
 
 Recognised automatically (`semantic._DaxTranslator._selection_min`, `_expand_selmins`). Meaning: keep

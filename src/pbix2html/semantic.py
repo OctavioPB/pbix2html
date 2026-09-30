@@ -44,7 +44,13 @@ KIND_MAP: dict[str, str] = {
 }
 NO_DATA_KINDS = {"slicer", "text", "static", "tooltip"}
 
-_AGG_RE = re.compile(r"^(Sum|Count|CountNonNull|Min|Max|Avg|Average|DistinctCount)\((.+)\)$")
+# ANY `Agg(...)` wrapper, not only the ones that translate: which aggregations exist is Power
+# BI's business, and an unknown one used to be left glued to the table name — `First(T.name)`
+# split into the table `First(T` and the column `name)`. Both then *sanitised clean*
+# (`_sql_alias("First(T") == "first_t"`), so a phantom table reached the mapping report
+# (`unknown_table:First(T`) and the panel's table-map step offered it to be mapped.
+# `_REF_AGG_TO_SQL` stays the list of the ones that actually translate.
+_AGG_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.+)\)$")
 
 
 @dataclass
@@ -1348,7 +1354,7 @@ _DAX_TOKEN_RE = re.compile(r"""
   | (?P<bracket>\[[^\]]*\])
   | (?P<ident>[A-Za-z_][\w.]*)
   | (?P<op><=|>=|<>|==|&&|\|\||[-+*/=<>&])
-  | (?P<punct>[(),])
+  | (?P<punct>[(),{}])
 """, re.VERBOSE | re.DOTALL)
 
 # DAX aggregate → (SQL function, needs DISTINCT, takes a table rather than a column)
@@ -1366,7 +1372,21 @@ _REF_AGG_TO_SQL: dict[str, tuple[str, bool]] = {
     "min": ("MIN", False), "max": ("MAX", False), "avg": ("AVG", False),
     "average": ("AVG", False), "distinctcount": ("COUNT", True),
 }
+# Counts every row, blanks included — `COUNT(col)` would skip them, so it needs `COUNT(*)`.
+_REF_AGG_COUNT_ALL = "countall"
+# Recognised but deliberately not translated: Power BI's First/Last are "the first value in the
+# column's own order", and a SQL table has no inherent order — MIN/MAX would be a different
+# number that happens to look plausible. The visual is left manual with an honest reason.
+_REF_AGG_UNORDERED = {"first", "last"}
 _DAX_COMPARISONS = {"=": "=", "==": "=", "<>": "<>", ">": ">", "<": "<", ">=": ">=", "<=": "<="}
+# DAX row iterator → the SQL aggregate it becomes over the iterated table's own rows. Only a
+# *plain* table is iterated (see `_DaxTranslator._iterator`): row context over a physical table
+# is exactly SQL's, so `SUMX(T, T[a] * T[b])` is `SUM(t.a * t.b)` and nothing is evaluated twice.
+_DAX_ITERATORS = {"SUMX": "SUM", "AVERAGEX": "AVG", "MINX": "MIN", "MAXX": "MAX",
+                  "COUNTX": "COUNT", "COUNTAX": "COUNT"}
+# DAX scalar → SQL function of the same shape (one argument, same meaning in Teradata)
+_DAX_SCALAR_1 = {"UPPER": "UPPER", "LOWER": "LOWER", "TRIM": "TRIM", "SQRT": "SQRT",
+                 "EXP": "EXP", "LN": "LN", "LEN": "CHARACTER_LENGTH"}
 
 
 class _DaxUnsupported(Exception):
@@ -1409,9 +1429,15 @@ class _DaxTranslator:
       DIVIDE(a, b[, alt]), arithmetic + - * /, parentheses, ABS/ROUND/COALESCE
       [Other Measure]                 resolved recursively (self-reference refused)
       CALCULATE(expr, T[C] = "x", …)  filters folded into each aggregate as CASE WHEN
+      SUMX/AVERAGEX/MINX/MAXX/COUNTX(T, expr)   over a *plain* table T only (`_iterator`)
+      RELATED(D[c])                   inside such an iterator (many-to-one, so no fan-out)
+      SWITCH(x, v, r, …) / SWITCH(TRUE(), cond, r, …)  → CASE
+      IF/ISBLANK/BLANK/IFERROR/NOT, `T[c] IN {…}`
+      YEAR/MONTH/DAY, INT/CEILING/FLOOR/MOD/POWER/SQRT/EXP/LN, UPPER/LOWER/TRIM/LEN/CONCATENATE
 
-    Anything else — time intelligence, ALL/ALLSELECTED, virtual tables, iterators —
-    raises _DaxUnsupported and the caller leaves a TODO. A wrong number that looks right
+    Anything else — time intelligence, ALL/ALLSELECTED, virtual tables (FILTER/VALUES/
+    SUMMARIZE as an iterator's table), a measure inside a row iterator (context transition)
+    — raises _DaxUnsupported and the caller leaves a TODO. A wrong number that looks right
     is far worse than an honest blank."""
 
     def __init__(self, measures: dict[tuple[str, str], str], split: bool = False):
@@ -1423,6 +1449,10 @@ class _DaxTranslator:
         self.tokens: list[tuple[str, str]] = []
         self.pos = 0
         self._bare_column: str | None = None    # a column used outside any aggregate
+        self._row_table: str | None = None      # inside SUMX(T, …): the table whose rows are iterated
+        # the CALCULATE filters in force while an IF/SWITCH *condition* is parsed, or None when
+        # the condition is itself a filter (CALCULATE/FILTER), where an aggregate is not allowed
+        self._cond_filters: list[str] | None = None
         self.selmins: set[tuple[str, str]] = set()
         self.ctxs: set[tuple[str, str, str]] = set()
         self._vars: dict[str, str] = {}
@@ -1496,6 +1526,15 @@ class _DaxTranslator:
             inner = self._scalar()
             self._expect(")")
             return f"({inner})"
+        # In a *value* condition (IF/SWITCH, never a CALCULATE filter) an operand may be a
+        # measure or an aggregate: `IF([Margin] > 0, …)` is the everyday shape. MIN/MAX keep
+        # their scalar meaning ("over the current selection", a {CTX:…} marker) and are left
+        # to `_scalar_function`; an aggregate in a CALCULATE filter is still a table filter.
+        if kind == "bracket" and self._cond_filters is not None:
+            return self._measure_reference(text[1:-1].strip(), list(self._cond_filters))
+        if (kind == "ident" and self._cond_filters is not None and text.upper() in _DAX_AGGREGATES
+                and text.upper() not in ("MIN", "MAX") and (nxt := self._peek()) and nxt[1] == "("):
+            return self._aggregate(text.upper(), list(self._cond_filters))
         if kind == "ident" and (nxt := self._peek()) and nxt[1] == "(":
             return self._scalar_function(text.upper())
         if kind == "ident" and text.lower() in self._vars:
@@ -1512,6 +1551,9 @@ class _DaxTranslator:
         if name in ("TODAY", "NOW"):
             self._expect(")")
             return "CURRENT_DATE" if name == "TODAY" else "CURRENT_TIMESTAMP(0)"
+        if name == "BLANK":
+            self._expect(")")
+            return "NULL"
         if name in ("MIN", "MAX"):
             table = self._table_name()
             nxt = self._peek()
@@ -1578,7 +1620,12 @@ class _DaxTranslator:
                 if (table, column) in self.measures:   # Table[Measure]: a measure, qualified by its home table
                     return self._measure_reference(column, filters)
                 self.tables.add(table)
-                self._bare_column = f"{table}[{column}]"
+                if self._row_table is None:
+                    self._bare_column = f"{table}[{column}]"
+                elif table != self._row_table:
+                    # inside SUMX(T, …) a column of T is the row's own value, which SQL already
+                    # evaluates row by row; another table is reachable only through RELATED.
+                    raise _DaxUnsupported(f"{table}[{column}] needs RELATED inside a row iterator")
                 return f"{_sql_alias(table)}.{_sql_col(column)}"
             if nxt and nxt[1] == "(":               # a function call
                 return self._function(text.upper(), filters)
@@ -1586,6 +1633,8 @@ class _DaxTranslator:
         raise _DaxUnsupported(f"unexpected token {text!r}")
 
     def _measure_reference(self, name: str, filters: list[str]) -> str:
+        if self._row_table is not None:
+            raise _DaxUnsupported(f"measure [{name}] inside a row iterator is a context transition")
         if name in self._resolving:
             raise _DaxUnsupported(f"measure [{name}] refers to itself")
         expression = next((e for (_tbl, mname), e in self.measures.items() if mname == name and e), None)
@@ -1606,6 +1655,10 @@ class _DaxTranslator:
             self._resolving.discard(name)
 
     def _aggregate(self, func: str, filters: list[str]) -> str:
+        if self._row_table is not None:
+            # SUMX(T, SUM(...)) re-aggregates per row (context transition), which is not
+            # "the same expression evaluated row by row" and has no one-SELECT equivalent.
+            raise _DaxUnsupported(f"{func}() inside a row iterator is a context transition")
         sql_func, distinct, table_only = _DAX_AGGREGATES[func]
         self._expect("(")
         kind, text = self._take()
@@ -1685,7 +1738,7 @@ class _DaxTranslator:
             return self._calculate(filters)
         if name == "IF":
             self._expect("(")
-            cond = self._boolean(None)
+            cond = self._value_condition(filters)
             branches = []
             while (tok := self._peek()) and tok[1] == ",":
                 self._take()
@@ -1697,7 +1750,148 @@ class _DaxTranslator:
         if name in ("ABS", "ROUND", "COALESCE"):
             self._expect("(")
             return f"{name}({', '.join(self._arguments(filters))})"
+        if name in _DAX_ITERATORS:
+            return self._iterator(name, filters)
+        if name == "RELATED":
+            return self._related()
+        if name == "SWITCH":
+            return self._switch(filters)
+        if name == "BLANK":
+            self._expect("(")
+            self._expect(")")
+            return "NULL"
+        if name == "IFERROR":
+            # the only error this translator can produce is a division by zero, which `/` and
+            # DIVIDE already turn into NULL — so the alternative value is exactly a COALESCE
+            return f"COALESCE({', '.join(self._one_or_two(name, filters, 2))})"
+        if name in ("YEAR", "MONTH", "DAY"):
+            return f"EXTRACT({name} FROM {self._one_or_two(name, filters, 1)[0]})"
+        if name in _DAX_SCALAR_1:
+            return f"{_DAX_SCALAR_1[name]}({self._one_or_two(name, filters, 1)[0]})"
+        if name == "INT":      # DAX truncates toward zero, which is what a CAST to integer does
+            return f"CAST({self._one_or_two(name, filters, 1)[0]} AS BIGINT)"
+        if name in ("CEILING", "FLOOR"):
+            # DAX rounds to a multiple of the second argument; only the plain "to an integer"
+            # form has a one-to-one SQL equivalent, so any other significance stays manual.
+            args = self._one_or_two(name, filters, 2)
+            if args[1].strip() != "1":
+                raise _DaxUnsupported(f"{name} to a significance other than 1 isn't translated")
+            return f"{name}({args[0]})"
+        if name == "MOD":
+            args = self._one_or_two(name, filters, 2)
+            return f"(({args[0]}) MOD ({args[1]}))"
+        if name == "POWER":
+            return f"POWER({', '.join(self._one_or_two(name, filters, 2))})"
+        if name == "CONCATENATE":
+            args = self._one_or_two(name, filters, 2)
+            return f"({_as_text(args[0])} || {_as_text(args[1])})"
         raise _DaxUnsupported(f"{name}() isn't translated automatically")
+
+    def _one_or_two(self, name: str, filters: list[str], want: int) -> list[str]:
+        """`want` arguments of a fixed-arity function, or raise."""
+        self._expect("(")
+        args = self._arguments(filters)
+        if len(args) != want:
+            raise _DaxUnsupported(f"{name} takes {want} argument(s), got {len(args)}")
+        return args
+
+    def _iterator(self, name: str, filters: list[str]) -> str:
+        """`SUMX(T, <row expression>)` → `SUM(<expression>)` over T's own rows.
+
+        Only a plain table is iterated. FILTER/VALUES/SUMMARIZE/ALL/DISTINCT build a *virtual*
+        table whose rows are not T's, and re-creating one in SQL is exactly the kind of guess
+        that produces a plausible wrong number — those still raise. Over a physical table the
+        row context is SQL's own, so the expression maps across untouched; a nested aggregate
+        or a measure reference inside it (context transition) raises instead."""
+        self._expect("(")
+        kind, text = self._take()
+        nxt = self._peek()
+        if kind not in ("ident", "qtable") or (nxt and nxt[1] == "("):
+            raise _DaxUnsupported(f"{name} only iterates a plain table, not {text!r}")
+        if nxt and nxt[0] == "bracket":
+            raise _DaxUnsupported(f"{name} expects a table, got the column {text}{nxt[1]}")
+        table = text[1:-1].replace("''", "'") if kind == "qtable" else text
+        self._expect(",")
+        self.tables.add(table)
+        saved, self._row_table = self._row_table, table
+        try:
+            expr = self._expression(filters)
+        finally:
+            self._row_table = saved
+        self._expect(")")
+        if filters:
+            expr = f"CASE WHEN {' AND '.join(filters)} THEN ({expr}) END"
+        return self._emit(table, f"{_DAX_ITERATORS[name]}({expr})")
+
+    def _related(self) -> str:
+        """`RELATED(D[c])` inside a row iterator: DAX only allows it from the many side of a
+        relationship, so the join it implies can never multiply the iterated table's rows."""
+        if self._row_table is None:
+            raise _DaxUnsupported("RELATED only means something inside a row iterator")
+        self._expect("(")
+        kind, text = self._take()
+        nxt = self._peek()
+        if kind not in ("ident", "qtable") or not nxt or nxt[0] != "bracket":
+            raise _DaxUnsupported("RELATED needs a Table[Column]")
+        self._take()
+        self._expect(")")
+        table = text[1:-1].replace("''", "'") if kind == "qtable" else text
+        self.tables.add(table)
+        return f"{_sql_alias(table)}.{_sql_col(nxt[1][1:-1].strip())}"
+
+    def _switch(self, filters: list[str]) -> str:
+        """`SWITCH(x, v1, r1, …, [else])` → CASE, and the `SWITCH(TRUE(), cond, r, …)` idiom
+        (DAX's if/else-if) → CASE WHEN. The arguments are spanned first because only the count
+        says whether a trailing argument is the last condition or the default value."""
+        self._expect("(")
+        spans = self._argument_spans()
+        if len(spans) < 3:
+            raise _DaxUnsupported("SWITCH needs a subject and at least one value/result pair")
+        head = self.tokens[spans[0][0]:spans[0][1]]
+        is_true = len(head) == 3 and head[0][1].upper() == "TRUE" and head[1][1] == "(" and head[2][1] == ")"
+        subject = None if is_true else self._parse_span(spans[0], lambda: self._expression(filters))
+        rest = spans[1:]
+        default = None
+        if len(rest) % 2:
+            default = self._parse_span(rest[-1], lambda: self._expression(filters))
+            rest = rest[:-1]
+        whens = []
+        for i in range(0, len(rest), 2):
+            cond = (self._parse_span(rest[i], lambda: self._value_condition(filters)) if is_true
+                    else f"({subject}) = ({self._parse_span(rest[i], lambda: self._expression(filters))})")
+            whens.append(f"WHEN {cond} THEN {self._parse_span(rest[i + 1], lambda: self._expression(filters))}")
+        return f"(CASE {' '.join(whens)}{f' ELSE {default}' if default is not None else ''} END)"
+
+    def _argument_spans(self) -> list[tuple[int, int]]:
+        """Token spans of the arguments up to (and consuming) the matching `)`, so an argument
+        can be parsed later, once its role is known."""
+        spans, depth, start = [], 0, self.pos
+        while (tok := self._peek()) is not None:
+            if tok[1] == "(":
+                depth += 1
+            elif tok[1] == ")":
+                if depth == 0:
+                    spans.append((start, self.pos))
+                    self._take()
+                    return spans
+                depth -= 1
+            elif tok[1] == "," and depth == 0:
+                spans.append((start, self.pos))
+                self._take()
+                start = self.pos
+                continue
+            self._take()
+        raise _DaxUnsupported("unbalanced arguments")
+
+    def _parse_span(self, span: tuple[int, int], parser) -> str:
+        start, end = span
+        saved = self.pos
+        self.pos = start
+        out = parser()
+        if self.pos != end:
+            raise _DaxUnsupported("an argument didn't parse completely")
+        self.pos = saved
+        return out
 
     def _arguments(self, filters: list[str]) -> list[str]:
         args = [self._expression(filters)]
@@ -1753,6 +1947,13 @@ class _DaxTranslator:
         """One CALCULATE filter: `FILTER(Table, condition)`, a bare condition, or a bare table
         (which filters nothing). Conditions are column-vs-literal comparisons combined with
         && / ||; anything that depends on another aggregate or the report's selection raises."""
+        saved, self._cond_filters = self._cond_filters, None   # a filter is not a value condition
+        try:
+            return self._filter_condition()
+        finally:
+            self._cond_filters = saved
+
+    def _filter_condition(self) -> str | None:
         tok, nxt = self._peek(), (self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None)
         if tok and tok[0] == "ident" and tok[1].upper() == "FILTER" and nxt and nxt[1] == "(":
             self._take()
@@ -1801,6 +2002,16 @@ class _DaxTranslator:
         self.selmins.add((table, c1))
         return f"{{SELMIN:{table}|{c1}}}"
 
+    def _value_condition(self, filters: list[str]) -> str:
+        """An IF/SWITCH condition, where an operand may be a measure or an aggregate (with the
+        enclosing CALCULATE's filters still applied to it). A CALCULATE/FILTER condition goes
+        through `_boolean` directly instead, so an aggregate there still raises."""
+        saved, self._cond_filters = self._cond_filters, filters
+        try:
+            return self._boolean(None)
+        finally:
+            self._cond_filters = saved
+
     def _boolean(self, table: str | None) -> str:
         left = self._boolean_and(table)
         while (tok := self._peek()) and tok[1] == "||":
@@ -1822,11 +2033,34 @@ class _DaxTranslator:
             inner = self._boolean(table)
             self._expect(")")
             return f"({inner})"
+        nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+        if tok and tok[0] == "ident" and tok[1].upper() == "ISBLANK" and nxt and nxt[1] == "(":
+            self._take()
+            self._expect("(")
+            inner = self._scalar()          # a measure/aggregate only in a value condition
+            self._expect(")")
+            return f"({inner} IS NULL)"
+        if tok and tok[0] == "ident" and tok[1].upper() == "NOT":
+            self._take()                            # `NOT <condition>` and `NOT(<condition>)`
+            return f"(NOT {self._comparison(table)})"
         left = self._scalar()
         op = self._take()[1]
+        if op.upper() == "IN":
+            return f"{left} IN ({', '.join(self._value_set())})"
         if op not in _DAX_COMPARISONS:
             raise _DaxUnsupported(f"filter operator {op!r} isn't supported")
         return f"{left} {_DAX_COMPARISONS[op]} {self._scalar()}"
+
+    def _value_set(self) -> list[str]:
+        """`{"a", "b"}`, the right-hand side of DAX's `IN`. Only a literal list: a table
+        expression there (`IN VALUES(...)`, `IN ALL(...)`) depends on the filter context."""
+        self._expect("{")
+        values = [self._scalar()]
+        while (tok := self._peek()) and tok[1] == ",":
+            self._take()
+            values.append(self._scalar())
+        self._expect("}")
+        return values
 
 
 def translate_dax(dax: str, measures: dict[tuple[str, str], str], split: bool = False) -> _Sql | None:
@@ -1866,6 +2100,8 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str],
     calc_columns = calc_columns or {}
     agg, table, col = query_ref_parts(ref)
     if agg:
+        if agg.lower() == _REF_AGG_COUNT_ALL:
+            return _Field(role, True, col, _sql_col(col), "COUNT(*)", {table}, (table, col))
         sql_func, distinct = _REF_AGG_TO_SQL.get(agg.lower(), (None, False))
         if sql_func is None:
             return None
@@ -2885,8 +3121,10 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
     model doesn't have: renamed/deleted), `no_source:<t>` (no Teradata query for that table, e.g.
     a DAX calculated table), `not_connected:<t1>+<t2>` (no relationship between them),
     `untranslatable_measure:<name>` or `untranslatable_calc_column:<name>` (the field is a
-    calculated column — see `_table_calc_columns` — whose DAX isn't recognised), `shape`
-    (fields don't fit the kind's column contract)."""
+    calculated column — see `_table_calc_columns` — whose DAX isn't recognised),
+    `unsupported_aggregation:<Agg>(<col>)` (the column is fine, the aggregation Power BI put on
+    it has no exact SQL equivalent — First/Last), `shape` (fields don't fit the kind's column
+    contract)."""
     if kind not in _DRAFTABLE_KINDS:
         return [f"kind:{kind}"]
     calc_columns = calc_columns or {}
@@ -2896,13 +3134,18 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
         if role.lower() == "tooltips":
             continue
         for ref in refs or []:
-            _, table, col = query_ref_parts(ref)
+            agg, table, col = query_ref_parts(ref)
             if (table, col) not in measures and (table, col) not in calc_columns \
                     and model_tables and table not in model_tables:
                 reasons.append(f"unknown_table:{table}")
                 continue
             f = _resolve_field(role, ref, measures, calc_columns)
             if f is None:
+                if agg and agg.lower() not in _REF_AGG_TO_SQL and (table, col) not in measures:
+                    # e.g. First/Last: the field is fine, the aggregation on it is the problem —
+                    # saying "untranslatable measure" would send a reviewer looking at the DAX
+                    reasons.append(f"unsupported_aggregation:{agg}({col})")
+                    continue
                 kind_word = "calc_column" if (table, col) in calc_columns else "measure"
                 reasons.append(f"untranslatable_{kind_word}:{col}")
             else:

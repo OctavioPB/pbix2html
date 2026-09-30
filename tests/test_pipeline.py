@@ -188,6 +188,17 @@ DAX_MEASURES = {
     ("Sales", "Loop"): "[Loop] + 1",
     ("Sales", "YTD"): "TOTALYTD([Net Revenue], Calendar[Date])",
     ("Sales", "Virtual"): "SUMX(SUMMARIZE(Sales, Sales[Id]), [Net Revenue])",
+    ("Sales", "Line Total"): "SUMX(Sales, Sales[Qty] * Sales[Price])",
+    ("Sales", "With Related"): "SUMX(Sales, Sales[Qty] * RELATED(Product[Price]))",
+    ("Sales", "Row Measure"): "SUMX(Sales, [Net Revenue])",
+    ("Sales", "Row Aggregate"): "SUMX(Sales, SUM(Sales[Qty]))",
+    ("Sales", "Row Foreign"): "SUMX(Sales, Sales[Qty] * Product[Price])",
+    ("Sales", "Filtered Rows"): "SUMX(FILTER(Sales, Sales[Qty] > 1), Sales[Qty])",
+    ("Sales", "Tier"): 'SWITCH(TRUE(), [Net Revenue] > 100, "big", [Net Revenue] > 10, "mid", "small")',
+    ("Sales", "Grade"): 'SWITCH(MAX(Sales[Grade]), 1, "one", 2, "two", "other")',
+    ("Sales", "Safe Margin"): "IF(ISBLANK([Margin]), 0, [Margin])",
+    ("Sales", "Two Regions"): 'CALCULATE(SUM(Sales[Amount]), Region[Name] IN {"North", "South"})',
+    ("Sales", "Filter By Aggregate"): "CALCULATE(SUM(Sales[Amount]), SUM(Sales[Qty]) > 5)",
 }
 
 
@@ -218,6 +229,73 @@ def test_translate_dax_folds_calculate_filters_into_the_aggregate():
     assert _dax("Big Orders").text == "SUM(CASE WHEN sales.amount > 1000 THEN 1 ELSE 0 END)"
 
 
+def test_an_unknown_aggregation_wrapper_never_becomes_a_phantom_table():
+    """`First(T.name)` used to split into the table `First(T` and the column `name)`, because
+    only the translatable aggregations were stripped. Both then sanitised *clean*
+    (`_sql_alias("First(T") == "first_t"`), so a table that does not exist reached the mapping
+    report as `unknown_table:First(T` and the panel's table-map step offered it for mapping —
+    a card counting a text column ended up pointed at a phantom table instead of saying why."""
+    assert semantic.query_ref_parts("First(T.name)") == ("First", "T", "name")
+    assert semantic.query_ref_parts("Last(T.name)") == ("Last", "T", "name")
+    assert semantic.query_ref_parts("Median(T.n)") == ("Median", "T", "n")
+    assert semantic.query_ref_parts("T.name") == (None, "T", "name")        # unwrapped, unchanged
+    # a measure whose own name has brackets is not an aggregation wrapper
+    assert semantic.query_ref_parts("T.Margin (%)") == (None, "T", "Margin (%)")
+    # and the reason names the aggregation, not a missing table or an innocent measure
+    v = {"projections": {"Values": ["First(T.name)"]}}
+    assert semantic.diagnose_visual(v, "card", {}, {"T": "SELECT * FROM t"}, [], {"T"}, {}) \
+        == ["unsupported_aggregation:First(name)"]
+
+
+def test_a_card_counting_a_text_column_counts_it():
+    # Power BI auto-aggregates a text column dropped into a card: Count / Count (Distinct) /
+    # Count (All). Each has an exact SQL equivalent, so each drafts rather than staying manual.
+    tm = {"T": "SELECT name FROM db.t"}
+    def card(ref):
+        drafted = semantic._draft_visual_sql({"projections": {"Values": [ref]}}, "card", {}, tm, [], {})
+        return drafted[0].split("\n")[0] if drafted else None
+    assert card("Count(T.name)") == 'SELECT COUNT(t.name) AS "value"'
+    assert card("CountNonNull(T.name)") == 'SELECT COUNT(t.name) AS "value"'
+    assert card("DistinctCount(T.name)") == 'SELECT COUNT(DISTINCT t.name) AS "value"'
+    assert card("CountAll(T.name)") == 'SELECT COUNT(*) AS "value"'         # blanks included
+    # First/Last have no SQL equivalent (a table has no inherent order); MIN would be a
+    # different number that merely looks plausible, so the visual stays manual.
+    assert card("First(T.name)") is None
+
+
+def test_translate_dax_iterates_a_plain_table_row_by_row():
+    # SUMX over a physical table is the one iterator with an exact SQL equivalent: DAX's row
+    # context is the table's own rows, which is what SUM(expr) already evaluates.
+    assert _dax("Line Total").text == "SUM((sales.qty * sales.price))"
+    related = _dax("With Related")
+    assert related.text == "SUM((sales.qty * product.price))"
+    assert related.tables == {"Sales", "Product"}        # RELATED is many-to-one: no fan-out
+    assert _dax("Line Total").tables == {"Sales"}
+
+
+def test_translate_dax_switch_becomes_a_case():
+    assert _dax("Tier").text == ("(CASE WHEN (SUM(sales.amount)) > 100 THEN 'big' "
+                                 "WHEN (SUM(sales.amount)) > 10 THEN 'mid' ELSE 'small' END)")
+    grade = _dax("Grade").text                           # the value form, with a default
+    assert grade.startswith("(CASE WHEN (MAX(sales.grade)) = (1) THEN 'one'") and grade.endswith("ELSE 'other' END)")
+    # a bare column as the subject stays refused: it is not aggregated, so the query would not group
+    assert semantic.translate_dax('SWITCH(Sales[Band], 1, "one", "other")', DAX_MEASURES) is None
+
+
+def test_translate_dax_measures_and_aggregates_inside_an_if_condition():
+    # `IF([M] > 0, [M], 0)` / `IF(ISBLANK([M]), 0, [M])` are everyday shapes; a condition used
+    # to allow only columns and literals, so both took their whole visual down to a TODO.
+    assert _dax("Safe Margin").text.startswith("(CASE WHEN ((((SUM(sales.amount)) - (SUM(sales.costamount)))) IS NULL)")
+    # an enclosing CALCULATE still filters an aggregate used in the condition
+    scoped = semantic.translate_dax('CALCULATE(IF([Net Revenue] > 0, [Net Revenue], 0), Region[Name] = "North")',
+                                    DAX_MEASURES)
+    assert scoped.text.count("CASE WHEN region.name = 'North' THEN sales.amount END") == 2
+
+
+def test_translate_dax_in_a_literal_set_becomes_sql_in():
+    assert _dax("Two Regions").text == "SUM(CASE WHEN region.name IN ('North', 'South') THEN sales.amount END)"
+
+
 def test_translate_dax_refuses_what_it_cannot_do():
     # Honest blank beats a wrong number that looks right.
     assert _dax("Loop") is None                          # measure referencing itself
@@ -226,6 +304,21 @@ def test_translate_dax_refuses_what_it_cannot_do():
     assert semantic.translate_dax("", {}) is None
     assert semantic.translate_dax("'Sales Fact'[Amount]", {}) is None   # column, not a measure
     assert semantic.translate_dax("[Missing Measure]", {}) is None
+
+
+def test_translate_dax_refuses_the_iterators_that_are_not_a_plain_sum():
+    # Everything here would need the row context rebuilt in SQL, which is exactly where a
+    # plausible-looking wrong number comes from. Each must stay manual.
+    assert _dax("Filtered Rows") is None                 # FILTER(): a virtual table, not Sales' rows
+    assert _dax("Row Measure") is None                   # a measure per row: context transition
+    assert _dax("Row Aggregate") is None                 # an aggregate per row: context transition
+    assert _dax("Row Foreign") is None                   # another table's column without RELATED
+    assert semantic.translate_dax("RELATED(Product[Price])", DAX_MEASURES) is None   # no row context
+    assert semantic.translate_dax("SUMX(Sales[Qty], Sales[Qty])", DAX_MEASURES) is None   # a column, not a table
+    # an aggregate in a CALCULATE *filter* is a table filter, not a value condition
+    assert _dax("Filter By Aggregate") is None
+    # CEILING/FLOOR only translate to the plain "up to an integer" form
+    assert semantic.translate_dax("CEILING(SUM(Sales[Amount]), 0.5)", DAX_MEASURES) is None
 
 
 def test_scaffold_auto_drafts_single_table_card(fake_pbix):
