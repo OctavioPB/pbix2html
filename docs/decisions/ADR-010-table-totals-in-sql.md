@@ -1,6 +1,6 @@
 # ADR-010: a table's grand-total row is a second SQL query
 
-**Status:** accepted · **Applies to:** flat tables (`tableEx`, `table`) in `snapshot` and `live` mode
+**Status:** accepted · **Applies to:** flat tables (`tableEx`, `table`) and matrices (`pivotTable`, rendered flat) in `snapshot`, `live` and `hah` mode
 
 ## Context
 
@@ -23,5 +23,5 @@ follows the same slicers and filters. `query.run_visual` runs it after the detai
 
 ## Not covered
 
-`hah` mode (the HTML fetches each visual's SQL itself) does not run `sql_total` yet; matrices (sub-totals per
-hierarchy level) are not handled.
+Sub-totals per hierarchy level of a matrix (only the grand total is drawn). In `hah` mode the HTML runs the second
+query itself (`fetchSQL`), like the detail one; unverified against a real HAH (ADR-004).

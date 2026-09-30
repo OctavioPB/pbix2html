@@ -146,7 +146,7 @@ function slicerWidget(el, v, host) {
     }
     const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'sl-btn';
     btn.textContent = summary(); btn.title = label();
-    const caret = document.createElement('span'); caret.textContent = '▾'; btn.appendChild(caret);
+    const caret = document.createElement('span'); caret.className = 'sl-caret'; caret.setAttribute('aria-hidden', 'true'); btn.appendChild(caret);
     btn.disabled = !rows; el.replaceChildren(btn);
     btn.addEventListener('click', () => {
       if (panel) { closePanel(); return; }

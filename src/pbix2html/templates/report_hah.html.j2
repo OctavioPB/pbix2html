@@ -58,21 +58,24 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   th + th, td + td { border-left: var(--gv, none); }
   th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
-  .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
+  .text { padding: .15rem .3rem; line-height: 1.2; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
   .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
-  .visual.btn { background: var(--bg0, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
-  .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, .8rem); font-family: var(--ff, inherit); font-weight: var(--fw, normal); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
-  .visual.btn:hover { background: var(--bg-h, var(--bg0, transparent)); box-shadow: var(--ol-h, var(--ol, none)); }
+  .visual.btn { background: linear-gradient(var(--bg0, transparent), var(--bg0, transparent)), var(--cbg, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
+  .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, calc(9.5pt * var(--scale, 1))); font-family: var(--ff, inherit); font-weight: var(--fw, 600); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
+  .visual.btn:hover { background: linear-gradient(var(--bg-h, var(--bg0, transparent)), var(--bg-h, var(--bg0, transparent))), var(--cbg, transparent); box-shadow: var(--ol-h, var(--ol, none)); }
   .visual.btn:hover .shape-text { color: var(--fg-h, var(--fg, inherit)); }
-  .visual.btn:active { background: var(--bg-p, var(--bg-h, var(--bg0, transparent))); box-shadow: var(--ol-p, var(--ol-h, var(--ol, none))); }
+  .visual.btn:active { background: linear-gradient(var(--bg-p, var(--bg-h, var(--bg0, transparent))), var(--bg-p, var(--bg-h, var(--bg0, transparent)))), var(--cbg, transparent); box-shadow: var(--ol-p, var(--ol-h, var(--ol, none))); }
   .visual.btn:active .shape-text { color: var(--fg-p, var(--fg-h, var(--fg, inherit))); }
-  .visual.btn.off, .visual.btn.off:hover { background: var(--bg-d, var(--bg0, transparent)); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
+  .visual.btn.off, .visual.btn.off:hover { background: linear-gradient(var(--bg-d, var(--bg0, transparent)), var(--bg-d, var(--bg0, transparent))), var(--cbg, transparent); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
   .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
   .visual.sl-box { overflow: visible; }
   .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: .85rem; color: var(--sl-fg); font-size: var(--sl-fs); }
-  .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
+  .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; min-height: calc(28px * var(--scale, 1)); }
+  .ic { display: inline-flex; align-items: center; justify-content: center; width: 1.35em; height: 1.35em; border-radius: 50%; border: 1.5px solid; font-size: .85em; font-weight: 700; line-height: 1; }
+  .ic-ok { color: #2E7D32; border-color: #4C9A6A; background: #E3F2E8; } .ic-bad { color: #C62828; border-color: #C0392B; background: #FBE3E4; } .ic-warn { color: #8A6D00; border-color: #D9B300; background: #FFF5CC; }
+  .sl-caret { width: .5em; height: .5em; margin-left: .5em; flex: none; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-25%) rotate(45deg); opacity: .7; }
   .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
   .sl-btn:disabled { cursor: default; opacity: .8; }
   .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
@@ -247,7 +250,12 @@
   const inkFor = bg => lum(bg) > .4 ? '#1F1F1F' : '#FFFFFF';
   const holds = (w, x) => w.and ? w.and.every(t => holds(t, x)) : w.or ? w.or.some(t => holds(t, x))
     : ({ '=': x === w.v, '>': x > w.v, '>=': x >= w.v, '<': x < w.v, '<=': x <= w.v })[w.op];
-  const ICONS = { High: ['\u2714', '#2E7D32'], Low: ['\u2716', '#C62828'], Medium: ['\u25CF', '#F9A825'] };
+  // An icon rule's result as a round badge: by the icon's name (Power BI names them `SymbolHigh`, `CircleCheck`,
+  // `Cross`, `Warning`...). An unknown or `null` name draws nothing.
+  const iconOf = name => /null|none|blank/i.test(name) ? null
+    : /high|check|good|tick|up|green/i.test(name) ? ['ok', '\u2713']
+    : /low|cross|bad|down|red|x$/i.test(name) ? ['bad', '\u2715']
+    : /medium|warn|neutral|yellow|excl|amber/i.test(name) ? ['warn', '!'] : null;
   function condCell(rules, vals, x) {          // -> { bg, fg, icon } for the value x of one column
     const out = {};
     if (typeof x !== 'number') return out;
@@ -271,7 +279,6 @@
     }
     return out;
   }
-  const iconOf = name => { const k = Object.keys(ICONS).find(n => name.includes(n)); return k ? ICONS[k] : null; };
   // the grand-total row, computed by Teradata (yaml `sql_total`): blank where the measure is not additive
   const totalRow = (v, b, isNum) => (b.total && b.total.length === b.columns.length)
     ? '<tfoot><tr>' + b.total.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${x === null || x === undefined ? '' : (typeof x === 'number' ? fmt(x, v.format[b.columns[i]]) : x)}</td>`).join('') + '</tr></tfoot>' : '';
@@ -286,11 +293,39 @@
     const yr = y ? (y[1].length === 2 ? 2000 + +y[1] : +y[1]) : 0;
     return yr * 12 + MONTHS.indexOf(m[1].toLowerCase());
   };
+  // Labels that start with a number ("0-<1 Year", "2-<4 Years", "11-<16 Years", "29 & under") sort as numbers, not as text
+  // ("11-<16" before "2-<4"): Power BI sorts such a label by its own order column, which the database does not have.
+  const numKey = c => { const m = /^\s*[<>=+-]*\s*(\d+(?:\.\d+)?)/.exec(String(c)); return m ? +m[1] : null; };
+  const inNaturalOrder = (v, cats) => {
+    if ((v.has_sort && !v.sort_by_category) || cats.length < 2) return cats;
+    const keys = cats.map(numKey);
+    return keys.every(k => k !== null) ? cats.map((c, i) => [c, keys[i], i]).sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(x => x[0]) : cats;
+  };
   const inCalendarOrder = (v, cats) => {
-    if (v.has_sort || cats.length < 2) return cats;
+    if ((v.has_sort && !v.sort_by_category) || cats.length < 2) return cats;
+    const nat = inNaturalOrder(v, cats);
+    if (nat !== cats) return nat;
     const keys = cats.map(monthKey);
     return keys.every(k => k !== null) && new Set(keys).size === cats.length
       ? cats.map((c, i) => [c, keys[i]]).sort((a, b) => a[1] - b[1]).map(x => x[0]) : cats;
+  };
+  // A slice's label as the report sets it: "486 (72.1%)" (data value and percent of total, the default when the
+  // report shows labels and names no style), or with the category name when the style says so. Outside, with leader lines.
+  const pieLabel = v => {
+    const cs = v.style || {};
+    if (!cs.labels) return { color: theme.foreground, fontSize: 11 };
+    const what = (cs.pie_label || 'Data value, Percent of total').toLowerCase();
+    const all = what.includes('all');
+    const useName = all || what.includes('category'), useVal = all || what.includes('value'), usePct = all || what.includes('percent');
+    const pd = Math.min(Math.max(cs.labels_pct_precision === undefined ? 1 : cs.labels_pct_precision, 0), 10);
+    return { show: true, color: cs.labels_color || theme.muted, fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
+      fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      formatter: p => {
+        const val = fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value);
+        const pct = `${p.percent.toFixed(pd)}%`;
+        const nums = useVal && usePct ? `${val} (${pct})` : useVal ? val : usePct ? pct : '';
+        return [useName ? p.name : '', nums].filter(Boolean).join(' ');
+      } };
   };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
@@ -369,14 +404,15 @@
         b.rows.map(r => '<tr>' + r.map((x, i) => {
           const cf = applyCond[i] ? condCell(applyCond[i], colVals[i], x) : {};
           const ic = cf.icon ? iconOf(cf.icon) : null;
-          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
-          const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
+          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && !ic && `color:${cf.fg}`].filter(Boolean).join(';');
+          const text = cf.icon ? (ic ? `<span class="ic ic-${ic[0]}">${ic[1]}</span>` : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
           return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
         }).join('') + '</tr>').join('') +
         '</tbody>' + totalRow(v, b, isNum) + '</table></div>';
     },
     matrix(el, v, b) { R.table(el, v, b); },
-    text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
+    // the sizes a text box carries are points at the page's design width: they scale with the page like the boxes do
+    text(el, v) { el.innerHTML = `<div class="text">${(v.text || '').replace(/font-size:\s*([\d.]+)pt/g, 'font-size:calc($1pt * var(--scale, 1))')}</div>`; },
     slicer(el, v) { slicerRefreshers.push(slicerWidget(el, v, slicerHost)); },
     tooltip(el, v) {          // an info icon: the definition is its (native) tooltip
       const i = document.createElement('span');
@@ -390,7 +426,9 @@
       // (extract.py's visual_text) — same as the standard template.
       if (v.style && v.style.line_color) {
         const w = v.style.line_weight || 2;
-        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:${w}px;margin-top:${-w / 2}px;background:${v.style.line_color}"></div>`;
+        el.innerHTML = v.style.line_vertical
+          ? `<div style="position:absolute;top:0;bottom:0;left:50%;width:${w}px;margin-left:${-w / 2}px;background:${v.style.line_color}"></div>`
+          : `<div style="position:absolute;left:0;right:0;top:50%;height:${w}px;margin-top:${-w / 2}px;background:${v.style.line_color}"></div>`;
       } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {
@@ -406,10 +444,14 @@
     combo(el, v, b) { chart(el, v, cartesian(v, b, 'combo', false)); },
     pie(el, v, b) {
       const ci = col(b, 'category'), vi = col(b, 'value');
+      const pcs = v.style || {}, plp = pcs.legend_pos || 'Top';
       chart(el, v, { ...base, tooltip: { trigger: 'item', valueFormatter: x => fmt(x) },
+        legend: pcs.legend_on && pcs.legend_show !== false ? { icon: 'circle', itemWidth: 9, itemHeight: 9, textStyle: { color: theme.muted, fontSize: 11 },
+          ...(/Bottom/.test(plp) ? { bottom: 0 } : /Left/.test(plp) ? { left: 0, top: 'middle', orient: 'vertical' } : /Right/.test(plp) ? { right: 0, top: 'middle', orient: 'vertical' } : { top: 0 }) } : undefined,
         series: [{ type: 'pie', radius: v.inner_radius ? ['45%', '75%'] : '75%',
-                   data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi] })),
-                   label: { color: theme.foreground, fontSize: 11 } }] });
+                   data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi],
+                   ...(((v.style || {}).value_colors || {})[String(r[ci])] ? { itemStyle: { color: v.style.value_colors[String(r[ci])] } } : {}) })),
+                   label: pieLabel(v) }] });
     },
     gauge(el, v, b) {
       const r = b.rows[0] || []; const g = n => { const i = col(b, n); return i >= 0 ? r[i] : null; };
@@ -471,15 +513,17 @@
     const colorOf = (i, name) => vc[name] || (refOf(i, name) && sc[refOf(i, name)]) || (cs.point_color && (groups.size === 1 || Object.keys(sc).length) ? cs.point_color : null);
     const labelPos = horizontal ? { OutsideEnd: 'right', InsideEnd: 'insideRight', InsideCenter: 'inside', InsideBase: 'insideLeft' }
                                 : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
+    const insideLabel = v.stacked || /^inside/.test(labelPos[cs.labels_pos] || '');
+    const labelFor = (i, name) => { const bar = colorOf(i, name); return cs.labels_color || (insideLabel && bar ? inkFor(bar) : insideLabel ? '#FFFFFF' : theme.muted); };
     const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
-      color: cs.labels_color || theme.muted, fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      color: undefined, fontWeight: cs.labels_bold ? 'bold' : 'normal',
       fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
       formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
     const ser = order.map(n => [n, groups.get(n)]).map(([name, m], i) => ({
       name: shown(name), type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
       // a colour the report gave to one value of the category field recolours that bar (single series only)
       data: cats.map((c, k) => groups.size === 1 && vc[c] ? { value: val(m, c, k), itemStyle: { color: vc[c] } } : val(m, c, k)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label,
+      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label: label && { ...label, color: labelFor(i, name) },
       ...(colorOf(i, name) ? { itemStyle: { color: colorOf(i, name) }, lineStyle: { color: colorOf(i, name) } } : {}),
       ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));
@@ -492,12 +536,17 @@
           ...(/Bottom/.test(lp) ? { bottom: 0 } : /Left/.test(lp) ? { left: 0, top: 'middle', orient: 'vertical' }
              : /Right/.test(lp) ? { right: 0, top: 'middle', orient: 'vertical' } : { top: 0, left: /Center/.test(lp) ? 'center' : 0 }) }
       : undefined;
-    return { ...base, legend,
+    const legendRoom = groups.size > 1 && cs.legend_show !== false ? (/Bottom/.test(lp) ? { bottom: 30 } : /Left/.test(lp) ? { left: 100 } : /Right/.test(lp) ? { right: 100 } : {}) : {};
+    const grid = { ...base.grid, bottom: base.grid.bottom + (legendRoom.bottom || 0), left: base.grid.left + (legendRoom.left || 0), right: base.grid.right + (legendRoom.right || 0) };
+    return { ...base, grid, legend,
              xAxis: horizontal ? valAxis : catAxis, yAxis: horizontal ? { ...catAxis, inverse: true } : valAxis, series: ser };
   }
   function chart(el, v, option) {
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
+    // The tooltip lives in <body>, above every visual: inside the chart's own box it is clipped by the visual
+    // (`overflow: hidden`) and loses to any visual stacked higher, which is what hid it behind other charts.
+    option.tooltip = { ...(option.tooltip || {}), appendToBody: true, confine: false, extraCssText: 'z-index:2147483600;' };
     c.setOption(option); charts[v.id] = c;
   }
 
@@ -524,7 +573,15 @@
     try {
       const sql = bindSql(v.sql, v.params || [], currentValues());
       const rows = await fetchSQL(sql);
-      paint(v.id, toBlock(rows));
+      const block = toBlock(rows);
+      if (v.sql_total) {       // the grand-total row is a second query; if it fails the table still shows, without it
+        try {
+          const t = await fetchSQL(bindSql(v.sql_total, v.params || [], currentValues()));
+          const tb = toBlock(t);
+          if (tb.rows.length && tb.columns.length === block.columns.length) block.total = tb.rows[0];
+        } catch (e) { console.warn('total row skipped:', e.message); }
+      }
+      paint(v.id, block);
       const footer = document.createElement('div');
       footer.className = 'card-footer';
       footer.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'}`;

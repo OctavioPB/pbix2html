@@ -417,7 +417,25 @@ def _lit_number(raw: str | None) -> float | None:
     return None
 
 
-def _chart_style(objects: dict) -> dict:
+def _scope_field(scope: dict) -> str:
+    """'Entity.Property' of the column a `scopeId` comparison is about."""
+    col = (((scope or {}).get("Left") or {}).get("Column")) or {}
+    entity = (((col.get("Expression") or {}).get("SourceRef")) or {}).get("Entity")
+    return f"{entity}.{col.get('Property')}" if entity and col.get("Property") else ""
+
+
+def _dim_refs(projections: dict) -> set[str]:
+    """The category / series fields of a chart (`Table.Column`), which are what a per-value colour can refer to."""
+    out: set[str] = set()
+    for role in ("Category", "Series"):
+        for p in (projections or {}).get(role) or []:
+            ref = p.get("queryRef") if isinstance(p, dict) else p
+            if isinstance(ref, str):
+                out.add(ref)
+    return out
+
+
+def _chart_style(objects: dict, dim_fields: set[str] | None = None) -> dict:
     """How a chart is formatted in the report (`objects`): the colour of its bars/lines (`dataPoint`), its data
     labels, legend and axes. Keys are omitted when the report does not set them, so the renderer keeps its
     default. Series colours are keyed by the field's queryRef (`selector.metadata`)."""
@@ -437,7 +455,9 @@ def _chart_style(objects: dict) -> dict:
             point.setdefault(meta, colour)
         elif scope is not None:                 # a colour for one value of the series / category field
             text = literal_to_text((scope.get("Right") or {}))
-            if text:
+            # a file keeps the colours of fields that were since swapped out of the chart: only the ones for the
+            # fields the chart uses now count (when the chart's own fields are known)
+            if text and (dim_fields is None or _scope_field(scope) in dim_fields):
                 by_value.setdefault(text[:100], colour)
         elif not sel.get("data"):
             st.setdefault("point_color", colour)
@@ -447,8 +467,10 @@ def _chart_style(objects: dict) -> dict:
         st["value_colors"] = by_value
     if _object_flag(objects, "labels") is True:
         st["labels"] = True
-        for key, prop in (("labels_size", "fontSize"), ("labels_units", "labelDisplayUnits"), ("labels_precision", "labelPrecision")):
-            n = _lit_number(_object_text(objects, "labels", prop))
+        # a 100 % stacked chart keeps its percentage labels under `detail*` names
+        for key, props in (("labels_size", ("fontSize", "detailFontSize")), ("labels_units", ("labelDisplayUnits", "detailLabelDisplayUnits")),
+                           ("labels_precision", ("labelPrecision", "detailLabelPrecision"))):
+            n = next((x for x in (_lit_number(_object_text(objects, "labels", p)) for p in props) if x is not None), None)
             if n is not None:
                 st[key] = n
         if _object_flag(objects, "labels", "bold") is not None:
@@ -459,8 +481,18 @@ def _chart_style(objects: dict) -> dict:
         colour = _object_color(objects, "labels", "color")
         if colour:
             st["labels_color"] = colour
+        # pie / donut: what a slice label says (`labelStyle`: Category / Data value / Percent of total / combinations)
+        # and how many decimals the percentage has
+        style_txt = (_object_text(objects, "labels", "labelStyle") or "").strip()
+        if style_txt and re.fullmatch(r"[A-Za-z ,]{1,60}", style_txt):
+            st["pie_label"] = style_txt
+        pct = _lit_number(_object_text(objects, "labels", "percentageLabelPrecision"))
+        if pct is not None:
+            st["labels_pct_precision"] = pct
     if _object_flag(objects, "legend") is False:
         st["legend_show"] = False
+    elif _object_flag(objects, "legend") is True:
+        st["legend_on"] = True
     pos = (_object_text(objects, "legend", "position") or "").strip()
     if pos in ("Top", "Bottom", "Left", "Right", "TopCenter", "BottomCenter", "LeftCenter", "RightCenter"):
         st["legend_pos"] = pos
@@ -849,6 +881,10 @@ def _shape_geometry(objects: dict) -> dict:
     kind = (_object_text(objects, "shape", "tileShape") or _object_text(objects, "general", "shapeType") or "").lower()
     if kind in _SHAPE_KINDS:
         out["shape_kind"] = _SHAPE_KINDS[kind]
+    elif not kind and (objects or {}).get("line") and not (objects or {}).get("fill") and not (objects or {}).get("shape"):
+        # a basicShape that names no silhouette and no fill but has a Line card is Power BI's Line: its 6 x 270 box
+        # is a vertical rule (seen between the four charts of a real report), not a filled bar
+        out["shape_kind"] = "line"
     angle = _object_text(objects, "rotation", "shapeAngle") or _object_text(objects, "rotation", "angle")
     if angle and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", angle):
         deg = float(angle.strip().rstrip("DL"))
@@ -1250,7 +1286,7 @@ def _parse_visual(vc: dict) -> dict:
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": {**_style_with_fill(container_style(vco), sv.get("objects") or {}),
                   **(_table_style(sv.get("objects") or {}) if vtype in _TABLE_KINDS else {}),
-                  **(_chart_style(sv.get("objects") or {}) if "Chart" in vtype else {})},
+                  **(_chart_style(sv.get("objects") or {}, _dim_refs(sv.get("projections"))) if "Chart" in vtype else {})},
         "texts": texts,
         "action": _visual_link(vco),
         "sort": _proto_sort(sv),
@@ -1816,7 +1852,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "texts": _pbir_texts(vco, vis),
             "style": {**_style_with_fill(container_style(vco), vis.get("objects") or {}),
                       **(_table_style(vis.get("objects") or {}) if vtype in _TABLE_KINDS else {}),
-                  **(_chart_style(vis.get("objects") or {}) if "Chart" in vtype else {})},
+                  **(_chart_style(vis.get("objects") or {}, _dim_refs({r: [p.get("queryRef") for p in ((c or {}).get("projections") or [])] for r, c in (((vis.get("query") or {}).get("queryState")) or {}).items()})) if "Chart" in vtype else {})},
             "action": _visual_link(vco),
             "sort": _pbir_sort(vis),
             **({"button": parse_button(vis)} if vtype == "actionButton" else {}),
