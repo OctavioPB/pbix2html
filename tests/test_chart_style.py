@@ -182,6 +182,40 @@ def test_hundred_percent_stacked_column_with_only_a_legend_field_drafts_one_blan
     assert "CAST(' ' AS VARCHAR(1))" in sql        # the constant category: one x-axis slot for every legend value
 
 
+def test_power_bis_unprefixed_chart_types_are_the_stacked_ones():
+    """`columnChart`/`barChart` ARE Power BI's "Stacked column/bar chart" — the clustered ones
+    carry the `clustered` prefix. A `"stacked" in type` test got exactly those two backwards, so
+    the most common stacked charts drew one bar per measure instead of one stacked bar. On a
+    100 % chart that is the whole bug: rescaling each lone bar by its own total puts every bar
+    at 100 %."""
+    from pbix2html.render import _STACKED_TYPES
+    for t in ("columnChart", "barChart", "stackedColumnChart", "stackedBarChart",
+              "hundredPercentStackedColumnChart", "hundredPercentStackedBarChart",
+              "stackedAreaChart", "lineStackedColumnComboChart"):
+        assert t in _STACKED_TYPES, t
+    for t in ("clusteredColumnChart", "clusteredBarChart", "lineChart", "areaChart",
+              "lineClusteredColumnComboChart", "pieChart"):
+        assert t not in _STACKED_TYPES, t
+
+
+def test_a_hundred_percent_chart_with_several_measures_and_no_axis_is_one_column():
+    """A 100 % stacked column whose Axis well is empty and whose Values well holds several
+    measures is ONE column with the measures stacked in it (the "share of total" chart). It was
+    refused outright, so the visual stayed manual; now every arm shares one constant x slot."""
+    from pbix2html import semantic
+    tm = {"E": "SELECT id, ethnicity FROM db.emp"}
+    measures = {("E", "White"): 'CALCULATE(COUNTROWS(E), E[ethnicity] = "White")',
+                ("E", "Asian"): 'CALCULATE(COUNTROWS(E), E[ethnicity] = "Asian")'}
+    v = {"projections": {"Y": ["E.White", "E.Asian"]}}
+    sql, _ = semantic._draft_visual_sql(v, "column", measures, tm, [], {})
+    assert sql.count("CAST(' ' AS VARCHAR(1)) AS category") == 2      # one constant slot per arm
+    assert "'White' AS series" in sql and "'Asian' AS series" in sql
+    assert "UNION ALL" in sql and "GROUP BY 2" in sql                 # no category column to group by
+    # a single measure with no axis is a card, not a chart, and still stays manual
+    assert semantic._draft_visual_sql({"projections": {"Y": ["E.White"]}}, "column",
+                                      measures, tm, [], {}) is None
+
+
 def test_per_value_colours_only_count_for_the_fields_the_chart_uses_now():
     def scope(entity, prop, text):
         return {"data": [{"scopeId": {"Comparison": {"Left": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},

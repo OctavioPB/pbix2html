@@ -83,6 +83,17 @@ def _background_image_css(bg: dict | None) -> str | None:
 _HEX6 = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _FLEX = {"left": "flex-start", "center": "center", "right": "flex-end",
          "top": "flex-start", "middle": "center", "bottom": "flex-end"}
+# Which Power BI chart types stack their series. It has to be an explicit list, because the
+# *unprefixed* names are the stacked ones: Power BI calls its "Stacked column chart"
+# `columnChart` and its "Clustered column chart" `clusteredColumnChart` (same for bar). A
+# `"stacked" in type` test therefore got the two most common stacked charts backwards and drew
+# one bar per measure instead of one stacked bar — which is what a 100 % chart looks like when
+# it goes wrong, since rescaling each lone bar by its own total puts every one of them at 100 %.
+_STACKED_TYPES = {
+    "barChart", "stackedBarChart", "hundredPercentStackedBarChart",
+    "columnChart", "stackedColumnChart", "hundredPercentStackedColumnChart",
+    "stackedAreaChart", "lineStackedColumnComboChart",
+}
 
 
 def _rgba(color: str | None, transparency: float | None) -> str | None:
@@ -433,7 +444,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "y_fields": [{k: str(f.get(k) or "")[:200] for k in ("entity", "prop", "name", "ref")}
                              for f in (v.get("y_fields") or []) if isinstance(f, dict)],
                 "col_align": [a if a in ("left", "center", "right") else None for a in (v.get("col_align") or [])],
-                "stacked": "stacked" in v["type"].lower(),
+                "stacked": v["type"] in _STACKED_TYPES,
                 "percent": v["type"].lower().startswith("hundredpercent"),
                 "area": "area" in v["type"].lower(),
                 "inner_radius": v["type"] == "donutChart", "axis": r.get("axis") or {},

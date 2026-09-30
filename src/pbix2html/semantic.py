@@ -2937,7 +2937,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
 
     # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
     single_extra: list[str] = []
-    multi_arm = kind in _UNION_ARM_KINDS and len(values) > 1 and len(categories) == 1 and kind != "pie"
+    multi_arm = kind in _UNION_ARM_KINDS and len(values) > 1 and len(categories) <= 1 and kind != "pie"
     if not multi_arm:
         done = expand(fields, sources, aliases)
         if done is None:
@@ -2974,7 +2974,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         return assemble(parts, []), params_used
 
     if kind in _UNION_ARM_KINDS:
-        if not values or not categories:
+        if not values:
+            return None
+        # No axis field at all is a real shape, not a broken one: a stacked (or 100 % stacked)
+        # bar/column with several measures and an empty Axis well is one column with the
+        # measures stacked in it — the "share of total" card every real report has a row of.
+        # Only the several-measures arms below can draw it (each measure is a series), so a
+        # lone measure with no category is still a card, not a chart. Combo stays out: with two
+        # axes and one x slot there is nothing sensible to draw, and line/area would be a point.
+        if not categories and not (len(values) > 1 and kind in ("bar", "column")):
             return None
         if kind == "pie" and len(categories) != 1:
             return None
@@ -2991,8 +2999,13 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             pos.setdefault(values[0].key, len(parts))
             return assemble(parts, list(range(1, len(categories) + 1)), _order_by(sort, pos)), params_used
         # Several measures: one arm per measure, the measure's own name as the series.
-        if len(categories) != 1 or kind == "pie" or (categories[0].role or "").lower() in ("series", "legend"):
+        if len(categories) > 1 or kind == "pie":
             return None
+        if categories and (categories[0].role or "").lower() in ("series", "legend"):
+            return None
+        # an empty Axis well: every arm shares one constant x-axis slot, so the measures stack
+        # into a single column instead of standing next to each other
+        category_sql = f"{categories[0].expr} AS category" if categories else _CONST_CATEGORY
         arms, all_params = [], []
         # two measures with the same column name (Sum of x over table A / table B): tell them apart
         dup = {f.label for f in values if [g.label for g in values].count(f.label) > 1}
@@ -3014,11 +3027,13 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             f = arm_field
             name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
             label = name.replace("'", "''")
-            arms.append(assemble([f"{categories[0].expr} AS category",
+            arms.append(assemble([category_sql,
                                   f"'{label}' AS series",
-                                  f'{f.expr} AS "value"'], [1, 2], "", arm_sources, arm_where, arm_extra))
+                                  f'{f.expr} AS "value"'], [1, 2] if categories else [2],
+                                 "", arm_sources, arm_where, arm_extra))
         # a sort on the category applies to the whole union (column 1)
-        return "\nUNION ALL\n".join(arms) + _order_by(sort, {categories[0].key: 1}), all_params
+        order = _order_by(sort, {categories[0].key: 1}) if categories else ""
+        return "\nUNION ALL\n".join(arms) + order, all_params
 
     # table / matrix / multicard: every field becomes a column, in projection order.
     parts, group_positions = [], []

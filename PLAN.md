@@ -138,7 +138,8 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - Mapping: 54 data visuals, 44 drafted. Still manual: selection-dependent measures (`MIN(level)` over a
   slicer, `VAR` + `min(Calendar[Date])`), one table not connected to any fact (`not_connected`), 24 of 38 measures.
 - `FILTER(T, T[c] = MIN(T[c]))` (selection-dependent "top level") is now drafted as a DISTINCT-key LEFT JOIN; unverified against real numbers. `MIN/MAX(T[c])` + `VAR` + month-comparison measures are drafted for card context (mapping 44 → 49 of 54). Grouped visuals evaluate MIN/MAX per group (calendar-column category, own-fact category, or whole selection when the category doesn't filter T); `Tooltips`-role fields are no longer drafted. A measure over several fact tables (`Headcount Ending`) is split into one derived table per fact (`multi_fact`). TestReport3 mapping: 53 of 54; only `Open Reqs`+`Workday codes` (no relationship) is left.
-- Not yet verified: 100%-stacked charts in the renderer, MobileState (ignored), storage-mode info in the mapping report.
+- Not yet verified: MobileState (ignored), storage-mode info in the mapping report. (100%-stacked
+  charts: two real bugs found and fixed later the same week — see "The 100 % stacked column" below.)
 
 ## Findings from a fourth real report, Import model (2026-09-29)
 
@@ -405,6 +406,34 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
   way, though that's only the informational note, not necessarily drafting itself).
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
+
+## The 100 % stacked column: two more root causes, 2026-09-30
+
+Reported three times against `TestReport3`'s four header charts ("Starting Headcount", "New
+Hires"…): the HTML draws **one bar per field, each full height**, instead of one column split
+into shares. Two earlier attempts fixed real but *different* bugs
+(`chart_dimensions`, the series-only case) and did not move this chart, because neither was its
+cause. Both causes below were found only after "a bar for each **field**" pinned the shape down —
+several *measures*, not one measure split by a legend.
+
+- [x] **`columnChart` and `barChart` are Power BI's *stacked* charts.** The clustered ones carry
+  the `clustered` prefix (`clusteredColumnChart`); the unprefixed name is the stacked variant.
+  `render.py` decided with `"stacked" in v["type"].lower()`, which is exactly backwards for the
+  two most common stacked charts in existence — they rendered clustered, one bar per measure.
+  Now an explicit `_STACKED_TYPES` set. On a 100 % chart this alone produces the reported
+  picture: with nothing stacked, each bar is rescaled by its own total and every one hits 100 %.
+- [x] **Several measures with an empty Axis well was refused outright.** A 100 % stacked column
+  whose Values well holds one measure per category and whose Axis well is empty is *one* column
+  with the measures stacked in it. `_draft_visual_sql` required `len(categories) == 1` for the
+  several-measures `UNION ALL` arms, so the visual stayed manual and drew nothing at all. Each
+  arm now shares one constant x-axis slot (`_CONST_CATEGORY`, the same device the series-only
+  case uses). Kept out: `combo` (two axes and one x slot has no sensible drawing — its existing
+  "stays manual" test still passes) and a lone measure with no axis, which is a card.
+- **Still not confirmed against the reporter's file.** Fix 1 explains the symptom exactly if the
+  chart is drafted; fix 2 explains it if the chart was blank/manual. Run `pbix2html mapping
+  <pbix>` and check what it says for those four visuals — `ok` means fix 1 was it, anything else
+  names the remaining reason. Two prior sessions "fixed" this from inference alone; the lesson
+  is to read the visual's real `projections` before theorising.
 
 ## A card counting a text column showed the first value, 2026-09-30
 
