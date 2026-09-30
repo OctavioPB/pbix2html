@@ -44,3 +44,38 @@ derived tables) as **fixed predicates**, next to the slicer parameters.
   and the PBIR types `Range`, `Passthrough`, `Include`, `Exclude`, `Tuple`, `RelativeTime` (reported as not
   applied).
 - Comparison filters on blanks: DAX treats blank as 0 in `<`; SQL drops NULLs. Left as SQL; validate.
+
+## RelativeDate: shape confirmed against a real report (2026-09-30), still not implemented
+
+A classic-format `type: "RelativeDate"` filter (`TestReport7`, a fact table's date column, an "in
+the last N months" filter pane entry) has its `definition` as an ordinary `Between` condition, but with
+`LowerBound`/`UpperBound` built from `DateSpan`/`DateAdd`/`Now` query-expression nodes instead of a
+literal:
+
+```json
+"Between": {
+  "Expression": {"Column": {"Expression": {"SourceRef": {"Source": "d"}}, "Property": "date_key"}},
+  "LowerBound": {"DateSpan": {"TimeUnit": 0, "Expression":
+    {"DateAdd": {"Amount": -13, "TimeUnit": 2, "Expression":
+      {"DateAdd": {"Amount": 1, "TimeUnit": 0, "Expression": {"Now": {}}}}}}}},
+  "UpperBound": {"DateSpan": {"TimeUnit": 0, "Expression": {"Now": {}}}}
+}
+```
+
+`TimeUnit` here is **not** the embed-API's `RelativeDateFilterTimeUnit` (Days/Weeks/CalendarWeeks/
+Months/...) — it's the semanticQuery schema's own enum, confirmed from the same Microsoft source this
+ADR already cites for `ComparisonKind`/aggregate `Function` (`fabric/item/report/definition/
+semanticQuery/1.4.0/schema.json`, `QueryDateAddExpression`/`QueryDateSpanExpression`): **0 Day, 1
+Week, 2 Month, 3 Year, 4 Decade, 5 Second, 6 Minute, 7 Hour**. Decoded, this filter reads `date_key
+BETWEEN DateSpan(Day, (tomorrow) - 13 Month) AND DateSpan(Day, now)` — Power BI's standard
+"+1 day then subtract N units" construction for an inclusive "in the last 13 months" window;
+`DateSpan(Day, x)` floors `x` to its date (drops the time-of-day). `Operator` (`InLast`/`InThis`/
+`InNext`, per the embed-API's `RelativeDateOperators`) is presumably distinguished by which side gets
+the `DateAdd` and the sign of `Amount` — only the `InLast` shape has been seen in a real file so far.
+
+**Not implemented.** A fixed WHERE predicate matching this shape could reasonably compile straight to
+`date_key BETWEEN CAST(CURRENT_DATE + 1 - INTERVAL '13' MONTH AS DATE) AND CURRENT_DATE` (letting
+Teradata's own `CURRENT_DATE` evaluate fresh on every run sidesteps the snapshot-vs-live staleness
+question entirely — the SQL text is fixed, what `CURRENT_DATE` evaluates to on execution is not).
+Held back pending: a second real example to confirm the `InThis`/`InNext` shapes before generalizing,
+and confirming the `TimeUnit` mapping above holds for `Week` (only `Day` and `Month` seen so far).

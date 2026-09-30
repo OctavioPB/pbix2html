@@ -661,12 +661,12 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str,
                        siblings: dict[str, str] | None = None, _stack: tuple = ()) -> str | None:
     """One DAX calculated column of a calendar table → a Teradata expression, or None.
 
-    Recognised: FORMAT(date, "fmt"), YEAR/MONTH/DAY, TODAY()/NOW(), VALUE, IF, CONCATENATE and
-    `&` (operands cast to text), ENDOFMONTH/STARTOFMONTH/EOMONTH, CEILING(x, 1), `VAR ... RETURN`,
-    literals, comparisons (`=` and `==`), && / ||, + - * / (division is exact: DAX divides as
-    decimals, SQL integers would truncate), parentheses, and references to the calendar's own
-    date column or to its *other calculated columns* (inlined; cycles refused). Everything else
-    is refused and that column is left out."""
+    Recognised: FORMAT(date, "fmt"), YEAR/MONTH/DAY, TODAY()/NOW(), VALUE, IF, ISBLANK, BLANK(),
+    DATE(y, m, d), CONCATENATE and `&` (operands cast to text), ENDOFMONTH/STARTOFMONTH/EOMONTH,
+    CEILING(x, 1), `VAR ... RETURN`, literals, comparisons (`=` and `==`), && / ||, + - * /
+    (division is exact: DAX divides as decimals, SQL integers would truncate), parentheses, and
+    references to the calendar's own date column or to its *other calculated columns* (inlined;
+    cycles refused). Everything else is refused and that column is left out."""
     siblings = siblings or {}
     text = re.sub(r"\s+", " ", expr or "").strip()
     tokens: list[tuple[str, str]] = []
@@ -788,6 +788,23 @@ def _calendar_expr_sql(expr: str, date_col: str, date_expr: str,
         if fn == "VALUE":
             (a,) = args()
             return a if re.fullmatch(r"[\d.]+", a) else f"CAST({a} AS INTEGER)"
+        if fn == "ISBLANK":
+            (a,) = args()
+            return f"({a} IS NULL)"
+        if fn == "BLANK":
+            take("(")
+            take(")")
+            return "NULL"
+        if fn == "DATE":
+            a = args()
+            if len(a) != 3:
+                raise _CalendarUnsupported(fn)
+            y, mo, d = a
+            # Built from year/month/day arithmetically (ADD_MONTHS + a day offset) rather than a
+            # formatted string, so a non-literal month/day (the common "first of the month" idiom,
+            # DATE(YEAR(x), MONTH(x)+1, 1)) doesn't need its own zero-padding logic.
+            return (f"(ADD_MONTHS(CAST(CAST({y} AS VARCHAR(4)) || '-01-01' AS DATE FORMAT 'YYYY-MM-DD'), "
+                    f"CAST({mo} AS INTEGER) - 1) + (CAST({d} AS INTEGER) - 1))")
         if fn == "CONCATENATE":
             a = args()
             if len(a) != 2:
@@ -906,6 +923,62 @@ def detect_calendar_tables(model: dict) -> dict[str, dict]:
         except ValueError:
             continue
         out[table] = {"sql": query, "date_column": date_col, "unsupported": unsupported, "notes": notes}
+    return out
+
+
+def _table_calc_columns(model: dict) -> dict[tuple[str, str], str | None]:
+    """Every *regular* table's calculated column — excluding a DAX `CALENDAR()` calculated
+    table's own columns, which `detect_calendar_tables` already handles as a full
+    replacement query rather than a per-column expression against a `table_map` source —
+    translated to a Teradata scalar expression, keyed `(table, column)`. Reuses the same
+    DAX engine: pbixray's schema lists a calculated
+    column exactly like a real source column, so a plain field reference to one
+    (`_resolve_field`) can't otherwise tell "computed by DAX" from "actually in the
+    mapped Teradata query" — drafting it as a bare `alias.column` reference produces SQL
+    that fails at Teradata with "column does not exist" (seen against a real report: a
+    date bucketed to the 1st of its month, `IF(ISBLANK(d), BLANK(), DATE(YEAR(d),
+    MONTH(d), 1))`, on a table that is not itself a calculated one).
+
+    A calculated column's DAX is row-context (it can reference its own table's *other*
+    columns, not aggregate across rows), so this tries each of the table's own real
+    (non-calculated) columns in turn as the anchor `_calendar_expr_sql` resolves
+    `[ColumnName]` references against — the same mechanism a calendar table's `Date`
+    column already is, just not decided in advance. Only one is expected to actually be
+    referenced; trying the wrong one simply fails to parse (safely) rather than
+    mistranslating. The value is `None` for a calculated column whose DAX isn't
+    recognised — still present in the dict (unlike a real column, absent) so a caller can
+    refuse to draft it rather than silently treating it as a source column."""
+    calc_table_names = {t.get("TableName") for t in model.get("calculated_tables") or [] if isinstance(t, dict)}
+    calc = [c for c in model.get("calculated_columns") or []
+           if isinstance(c, dict) and c.get("TableName") and c.get("ColumnName")
+           and c["TableName"] not in calc_table_names]
+    if not calc:
+        return {}
+    by_table: dict[str, list[dict]] = {}
+    for c in calc:
+        by_table.setdefault(c["TableName"], []).append(c)
+    calc_keys = {(c["TableName"], c["ColumnName"]) for c in calc}
+    real_by_table: dict[str, list[str]] = {}
+    for col in model.get("columns") or []:
+        if not isinstance(col, dict):
+            continue
+        t, n = col.get("TableName"), col.get("ColumnName")
+        if t and n and (t, n) not in calc_keys:
+            real_by_table.setdefault(t, []).append(n)
+    out: dict[tuple[str, str], str | None] = {}
+    for table, cols in by_table.items():
+        if _AUTO_DATE_TABLE_RE.match(table):
+            continue                     # handled as a calendar table instead
+        alias = _sql_alias(table)
+        siblings = {c["ColumnName"]: c.get("Expression") or "" for c in cols}
+        for c in cols:
+            key, expr, sql = (table, c["ColumnName"]), c.get("Expression") or "", None
+            own_siblings = {k: v for k, v in siblings.items() if k != c["ColumnName"]}
+            for real_col in real_by_table.get(table, []):
+                sql = _calendar_expr_sql(expr, real_col, f"{alias}.{_sql_col(real_col)}", own_siblings)
+                if sql is not None:
+                    break
+            out[key] = sql
     return out
 
 
@@ -1780,18 +1853,28 @@ class _Field:
     aggs: list[tuple[str, str]] = field(default_factory=list)     # per-table aggregates of a multi-fact measure
 
 
-def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) -> _Field | None:
+def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str],
+                   calc_columns: dict[tuple[str, str], str | None] | None = None) -> _Field | None:
     """A ref is either already agg-wrapped by Power BI ('Sum(Sales.Amount)' — a raw
     column auto-aggregated in a Values well), a named measure (whose own DAX gets
-    translated, see `translate_dax`), or a plain dimension column. Returns None only
-    when a named measure's DAX isn't confidently translatable; the caller then leaves
-    the whole visual as a TODO rather than half-drafting it."""
+    translated, see `translate_dax`), a calculated column (see `_table_calc_columns` —
+    pbixray's schema can't tell one apart from a real source column by name alone), or a
+    plain dimension column. Returns None when a named measure's DAX, or a known
+    calculated column's, isn't confidently translatable; the caller then leaves the
+    whole visual as a TODO rather than half-drafting it."""
+    calc_columns = calc_columns or {}
     agg, table, col = query_ref_parts(ref)
     if agg:
         sql_func, distinct = _REF_AGG_TO_SQL.get(agg.lower(), (None, False))
         if sql_func is None:
             return None
-        target = f"{_sql_alias(table)}.{_sql_col(col)}"
+        if (table, col) in calc_columns:
+            calc_sql = calc_columns[(table, col)]
+            if calc_sql is None:
+                return None
+            target = f"({calc_sql})"
+        else:
+            target = f"{_sql_alias(table)}.{_sql_col(col)}"
         expr = f"{sql_func}({'DISTINCT ' if distinct else ''}{target})"
         return _Field(role, True, col, _sql_col(col), expr, {table}, (table, col))
     measure_dax = measures.get((table, col))
@@ -1805,6 +1888,11 @@ def _resolve_field(role: str, ref: str, measures: dict[tuple[str, str], str]) ->
                 translated = parts
         return _Field(role, True, col, _sql_col(col), translated.text, set(translated.tables), (table, col),
                       set(translated.selmins), set(translated.ctxs), list(translated.aggs))
+    if (table, col) in calc_columns:
+        calc_sql = calc_columns[(table, col)]
+        if calc_sql is None:
+            return None
+        return _Field(role, False, col, _sql_col(col), calc_sql, {table}, (table, col))
     return _Field(role, False, col, _sql_col(col),
                   f"{_sql_alias(table)}.{_sql_col(col)}", {table}, (table, col))
 
@@ -1873,7 +1961,14 @@ def _find_join_path(tables: list[str], relationships: list[dict]) -> list[tuple[
 
 
 _CHART_KINDS = {"bar", "column", "line", "pie"}
-_DRAFTABLE_KINDS = {"card", "kpi", "gauge", "table", "matrix", "multicard"} | _CHART_KINDS
+# A combo chart's SQL is identical in shape to the "several measures" UNION ALL arms a
+# plain bar/column/line chart already gets (category, series, value) — the only thing
+# that's actually combo-specific is which series is a line vs a column, which lives in
+# the yaml's `axis` (see `_combo_axis`), not in the query. So it shares that drafting
+# path (`_UNION_ARM_KINDS`) without joining `_CHART_KINDS` itself, since `_CHART_KINDS`
+# also gates the single-measure chart shape combo never uses (it always has >= 2: Y and Y2).
+_UNION_ARM_KINDS = _CHART_KINDS | {"combo"}
+_DRAFTABLE_KINDS = {"card", "kpi", "gauge", "table", "matrix", "multicard", "combo"} | _CHART_KINDS
 
 
 def _draft_from_clause(tables_needed: list[str], table_map: dict[str, str],
@@ -2320,6 +2415,81 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
     return where_parts, params_used
 
 
+def _multi_value_table(categories: list["_Field"], values: list["_Field"], kind: str, sort: list[dict] | None, *,
+                       expand_fn, table_map: dict[str, str], relationships: list[dict],
+                       parameters: dict[str, dict], filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
+    """A table/matrix/multicard whose several VALUE fields are each their own, independent
+    aggregate over their own (single) table — not one composite expression spanning tables,
+    which is `multi_fact`, just below. The common real shape: a customer/site summary table
+    with a handful of plain dimension columns next to one total per fact table, several fact
+    tables side by side (found against a real report: a "Customer Monthly Summary" table with
+    columns from four unrelated fact tables sharing only a `Client info` dimension).
+
+    Same reasoning and the same fix as `multi_fact`: one derived table per fact (its own
+    fields, aggregated per category, joined only to the category tables), LEFT JOINed together
+    on the shared category keys — just carrying each fact's own several output columns instead
+    of one formula built from `{AGG:n}` markers. Selection-dependent fields (`selmins`/`ctxs`)
+    aren't modelled here; they need the fact table itself for their own join, which this split
+    can't provide, so any such field leaves the whole visual manual instead."""
+    if any(vf.selmins or vf.ctxs for vf in values):
+        return None
+    cat_tables = list(dict.fromkeys(t for c in categories for t in c.tables))
+    by_table: dict[str, list[_Field]] = {}
+    for vf in values:
+        by_table.setdefault(next(iter(vf.tables)), []).append(vf)
+
+    def null_safe(alias: str) -> str:
+        return " AND ".join(f"({alias}.k{i} = {c.expr} OR ({alias}.k{i} IS NULL AND {c.expr} IS NULL))"
+                            for i, c in enumerate(categories, start=1))
+
+    used: list[str] = []
+    derived: list[tuple[str, str]] = []
+    col_ref: dict[int, str] = {}
+    for i, (table, vfs) in enumerate(by_table.items(), start=1):
+        built = _draft_from_clause(list(dict.fromkeys(cat_tables + [table])), table_map, relationships)
+        if built is None:
+            return None
+        srcs, als = built
+        where, ps = _draft_where(parameters, als, table_map, relationships, filters)
+        used += [p for p in ps if p not in used]
+        done = expand_fn(vfs, srcs, als, where, categories)
+        if done is None:
+            return None
+        srcs, ps, extra = done
+        used += [p for p in ps if p not in used]
+        cols = [f"{c.expr} AS k{j}" for j, c in enumerate(categories, start=1)]
+        cols += [f"{vf.expr} AS a{n}" for n, vf in enumerate(vfs)]
+        sql = "SELECT " + ", ".join(cols) + "\nFROM " + "\n".join(srcs)
+        if where:
+            sql += "\nWHERE " + " AND ".join(where)
+        if categories:
+            sql += "\nGROUP BY " + ", ".join([str(j) for j in range(1, len(categories) + 1)] + extra)
+        derived.append((f"arm{i}", sql))
+        for n, vf in enumerate(vfs):
+            col_ref[id(vf)] = f"arm{i}.a{n}"
+
+    if categories:
+        built = _draft_from_clause(cat_tables, table_map, relationships)
+        if built is None:
+            return None
+        msrcs, mals = built
+        mwhere, ps = _draft_where(parameters, mals, table_map, relationships, filters)
+        used += [p for p in ps if p not in used]
+        msrcs = msrcs + [f"LEFT JOIN {_subquery(sql, a)} ON {null_safe(a)}" for a, sql in derived]
+    else:
+        mals, mwhere = {}, []
+        msrcs = [_subquery(derived[0][1], derived[0][0])] + [f"CROSS JOIN {_subquery(sql, a)}"
+                                                             for a, sql in derived[1:]]
+    cols = [f"{c.expr} AS {c.out_name}" for c in categories] + [f"{col_ref[id(vf)]} AS {vf.out_name}" for vf in values]
+    pos: dict[tuple[str, str], int] = {}
+    for i, x in enumerate(categories + values, start=1):
+        pos.setdefault(x.key, i)
+    sql = "SELECT DISTINCT " + ", ".join(cols) + "\nFROM " + "\n".join(msrcs)
+    if mwhere:
+        sql += "\nWHERE " + " AND ".join(mwhere)
+    return sql + _order_by(sort, pos), used
+
+
 def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, sort: list[dict] | None, *,
                expand_fn, table_map: dict[str, str], relationships: list[dict],
                parameters: dict[str, dict], filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
@@ -2430,7 +2600,8 @@ def multi_fact(values: list["_Field"], categories: list["_Field"], kind: str, so
 
 def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
                        relationships: list[dict], parameters: dict[str, dict],
-                       filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
+                       filters: list[dict] | None = None, *,
+                       calc_columns: dict[tuple[str, str], str | None] | None = None) -> tuple[str, list[str]] | None:
     """Auto-draft one visual's SQL, or None to leave it a TODO.
 
     Covers card, kpi, gauge, pie, bar/column/line, table/matrix/multicard, returning
@@ -2449,7 +2620,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         if role.lower() == "tooltips":       # only shown on hover; the renderer has no place for them
             continue
         for ref in refs or []:
-            f = _resolve_field(role, ref, measures)
+            f = _resolve_field(role, ref, measures, calc_columns)
             if f is None:
                 return None
             fields.append(f)
@@ -2485,11 +2656,22 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     def value_tables(fs: list[_Field]) -> set[str]:
         return {t for f in fs for t in f.tables}
 
-    if len(value_tables(values)) > 1 and not (kind in _CHART_KINDS and len(values) > 1
-                                              and all(len(f.tables) == 1 for f in values)):
-        return multi_fact(values, categories, kind, sort, expand_fn=expand,
-                          table_map=table_map, relationships=relationships, parameters=parameters,
-                          filters=filters)
+    if len(value_tables(values)) > 1:
+        # A table/matrix/multicard with several independent value fields (not one composite
+        # expression spanning tables — that's multi_fact, just below) each from their own,
+        # single table: the common real shape is a handful of plain dimension columns next to
+        # one aggregate per fact table, e.g. a customer summary table pulling a monthly total
+        # from three unrelated fact tables side by side. Same derived-table-per-fact + LEFT
+        # JOIN split as multi_fact, just carrying several independent output columns instead
+        # of one formula built from {AGG:n} markers.
+        if kind in ("table", "matrix", "multicard") and len(values) > 1 and all(len(f.tables) == 1 for f in values):
+            return _multi_value_table(categories, values, kind, sort, expand_fn=expand,
+                                      table_map=table_map, relationships=relationships,
+                                      parameters=parameters, filters=filters)
+        if not (kind in _UNION_ARM_KINDS and len(values) > 1 and all(len(f.tables) == 1 for f in values)):
+            return multi_fact(values, categories, kind, sort, expand_fn=expand,
+                              table_map=table_map, relationships=relationships, parameters=parameters,
+                              filters=filters)
 
     tables_needed = list(dict.fromkeys(t for f in fields for t in f.tables))
     built = _draft_from_clause(tables_needed, table_map, relationships)
@@ -2500,7 +2682,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
 
     # single-FROM shapes (everything but the multi-measure chart, which builds one FROM per arm)
     single_extra: list[str] = []
-    multi_arm = kind in _CHART_KINDS and len(values) > 1 and len(categories) == 1 and kind != "pie"
+    multi_arm = kind in _UNION_ARM_KINDS and len(values) > 1 and len(categories) == 1 and kind != "pie"
     if not multi_arm:
         done = expand(fields, sources, aliases)
         if done is None:
@@ -2536,7 +2718,7 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             parts.append(f"{values[1].expr} AS target")
         return assemble(parts, []), params_used
 
-    if kind in _CHART_KINDS:
+    if kind in _UNION_ARM_KINDS:
         if not values or not categories:
             return None
         if kind == "pie" and len(categories) != 1:
@@ -2592,16 +2774,50 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     return assemble(parts, group_positions if values else [], _order_by(sort, pos)), params_used
 
 
+def _combo_axis(v: dict, measures: dict[tuple[str, str], str],
+                calc_columns: dict[tuple[str, str], str | None] | None = None) -> dict[str, str]:
+    """A combo chart's per-series axis (`{series_name: "line"}`; a name absent here is the
+    renderer's column/bar default) — a `Y2`-role field is Power BI's line series, `Y` the
+    column one. `_draft_visual_sql` draws the same UNION ALL arms a plain multi-measure
+    bar/column/line chart does (see `_UNION_ARM_KINDS`) and has no reason to know about
+    `axis` at all — it's a yaml-only, non-SQL fact — so this repeats just its label
+    disambiguation (not the query) to keep the same series names.
+
+    A single total measure (no `Y` at all, only one `Y2`, or vice versa) never gets a
+    `series` column in the first place — `_draft_visual_sql`'s single-value chart shape
+    only emits `category`/`value` — so the renderer's own `series()` groups it under the
+    literal key `'value'` (no `series` column to read), not the field's label. The axis
+    key has to match that or the line/bar assignment silently never applies."""
+    values = [f for f in (_resolve_field(role, ref, measures, calc_columns)
+                          for role, refs in (v.get("projections") or {}).items()
+                          if role.lower() != "tooltips" for ref in refs or [])
+             if f is not None and f.is_value]
+    if len(values) == 1:
+        return {"value": "line"} if values[0].role.lower() == "y2" else {}
+    dup = {f.label for f in values if [g.label for g in values].count(f.label) > 1}
+    axis: dict[str, str] = {}
+    for f in values:
+        if f.role.lower() != "y2":
+            continue
+        name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
+        axis[name] = "line"
+    return axis
+
+
 def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], table_map: dict[str, str],
                     relationships: list[dict], model_tables: set[str], parameters: dict,
-                    filters: list[dict] | None = None) -> list[str]:
+                    filters: list[dict] | None = None, *,
+                    calc_columns: dict[tuple[str, str], str | None] | None = None) -> list[str]:
     """Why a data visual can (or cannot) be drafted into SQL, as reason codes: `ok`, or one or
     more of `kind:<kind>` (no drafter for it), `unknown_table:<t>` (visual points at a table the
     model doesn't have: renamed/deleted), `no_source:<t>` (no Teradata query for that table, e.g.
-    a DAX calculated table), `not_connected:<t1>+<t2>` (no relationship between them), 
-    `untranslatable_measure:<name>`, `shape` (fields don't fit the kind's column contract)."""
+    a DAX calculated table), `not_connected:<t1>+<t2>` (no relationship between them),
+    `untranslatable_measure:<name>` or `untranslatable_calc_column:<name>` (the field is a
+    calculated column — see `_table_calc_columns` — whose DAX isn't recognised), `shape`
+    (fields don't fit the kind's column contract)."""
     if kind not in _DRAFTABLE_KINDS:
         return [f"kind:{kind}"]
+    calc_columns = calc_columns or {}
     reasons: list[str] = []
     fields: list[_Field] = []
     for role, refs in (v.get("projections") or {}).items():
@@ -2609,19 +2825,21 @@ def diagnose_visual(v: dict, kind: str, measures: dict[tuple[str, str], str], ta
             continue
         for ref in refs or []:
             _, table, col = query_ref_parts(ref)
-            if (table, col) not in measures and model_tables and table not in model_tables:
+            if (table, col) not in measures and (table, col) not in calc_columns \
+                    and model_tables and table not in model_tables:
                 reasons.append(f"unknown_table:{table}")
                 continue
-            f = _resolve_field(role, ref, measures)
+            f = _resolve_field(role, ref, measures, calc_columns)
             if f is None:
-                reasons.append(f"untranslatable_measure:{col}")
+                kind_word = "calc_column" if (table, col) in calc_columns else "measure"
+                reasons.append(f"untranslatable_{kind_word}:{col}")
             else:
                 fields.append(f)
     if reasons:
         return sorted(set(reasons))
     if not fields:
         return ["shape"]
-    if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters, filters):
+    if _draft_visual_sql(v, kind, measures, table_map, relationships, parameters, filters, calc_columns=calc_columns):
         return ["ok"]
     tables = list(dict.fromkeys(t for f in fields for t in f.tables))
     missing = [t for t in [*tables, *sorted({m[0] for f in fields for m in f.selmins} | {c[1] for f in fields for c in f.ctxs})] if t not in table_map]
@@ -2640,6 +2858,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
               if isinstance(t, str) and not _AUTO_DATE_TABLE_RE.match(t)]
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
+    calc_columns = _table_calc_columns(model)
     rels = model.get("relationships") if isinstance(model.get("relationships"), list) else []
     params = _slicer_parameters(layout, model)
     calc_tables = {t.get("TableName"): (t.get("Expression") or "") for t in model.get("calculated_tables") or []
@@ -2658,7 +2877,8 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             label = f"{page.get('display_name')} / {v.get('title') or v['type']}"
             vfilters = effective_filters(layout, page, v)
             reasons = diagnose_visual(v, kind, measures, table_map, rels, set(tables),
-                                      _params_for_page(params, page.get("display_name")), vfilters)
+                                      _params_for_page(params, page.get("display_name")), vfilters,
+                                      calc_columns=calc_columns)
             for reason in reasons:
                 visuals.setdefault(reason, []).append(label)
             if "ok" in reasons:
@@ -2806,6 +3026,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
     """
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
+    calc_columns = _table_calc_columns(model)
     relationships = model.get("relationships") if isinstance(model.get("relationships"), list) else []
     rls = model.get("rls") if isinstance(model.get("rls"), list) else []
     table_map = table_map or {}
@@ -2839,7 +3060,9 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
                 for ref in refs:
                     agg, table, col = query_ref_parts(ref)
                     dax = measures.get((table, col))
-                    fields_doc.append(f"{role}: {ref}" + (f"  -- DAX: {dax}" if dax else ""))
+                    note = f"  -- DAX: {dax}" if dax else \
+                        "  -- calculated column, not a source column" if (table, col) in calc_columns else ""
+                    fields_doc.append(f"{role}: {ref}" + note)
             entry["fields"] = fields_doc
 
             notes = []
@@ -2847,9 +3070,14 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
                 notes.append(f"Custom visual '{v['type']}': pick a standard kind and document the differences.")
             vfilters = effective_filters(layout, page, v)
             draft = _draft_visual_sql(v, kind, measures, table_map, relationships,
-                                      _params_for_page(parameters, page["display_name"]), vfilters)
+                                      _params_for_page(parameters, page["display_name"]), vfilters,
+                                      calc_columns=calc_columns)
             if draft:
                 entry["sql"], entry["params"] = draft
+                if kind == "combo":
+                    axis = _combo_axis(v, measures, calc_columns)
+                    if axis:
+                        entry["axis"] = axis
                 notes.append(AUTOFILL_NOTE)
                 skipped = unapplied_filters(vfilters, set(_entities_used(v)), table_map, relationships,
                                             _params_for_page(parameters, page["display_name"]))
@@ -3059,6 +3287,7 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
     should get a draft for a column chart, which is the whole point of that override."""
     measures = {(m.get("TableName"), m.get("Name")): m.get("Expression")
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
+    calc_columns = _table_calc_columns(model)
     relationships = model.get("relationships") if isinstance(model.get("relationships"), list) else []
     table_map = table_map or {}
 
@@ -3099,12 +3328,17 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
         source = by_id.get(vid)
         draft = (_draft_visual_sql(source, kind, measures, table_map, relationships,
                                    _params_for_page(parameters, entry.get("page")),
-                                   effective_filters(layout, page_of.get(vid), source))
+                                   effective_filters(layout, page_of.get(vid), source),
+                                   calc_columns=calc_columns)
                  if source else None)
         if draft is None:
             still_todo.append(vid)
             continue
         entry["sql"], entry["params"] = draft
+        if kind == "combo":
+            axis = _combo_axis(source, measures, calc_columns)
+            if axis:
+                entry["axis"] = axis
         notes = entry.get("notes") or ""
         if "Auto-drafted" not in notes:
             entry["notes"] = f"{notes} {AUTOFILL_NOTE}".strip()

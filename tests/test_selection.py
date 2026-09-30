@@ -117,6 +117,64 @@ def test_date_context_sql_parses_as_teradata():
     sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
 
 
+# ---- combo chart: a Y2-role measure is a line series, same UNION ALL arms as a plain chart ---
+
+COMBO_MAP = {"Fact": "SELECT dt, amt, pct FROM db.fact",
+            "Cal": 'SELECT calendar_date AS "Date", calendar_date AS month_end FROM sys_calendar.calendar'}
+COMBO_RELS = [{"FromTableName": "Fact", "FromColumnName": "dt", "ToTableName": "Cal",
+              "ToColumnName": "Date", "IsActive": 1, "Cardinality": "M:1"}]
+
+
+def test_combo_chart_drafts_union_arms_like_a_plain_multi_measure_chart():
+    v = {"projections": {"Category": ["Cal.month_end"], "Y": ["Sum(Fact.amt)"], "Y2": ["Avg(Fact.pct)"]}}
+    sql, params = S._draft_visual_sql(v, "combo", {}, COMBO_MAP, COMBO_RELS, {})
+    assert "UNION ALL" in sql
+    assert "'amt' AS series, SUM(fact.amt)" in sql
+    assert "'pct' AS series, AVG(fact.pct)" in sql
+    assert params == []
+
+
+def test_combo_axis_marks_only_the_y2_series_as_line():
+    v = {"projections": {"Category": ["Cal.month_end"], "Y": ["Sum(Fact.amt)"], "Y2": ["Avg(Fact.pct)"]}}
+    assert S._combo_axis(v, {}) == {"pct": "line"}
+
+
+def test_combo_axis_uses_the_literal_value_key_when_there_is_only_one_measure():
+    # _draft_visual_sql's single-value chart shape has no `series` column at all when there's
+    # only one measure total, so the renderer's series() groups it under the literal key
+    # 'value' (see report.html.j2) — the axis dict has to match that, not the field's label.
+    y2_only = {"projections": {"Category": ["Cal.month_end"], "Y2": ["Sum(Fact.amt)"]}}
+    assert S._combo_axis(y2_only, {}) == {"value": "line"}
+    y_only = {"projections": {"Category": ["Cal.month_end"], "Y": ["Sum(Fact.amt)"]}}
+    assert S._combo_axis(y_only, {}) == {}
+
+
+def test_combo_chart_with_only_a_y2_measure_drafts_the_plain_single_value_shape():
+    v = {"projections": {"Category": ["Cal.month_end"], "Y2": ["Sum(Fact.amt)"]}}
+    sql, _ = S._draft_visual_sql(v, "combo", {}, COMBO_MAP, COMBO_RELS, {})
+    assert '"value"' in sql and "series" not in sql
+    assert S._combo_axis(v, {}) == {"value": "line"}
+
+
+def test_combo_chart_with_no_category_stays_manual():
+    v = {"projections": {"Y": ["Sum(Fact.amt)"], "Y2": ["Avg(Fact.pct)"]}}
+    assert S._draft_visual_sql(v, "combo", {}, COMBO_MAP, COMBO_RELS, {}) is None
+
+
+def test_combo_chart_with_two_line_measures_marks_both_as_line():
+    v = {"projections": {"Category": ["Cal.month_end"], "Y2": ["Sum(Fact.amt)", "Avg(Fact.pct)"]}}
+    sql, _ = S._draft_visual_sql(v, "combo", {}, COMBO_MAP, COMBO_RELS, {})
+    assert "'amt' AS series" in sql and "'pct' AS series" in sql
+    assert S._combo_axis(v, {}) == {"amt": "line", "pct": "line"}
+
+
+def test_combo_sql_parses_as_teradata():
+    sqlglot = pytest.importorskip("sqlglot")
+    v = {"projections": {"Category": ["Cal.month_end"], "Y": ["Sum(Fact.amt)"], "Y2": ["Avg(Fact.pct)"]}}
+    sql, params = S._draft_visual_sql(v, "combo", {}, COMBO_MAP, COMBO_RELS, {})
+    sqlglot.parse_one(sql, read="teradata")
+
+
 # ---- per-category evaluation in grouped visuals ---------------------------------------------
 
 def chart(measure, category="Cal.month_end", kind="column", extra=None):
@@ -217,12 +275,14 @@ def test_multi_fact_sql_parses_as_teradata():
         sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
 
 
-def test_multi_fact_with_two_independent_single_table_values_stays_manual():
+def test_two_independent_single_table_measures_join_through_separate_arms():
     # Two separate measures, each its own single fact table (not one composite expression
-    # spanning both) — multi_fact only ever resolves one composite value at a time.
+    # spanning both, which is multi_fact's job) — this is _multi_value_table's case: safe to
+    # draft since each fact gets its own arm, never a single FROM joining both facts directly.
     v = {"projections": {"Values": ["A.Ending", "Dim.name"]}}
     measures = {**MF_MEASURES, ("A", "Ending"): "SUM(A[n])", ("Dim", "name"): "SUM(Dim[n])"}
-    assert S._draft_visual_sql(v, "table", measures, MF_MAP, MF_RELS, MF_PARAMS) is None
+    sql, _ = S._draft_visual_sql(v, "table", measures, MF_MAP, MF_RELS, MF_PARAMS)
+    assert "CROSS JOIN" in sql and "SUM(a.n)" in sql and "SUM(dim.n)" in sql
 
 
 # `Grand Total = [A]+[B]` over two unrelated fact tables (arithmetic between measures, no
@@ -258,6 +318,40 @@ def test_multi_fact_composite_measure_with_no_categories_drafts_for_a_table_visu
     sql, params = S._draft_visual_sql(v, "table", GRAND_MEASURES, MF_MAP, MF_RELS, MF_PARAMS)
     assert sql.startswith("SELECT (") and "AS grand\nFROM" in sql
     assert "CROSS JOIN" in sql
+
+
+# ---- a table's several VALUE fields, each its own aggregate over a *different* fact table -----
+# (as opposed to multi_fact above: one composite expression spanning tables). Found against a
+# real report: a customer summary table pulling one total from each of several unrelated fact
+# tables that share only a dimension.
+
+def test_multi_value_table_joins_one_arm_per_fact_table():
+    v = {"projections": {"Rows": ["Dim.name"], "Values": ["Sum(A.n)", "Sum(B.n)"]}}
+    sql, params = S._draft_visual_sql(v, "table", {}, MF_MAP, MF_RELS, MF_PARAMS)
+    assert sql.startswith("SELECT DISTINCT dim.name AS name, arm1.a0 AS n, arm2.a0 AS n")
+    assert "LEFT JOIN (SELECT dim.name AS k1, SUM(a.n) AS a0" in sql
+    assert "LEFT JOIN (SELECT dim.name AS k1, SUM(b.n) AS a0" in sql
+    assert {"dim_name"} <= set(params)
+
+
+def test_multi_value_table_with_no_categories_cross_joins_the_arms():
+    v = {"projections": {"Values": ["Sum(A.n)", "Sum(B.n)"]}}
+    sql, _ = S._draft_visual_sql(v, "table", {}, MF_MAP, MF_RELS, MF_PARAMS)
+    assert "CROSS JOIN" in sql and "SUM(a.n)" in sql and "SUM(b.n)" in sql
+
+
+def test_multi_value_table_leaves_a_selection_dependent_value_manual():
+    v = {"projections": {"Rows": ["Dim.name"], "Values": ["A.Top", "Sum(B.n)"]}}
+    measures = {("A", "Top"): "CALCULATE(SUM(A[n]), FILTER('Dim', 'Dim'[name] = MIN('Dim'[name])))"}
+    assert S._draft_visual_sql(v, "table", measures, MF_MAP, MF_RELS, MF_PARAMS) is None
+
+
+def test_multi_value_table_sql_parses_as_teradata():
+    sqlglot = pytest.importorskip("sqlglot")
+    v = {"projections": {"Rows": ["Dim.name"], "Values": ["Sum(A.n)", "Sum(B.n)"]}}
+    sql, params = S._draft_visual_sql(v, "table", {}, MF_MAP, MF_RELS, MF_PARAMS)
+    bound, _ = bind(sql, params, {"dim_name": ["x"]})
+    sqlglot.parse_one(bound.replace("?", "'x'"), read="teradata")
 
 
 # ---- FORMAT with time parts, TIME(), NOW() ----------------------------------------------------

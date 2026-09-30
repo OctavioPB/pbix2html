@@ -88,7 +88,7 @@ def test_background_switched_off_is_not_drawn_and_line_shapes_are_rules():
     assert ex.container_style(on)["background"] == "#123456"
     objects = {"shape": [{"properties": {"tileShape": lit("'line'")}}],
                "fill": [{"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": lit("'#808080'")}}}}]}
-    assert ex._style_with_fill({}, objects) == {"background": "#808080", "line": True}
+    assert ex._style_with_fill({}, objects) == {"shape_kind": "line", "line_color": "#808080"}
 
 
 def test_font_stack_reaches_the_css_unescaped_and_dropdown_sits_above_every_visual(fake_pbix):
@@ -111,3 +111,25 @@ def test_card_value_size_units_and_decimals_are_read_and_rendered(fake_pbix):
     spec = semantic.load("Executive_Dashboard")
     html = render_html({**layout, "pages": [{**base, "visuals": [card]}]}, spec, {}, None, mode="live")
     assert "font-size:calc(22.7px * var(--scale, 1))" in html and 'data-w="' in html
+
+
+def test_shape_style_reaches_the_page_as_px_and_a_rotated_line_is_not_transformed(fake_pbix):
+    # pt -> px uses the same 4/3 factor as title_size/value_size; a rotated "line" shape keeps
+    # its own colour/weight but is never CSS-rotated (see report.html.j2: a long, thin box
+    # rotated around its own centre swings far outside that box — confirmed against a real
+    # report where a 1280x23 header line rotated 90 degrees covered unrelated text far below).
+    layout = ex.extract_layout(fake_pbix)
+    base = layout["pages"][0]
+    common = {**base["visuals"][0], "hidden": False, "is_group": False, "parent_group": None, "groups": [], "type": "shape"}
+    box = {**common, "id": "box", "title": None,
+          "style": {"shape_kind": "rectangle", "background": "#666666", "border": True,
+                    "border_color": "#333333", "border_weight": 3, "round_edge": 6, "rotation": 15}}
+    line = {**common, "id": "ln", "title": None,
+           "style": {"shape_kind": "line", "line_color": "#F3753F", "line_weight": 6, "rotation": 90}}
+    spec = semantic.load("Executive_Dashboard")
+    for mode in ("live", "hah"):
+        html = render_html({**layout, "pages": [{**base, "visuals": [box, line]}]}, spec, {}, None,
+                           mode=mode, hah_base="https://hah.example")
+        assert "border: 4.0px solid #333333" in html and "border-radius: 8.0px" in html and "rotate(15deg)" in html, mode
+        assert "rotate(90deg)" not in html, mode                        # the line, not rotated
+        assert '"line_weight": 8.0' in html                              # 6pt -> 8px, reaches the spec for the JS renderer

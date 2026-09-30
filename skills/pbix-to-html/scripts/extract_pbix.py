@@ -223,6 +223,7 @@ def resolve_theme_markers(layout: dict) -> None:
             if isinstance(style, dict):
                 fix(style, "background")
                 fix(style, "border_color")
+                fix(style, "line_color")
                 fix(style, "title_color")
                 fix(style, "value_color")
                 fix(style, "table_header_bg")
@@ -424,9 +425,10 @@ def apply_theme_table_styles(layout: dict) -> None:
                         break
 
 
-def _fill_color(objects: dict) -> str | None:
-    """Fill of a shape / button (`objects.fill`): the default-state `fillColor` when the
-    fill is shown and not fully transparent. Same colour forms as `literal_color`."""
+def _fill_color(objects: dict) -> tuple[str, float | None] | None:
+    """Fill of a shape / button (`objects.fill`): the default-state `fillColor` (and its own
+    transparency, 0-100) when the fill is shown and not fully transparent. Same colour forms
+    as `literal_color`."""
     entries = (objects or {}).get("fill") or []
     shown = True
     for e in entries:
@@ -442,14 +444,81 @@ def _fill_color(objects: dict) -> str | None:
         if sel.get("id") != "default" or "fillColor" not in props:
             continue
         transp = literal_to_text(((props.get("transparency") or {}).get("expr")) or {})
+        pct = None
         try:
-            if transp is not None and float(str(transp).rstrip("DdLl")) >= 100:
-                return None
+            if transp is not None:
+                pct = float(str(transp).rstrip("DdLl"))
+                if pct >= 100:
+                    return None
         except ValueError:
-            pass
+            pct = None
         solid = ((props["fillColor"] or {}).get("solid") or {}).get("color") or {}
-        return literal_color(solid.get("expr"))
+        colour = literal_color(solid.get("expr"))
+        return (colour, pct) if colour else None
     return None
+
+
+# tileShape (classic "shape" visual) / shapeType (newer "basicShape" visual) values normalized
+# to one vocabulary; anything not listed (triangle, arrow, chevron, hexagon...) still gets its
+# fill/border/rotation but renders as a plain rectangle — not reproduced pixel-for-pixel, same
+# as any other visual this project reinterprets rather than redraws (CLAUDE.md).
+_SHAPE_KINDS = {"line": "line", "rectangle": "rectangle", "oval": "oval"}
+
+
+def _shape_outline(objects: dict) -> tuple[str | None, float | None]:
+    """A shape's own border/stroke — `objects.outline` (classic "shape") or `objects.line`
+    (newer "basicShape") — as (colour, weight in points). Distinct from `vcObjects.border`,
+    the generic per-visual-container frame every visual type has; a shape's own line is a
+    separate formatting card that container_style never looks at, so a bordered rectangle or
+    a coloured line-shape lost its border/stroke entirely before this read it."""
+    for card in ("outline", "line"):
+        entries = (objects or {}).get(card) or []
+        if not entries:
+            continue
+        shown = True
+        for e in entries:
+            if not (e or {}).get("selector"):
+                flag = literal_to_text((((e.get("properties") or {}).get("show") or {}).get("expr")) or {})
+                if flag == "false":
+                    shown = False
+        if not shown:
+            return None, None
+        color = weight = None
+        for e in entries:
+            props = (e or {}).get("properties") or {}
+            if "lineColor" in props:
+                solid = ((props["lineColor"] or {}).get("solid") or {}).get("color") or {}
+                color = literal_color(solid.get("expr")) or color
+            w = literal_to_text(((props.get("weight") or {}).get("expr")) or {})
+            if w is not None:
+                try:
+                    weight = float(str(w).rstrip("DdLl"))
+                except ValueError:
+                    pass
+        if color or weight is not None:
+            return color, weight
+    return None, None
+
+
+def _shape_geometry(objects: dict) -> dict:
+    """A shape/basicShape's own kind, rotation and corner rounding — everything about its
+    silhouette that `container_style`/`_fill_color` (fill and the generic container frame)
+    don't cover. Keys are omitted when not set, same convention as `container_style`."""
+    out: dict[str, Any] = {}
+    kind = (_object_text(objects, "shape", "tileShape") or _object_text(objects, "general", "shapeType") or "").lower()
+    if kind in _SHAPE_KINDS:
+        out["shape_kind"] = _SHAPE_KINDS[kind]
+    angle = _object_text(objects, "rotation", "shapeAngle") or _object_text(objects, "rotation", "angle")
+    if angle and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", angle):
+        deg = float(angle.strip().rstrip("DL"))
+        if deg:
+            out["rotation"] = deg
+    round_edge = _object_text(objects, "shape", "roundEdge")
+    if round_edge and re.fullmatch(r"\s*\d+(\.\d+)?[DL]?\s*", round_edge):
+        val = float(round_edge.strip().rstrip("DL"))
+        if val:
+            out["round_edge"] = val
+    return out
 
 
 _BUTTON_STATES = ("default", "hover", "pressed", "disabled", "selected")
@@ -538,12 +607,34 @@ def parse_button(sv: dict) -> dict | None:
 
 
 def _style_with_fill(style: dict, objects: dict) -> dict:
-    """A shape/button's own fill is its background unless the container sets one."""
-    if "background" not in style and (fill := _fill_color(objects)):
-        style["background"] = fill
-    # a shape drawn as a line (`objects.shape.tileShape = 'line'`) is a rule across the middle of its box, not a filled box
-    if _object_text(objects, "shape", "tileShape") == "line":
-        style["line"] = True
+    """A shape/button's own fill is its background unless the container sets one; its own
+    border/stroke, rotation and silhouette (see `_shape_outline`/`_shape_geometry`) likewise —
+    all harmless no-ops for a visual type that has none of these object cards."""
+    style.update(_shape_geometry(objects))
+    fill = _fill_color(objects)
+    outline_color, outline_weight = _shape_outline(objects)
+    if style.get("shape_kind") == "line":
+        # A rule across the middle of its box, not a filled box: its own colour is normally
+        # the Line/outline card; the classic "shape" visual's Fill card is sometimes the only
+        # one actually populated though (seen in a real report), so that's the fallback, not
+        # the other way round. No "background" — there's no fill area to colour.
+        line_color = outline_color or (fill[0] if fill else None)
+        if line_color:
+            style["line_color"] = line_color
+        if outline_weight is not None:
+            style["line_weight"] = outline_weight
+        if fill and fill[1] is not None and "transparency" not in style:
+            style["transparency"] = fill[1]
+    else:
+        if "background" not in style and fill:
+            style["background"] = fill[0]
+            if fill[1] is not None and "transparency" not in style:
+                style["transparency"] = fill[1]
+        if "border_color" not in style and outline_color:
+            style["border_color"] = outline_color
+            style.setdefault("border", True)
+        if outline_weight is not None and "border_weight" not in style:
+            style["border_weight"] = outline_weight
     # a card's number: its own colour (objects.labels, older; objects.calloutValue, newer)
     for name in ("labels", "calloutValue"):
         color = _object_color(objects, name, "color")

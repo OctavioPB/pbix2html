@@ -278,3 +278,79 @@ def test_shape_fill_uses_theme_colour_end_to_end(tmp_path):
     v = {x["id"]: x for x in extract_layout(pbix)["pages"][0]["visuals"]}
     assert v["active"]["style"]["background"] == "#FFBF9A"
     assert v["idle"]["style"]["background"] == "#FFFFFF"
+
+
+# ---- shape/basicShape design properties: kind, rotation, own border/stroke, roundEdge --------
+# (color/border/transparency/position/size were already read for other visual kinds; a plain
+# design shape used none of it — its own outline/line card was never read at all, and a
+# basicShape's line-vs-rectangle silhouette and rotation were completely dropped.)
+
+def _lit(v):
+    return {"expr": {"Literal": {"Value": v}}}
+
+
+def test_classic_rectangle_reads_roundedge_and_its_own_outline_as_a_border():
+    objects = {
+        "shape": [{"properties": {"tileShape": _lit("'rectangle'"), "roundEdge": _lit("3L")}}],
+        "rotation": [{"properties": {"shapeAngle": _lit("15D")}}],
+        "fill": [{"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": _lit("'#666666'")}}}}],
+        "outline": [{"properties": {"show": _lit("true")}},
+                    {"selector": {"id": "default"}, "properties": {"lineColor": {"solid": {"color": _lit("'#333333'")}}}}],
+    }
+    st = ex._style_with_fill({}, objects)
+    assert st == {"shape_kind": "rectangle", "rotation": 15.0, "round_edge": 3.0,
+                  "background": "#666666", "border_color": "#333333", "border": True}
+
+
+def test_classic_outline_switched_off_leaves_no_border():
+    objects = {"shape": [{"properties": {"tileShape": _lit("'rectangle'")}}],
+              "outline": [{"properties": {"show": _lit("false")}}]}
+    st = ex._style_with_fill({}, objects)
+    assert "border_color" not in st and "border" not in st
+
+
+def test_basic_shape_line_reads_shapetype_and_its_own_line_card():
+    # The newer "basicShape" visual has no "fill" card for a line at all (found in a real
+    # report) — its colour has to come from the Line card (objects.line), not objects.fill.
+    objects = {
+        "general": [{"properties": {"shapeType": _lit("'line'")}}],
+        "rotation": [{"properties": {"angle": _lit("90D")}}],
+        "line": [{"properties": {"lineColor": {"solid": {"color": _lit("'#F3753F'")}}, "weight": _lit("2D")}}],
+    }
+    st = ex._style_with_fill({}, objects)
+    assert st == {"shape_kind": "line", "rotation": 90.0, "line_color": "#F3753F", "line_weight": 2.0}
+    assert "background" not in st          # a line has no fill area to colour
+
+
+def test_classic_line_prefers_its_own_outline_colour_over_the_fill():
+    # Both cards are sometimes populated for a "line" tileShape (seen in a real report); the
+    # visible stroke is the Line/outline card, the Fill card (test above the existing one)
+    # is only a fallback for when outline isn't set at all.
+    objects = {
+        "shape": [{"properties": {"tileShape": _lit("'line'")}}],
+        "fill": [{"selector": {"id": "default"}, "properties": {"fillColor": {"solid": {"color": _lit("'#AAAAAA'")}}}}],
+        "outline": [{"properties": {"show": _lit("true")}},
+                    {"selector": {"id": "default"}, "properties": {"lineColor": {"solid": {"color": _lit("'#CCCCCC'")}}}}],
+    }
+    assert ex._style_with_fill({}, objects)["line_color"] == "#CCCCCC"
+
+
+def test_oval_shape_kind_is_recognised():
+    objects = {"shape": [{"properties": {"tileShape": _lit("'oval'")}}]}
+    assert ex._style_with_fill({}, objects)["shape_kind"] == "oval"
+
+
+def test_a_partly_transparent_fill_carries_its_transparency_through():
+    objects = {"shape": [{"properties": {"tileShape": _lit("'rectangle'")}}],
+              "fill": [{"selector": {"id": "default"},
+                        "properties": {"fillColor": {"solid": {"color": _lit("'#808080'")}},
+                                      "transparency": _lit("65D")}}]}
+    st = ex._style_with_fill({}, objects)
+    assert st["background"] == "#808080" and st["transparency"] == 65.0
+
+
+def test_zero_rotation_is_not_recorded_and_unrecognised_shape_kinds_are_left_out():
+    objects = {"shape": [{"properties": {"tileShape": _lit("'triangle'"), }}],
+              "rotation": [{"properties": {"shapeAngle": _lit("0L")}}]}
+    st = ex._style_with_fill({}, objects)
+    assert "rotation" not in st and "shape_kind" not in st    # triangle: reinterpreted as a plain box

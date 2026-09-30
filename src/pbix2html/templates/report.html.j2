@@ -118,10 +118,18 @@
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.style.border and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
-              ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
+              ; border: {% if v.style.border %}{{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}
+              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
+              {# a "line" shape's rotation is Power BI's way of drawing a *vertical* line, not a
+                 rotated box: a long, thin box rotated in place around its own centre swings far
+                 outside that box (confirmed against a real report — a 1280x23 header line
+                 rotated 90 degrees covered unrelated text hundreds of pixels below it), so this
+                 is applied to any other shape but not to a line — style.rotation is still
+                 extracted either way, for whoever tackles drawing a rotated line correctly. #}
+              {% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
     {% if v.title %}<div class="title"{% if v.title_css %} style="{{ v.title_css }}"{% endif %}>{{ v.title }}</div>{% endif %}
     {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}
     <div class="body"></div>
@@ -252,7 +260,8 @@
       // instead carries a label (extract.py's visual_text). Either way the point is not
       // to leave the box blank, which is what happened to both until now.
       if (v.style && v.style.line_color) {
-        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:2px;margin-top:-1px;background:${v.style.line_color}"></div>`;
+        const w = v.style.line_weight || 2;
+        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:${w}px;margin-top:${-w / 2}px;background:${v.style.line_color}"></div>`;
       } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {

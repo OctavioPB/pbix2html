@@ -84,6 +84,36 @@ colour is the default text of a slicer widget (`--sl-fg`). A background at 100 %
 (`style.transparency`); a partial one is `rgba`. The title text itself comes from the yaml (`title`), so an old
 yaml keeps old text until it is regenerated.
 
+## Shapes as design elements (`kind: static`, `shape`/`basicShape`)
+
+A plain rectangle/line/oval used only for layout (a divider, a coloured panel, a header
+stripe) has its OWN formatting cards, distinct from `vcObjects` (the generic per-visual-
+container frame every visual type has — background/border/title, `container_style`) and from
+`objects.fill` alone: `extract._shape_outline` reads a shape's own border/stroke
+(`objects.outline` for the classic "shape" visual, `objects.line` for the newer "basicShape")
+into `style.border_color`/`style.border_weight`, and `extract._shape_geometry` reads its
+silhouette (`objects.shape.tileShape` / `objects.general.shapeType` → `style.shape_kind`:
+`line`/`rectangle`/`oval`, anything else — triangle, arrow, chevron... — still gets its
+fill/border/rotation but renders as a plain rectangle), rotation (`objects.rotation.
+shapeAngle` classic / `.angle` basicShape → `style.rotation`, degrees) and corner rounding
+(`objects.shape.roundEdge` → `style.round_edge`, points). `render.py` converts weights/
+roundEdge from points to pixels (`* 4/3`, same factor as `title_size`) and turns a partly
+transparent fill's `style.transparency` into `rgba(...)` for either `background` or, for a
+line, `line_color` (a line has no fill area, so it's never given a `background` at all —
+`_style_with_fill` skips that key entirely when `shape_kind == "line"`).
+
+A `line` shape is drawn as a rule through the middle of its box (`R.static` in the template
+JS), not a filled rectangle — its colour is normally the Line/outline card, falling back to
+the Fill card only when outline isn't set at all (some real reports populate only Fill even
+for a line tileShape). **Rotation is applied to every shape except a line**: a long, thin box
+rotated around its own centre swings far outside that box — confirmed against a real report
+where a 1280×23 header-line shape rotated 90° covered unrelated text hundreds of pixels below
+it. `style.rotation` is still extracted for a line (so it's visible in `layout.json` /
+`out/summary.md` for anyone investigating), just not turned into CSS; drawing a rotated line
+correctly would need swapping which of width/height is the line's length, not a blind
+`transform: rotate()`. **Shadow is not read at all** — no real report seen so far uses it on a
+shape, so the property name is unconfirmed; add it once one does.
+
 ## Verifying the result (`pbix2html verify`, ADR-009)
 
 `pbix2html verify out/Report.html` opens every page in a browser and writes `verify_report.md` with numbered

@@ -29,6 +29,15 @@ def test_calendar_source_from_iso_dates_and_now():
     ('YEAR(Calendar[Date]) * 100 + MONTH(Calendar[Date])', "(EXTRACT(YEAR FROM calendar_date) * 100) + EXTRACT(MONTH FROM calendar_date)"),
     ('IF(YEAR(Calendar[Date]) = YEAR(TODAY()), "Now", "Then")',
      "CASE WHEN (EXTRACT(YEAR FROM calendar_date) = EXTRACT(YEAR FROM CURRENT_DATE)) THEN 'Now' ELSE 'Then' END"),
+    ('ISBLANK(Calendar[Date])', "calendar_date IS NULL"),
+    ('BLANK()', "NULL"),
+    ('DATE(2024, 1, 1)', "ADD_MONTHS(CAST(CAST(2024 AS VARCHAR(4)) || '-01-01' AS DATE FORMAT 'YYYY-MM-DD'), "
+                         "CAST(1 AS INTEGER) - 1) + (CAST(1 AS INTEGER) - 1)"),
+    # the real-world idiom this was added for: a date bucketed to the 1st of its month
+    ('IF(ISBLANK(Calendar[Date]), BLANK(), DATE(YEAR(Calendar[Date]), MONTH(Calendar[Date]), 1))',
+     "CASE WHEN (calendar_date IS NULL) THEN NULL ELSE (ADD_MONTHS(CAST(CAST(EXTRACT(YEAR FROM calendar_date) "
+     "AS VARCHAR(4)) || '-01-01' AS DATE FORMAT 'YYYY-MM-DD'), CAST(EXTRACT(MONTH FROM calendar_date) AS INTEGER) "
+     "- 1) + (CAST(1 AS INTEGER) - 1)) END"),
 ])
 def test_calendar_column_translations(dax, teradata):
     assert semantic._calendar_expr_sql(dax, "Date", "calendar_date") == teradata
@@ -41,6 +50,7 @@ def test_calendar_column_translations(dax, teradata):
     'RETURN 1',                               # RETURN without VAR
     'FORMAT(Calendar[Date], "MMMM d")',       # format token outside the supported set
     'YEAR(Calendar[Date]',                    # malformed
+    'DATE(2024, 1)',                          # DATE needs exactly 3 args
 ])
 def test_calendar_column_refusals(dax):
     assert semantic._calendar_expr_sql(dax, "Date", "calendar_date") is None
@@ -143,3 +153,77 @@ def test_calendar_columns_can_refer_to_each_other_and_cycles_are_refused():
     assert "ADD_MONTHS((calendar_date - EXTRACT(DAY FROM calendar_date) + 1), 1) - 1" in sql and "'Mon'" in sql
     assert semantic._calendar_expr_sql(sib["a"], "Date", "calendar_date", sib) is None      # a -> b -> a
     assert semantic._calendar_expr_sql("Calendar[nope]", "Date", "calendar_date", sib) is None
+
+
+# ---- a calculated column on a *regular* (not DAX CALENDAR()) table --------------------------
+# Found against a real report: pbixray's schema lists a calculated column exactly like a real
+# one, so a plain field reference to it drafted a bare `alias.column` that doesn't exist at
+# Teradata ("Month_Bucket" is computed by DAX, not sourced from the mapped query).
+
+MONTH_BUCKET_DAX = ("IF(\n\tISBLANK('Dates'[calendar_date]),\n\tBLANK(),\n\tDATE(\n\t\tYEAR('Dates'[calendar_date]),\n"
+                 "\t\t1 + (MONTH('Dates'[calendar_date]) - 1),\n\t\t1\n\t)\n)")
+
+CALC_COL_MODEL = {
+    "columns": [{"TableName": "Dates", "ColumnName": "calendar_date"},
+               {"TableName": "Dates", "ColumnName": "year_of_calendar"},
+               {"TableName": "Dates", "ColumnName": "Month_Bucket"}],       # materialized like any other column
+    "calculated_columns": [{"TableName": "Dates", "ColumnName": "Month_Bucket", "Expression": MONTH_BUCKET_DAX}],
+    "calculated_tables": [],
+}
+
+
+def test_table_calc_columns_translates_a_supported_expression():
+    out = semantic._table_calc_columns(CALC_COL_MODEL)
+    assert set(out) == {("Dates", "Month_Bucket")}
+    sql = out[("Dates", "Month_Bucket")]
+    assert sql is not None and "dates.calendar_date IS NULL" in sql and "ADD_MONTHS" in sql
+
+
+def test_table_calc_columns_marks_an_unsupported_expression_as_none_not_absent():
+    model = {**CALC_COL_MODEL,
+             "calculated_columns": [{"TableName": "Dates", "ColumnName": "Month_Bucket", "Expression": "RELATED(X[y])"}]}
+    out = semantic._table_calc_columns(model)
+    assert ("Dates", "Month_Bucket") in out and out[("Dates", "Month_Bucket")] is None
+
+
+def test_table_calc_columns_skips_a_dax_calendar_table_of_its_own():
+    # A DAX CALENDAR() table's calculated columns are handled by detect_calendar_tables
+    # (a full replacement query), not by this per-column mechanism.
+    model = {"columns": [{"TableName": "Calendar", "ColumnName": "Year"}],
+            "calculated_columns": [{"TableName": "Calendar", "ColumnName": "Year", "Expression": "YEAR([Date])"}],
+            "calculated_tables": [{"TableName": "Calendar", "Expression": 'CALENDAR("2026-01-01", TODAY())'}]}
+    assert semantic._table_calc_columns(model) == {}
+
+
+def test_resolve_field_inlines_a_supported_calculated_column_bare_and_aggregated():
+    calc = semantic._table_calc_columns(CALC_COL_MODEL)
+    bare = semantic._resolve_field("Category", "Dates.Month_Bucket", {}, calc)
+    assert bare is not None and bare.is_value is False and "ADD_MONTHS" in bare.expr and bare.out_name == "month_bucket"
+    agg = semantic._resolve_field("Values", "Sum(Dates.Month_Bucket)", {}, calc)
+    assert agg is not None and agg.expr.startswith("SUM((CASE WHEN")
+
+
+def test_resolve_field_refuses_an_unsupported_calculated_column():
+    model = {**CALC_COL_MODEL,
+             "calculated_columns": [{"TableName": "Dates", "ColumnName": "Month_Bucket", "Expression": "RELATED(X[y])"}]}
+    calc = semantic._table_calc_columns(model)
+    assert semantic._resolve_field("Category", "Dates.Month_Bucket", {}, calc) is None
+    assert semantic._resolve_field("Values", "Sum(Dates.Month_Bucket)", {}, calc) is None
+
+
+def test_draft_visual_sql_leaves_the_whole_visual_manual_when_a_calc_column_is_unsupported():
+    model = {**CALC_COL_MODEL,
+             "calculated_columns": [{"TableName": "Dates", "ColumnName": "Month_Bucket", "Expression": "RELATED(X[y])"}]}
+    calc = semantic._table_calc_columns(model)
+    v = {"projections": {"Category": ["Dates.Month_Bucket"], "Values": ["Sum(Dates.year_of_calendar)"]}}
+    table_map = {"Dates": "SELECT calendar_date, year_of_calendar FROM db.dates"}
+    assert semantic._draft_visual_sql(v, "column", {}, table_map, [], {}, calc_columns=calc) is None
+
+
+def test_diagnose_visual_reports_untranslatable_calc_column_distinctly():
+    model = {**CALC_COL_MODEL,
+             "calculated_columns": [{"TableName": "Dates", "ColumnName": "Month_Bucket", "Expression": "RELATED(X[y])"}]}
+    calc = semantic._table_calc_columns(model)
+    v = {"projections": {"Category": ["Dates.Month_Bucket"]}}
+    reasons = semantic.diagnose_visual(v, "table", {}, {}, [], {"Dates"}, {}, calc_columns=calc)
+    assert reasons == ["untranslatable_calc_column:Month_Bucket"]

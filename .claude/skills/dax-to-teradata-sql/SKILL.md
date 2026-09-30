@@ -87,6 +87,18 @@ columns`; `kpi → value, target`. Aliases always lowercase.
 - **Several fact tables**: one `SELECT` never sums two fact tables (their join multiplies rows), so
   such a visual is left as `TODO`; a chart with several measures gets one `UNION ALL` arm per
   measure, each joining only its own fact table.
+- **Combo charts** (`kind: combo`) draft through the same "several measures" `UNION ALL` arms as a
+  plain multi-measure bar/column/line chart (`_UNION_ARM_KINDS`) — the column contract is
+  identical (`category`, `series`, `value`); the only combo-specific fact, which series is a line
+  vs. a column, is derived from the field's own role (`Y2` → line, `Y` → the renderer's column
+  default), written to `axis` (`_combo_axis`). **One total measure** (only `Y` or only `Y2`, seen
+  in a real report) drafts the *other*, simpler chart shape instead — no `series` column at all,
+  just `category`/`value` — since the several-measures arm path only kicks in for 2+ measures; the
+  renderer's own grouping then treats the single series as the literal key `'value'`
+  (`report.html.j2`'s `series()`, no `series` column to read), so `_combo_axis` must key `axis` as
+  `{"value": "line"}` in that case, not the field's own label — confirmed by a real report where a
+  combo chart had only a `Y2` measure and the axis key had to match exactly this or it never applied.
+  default) and written to the yaml's `axis` (`_combo_axis`), never into the SQL itself.
 - **Order**: the visual's sort becomes `ORDER BY <column position>`; a sort on a field the query
   doesn't select is skipped.
 - Table sources come from Power Query (`Query="..."`, `Value.NativeQuery`, plain accessors, "Enter
@@ -94,10 +106,21 @@ columns`; `kpi → value, target`. Aliases always lowercase.
   `pbix2html mapping` for exactly which visuals that blocks.
 - **Calendar tables**: `CALENDAR(start, end)` becomes `SELECT ... FROM sys_calendar.calendar WHERE
   calendar_date BETWEEN start AND end` with its calculated columns translated (a small, closed
-  grammar). The join to facts (`log_dt`) is *proposed* in `metrics/<Report>.relationships.json`.
+  grammar). The join to facts (`date_key`) is *proposed* in `metrics/<Report>.relationships.json`.
 - **Slicer on a table the visual doesn't read** (typically a calendar or a dimension): applied as
   a semi-join through one relationship, wrapped in `/*if p*/ ... /*fi p*/`; `bind` removes the whole
   predicate when `p` is empty.
+- **A calculated column on a regular (non-calendar) table** — e.g. a date bucketed to the 1st of
+  its month, `IF(ISBLANK(d), BLANK(), DATE(YEAR(d), MONTH(d), 1))` — is translated the same way a
+  calendar table's own calculated columns are (`semantic._table_calc_columns`, reusing
+  `_calendar_expr_sql`, which also now understands `ISBLANK`, `BLANK()` and `DATE(y, m, d)`), tried
+  against each of the table's real (non-calculated) columns as the row-context anchor. Found
+  against a real report: pbixray's schema lists a calculated column exactly like a source column,
+  so a bare field reference to one used to draft a plain `alias.column` — syntactically fine, but
+  Teradata rejects it at runtime ("column does not exist") since it was never in the mapped query.
+  One that doesn't match this grammar now correctly leaves the *whole visual* manual
+  (`untranslatable_calc_column:<name>` in the mapping report) instead of drafting a
+  plausible-looking wrong reference.
 
 ## Selection-dependent measures: `FILTER(T, T[c] = MIN(T[c]))`
 
@@ -150,6 +173,23 @@ must be directly reachable from each other** for the categories-only outer query
 are only related to each other *through* a fact table (the common case for two unrelated dimensions)
 still can't be composed; two columns of the *same* dimension table can. Note the category domain is the
 category table's rows (after slicers on it), not "values that have facts".
+- **A table/matrix with several independent value fields from more than one table** (not one
+  composite expression spanning tables — see above) drafts via `_multi_value_table`: one derived
+  table per table (whether it's conceptually a fact or a dimension makes no difference — its own
+  fields, aggregated per category, joined only to the category tables), LEFT JOINed together on the
+  shared category keys, each field kept as its own output column. Confirmed against two real
+  reports (11 of 37 visuals in one). Left manual: any value field that is itself a composite
+  spanning several tables (mixing that with independent ones isn't modelled), and any table where
+  one arm's own join to the category tables has no relationship path at all (a category from a
+  table genuinely unrelated to the value's table — correctly refused, not a bug).
+- `_table_calc_columns` only ever tries one of the table's own real columns as the row-context anchor
+  per calculated column (see below) — a calculated column referencing two different real sibling
+  columns (e.g. `IF(a = 0, 0, b / a)` over two distinct source columns) is left unsupported today,
+  confirmed against a real report (a "percent of usage" calculated column dividing two sibling
+  usage columns): it correctly stays manual
+  rather than mistranslating, but doesn't draft either. Widening this needs `_calendar_expr_sql` to
+  take a dict of real columns instead of one `date_col`/`date_expr` pair — not done, since that
+  signature is shared with the calendar-table path and well covered by tests.
 
 ## Filter-pane filters (report / page / visual level)
 

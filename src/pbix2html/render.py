@@ -432,21 +432,25 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 # leaves its own default in place instead of inventing a border.
                 "style": v.get("style") or {},
             }
-            # a fill Power BI shows at 100 % transparency is not drawn; a partly transparent one is rgba
+            # a fill Power BI shows at 100 % transparency is not drawn; a partly transparent one
+            # is rgba. A line shape has no "background" (extract.py's _style_with_fill never
+            # sets one for a line — there's no fill area to colour) — its own colour is
+            # line_color, carrying the same transparency and rgba'd the same way.
             st = dict(entry["style"])
             if v["id"] in default_fill:
                 st["background"] = default_fill[v["id"]]
-            if st.get("background") and st.get("transparency") is not None:
-                st["background"] = _rgba(st["background"], st["transparency"]) if st["transparency"] < 100 else None
-                if not st["background"]:
-                    st.pop("background")
-            if st.pop("line", None) and st.get("background"):
-                st["line_color"] = st.pop("background")      # drawn as a rule, not as a filled box
-                if not _HEX6.match(st["line_color"]):
-                    st.pop("line_color")
+            if st.get("transparency") is not None:
+                for key in ("background", "line_color"):
+                    if st.get(key):
+                        st[key] = _rgba(st[key], st["transparency"]) if st["transparency"] < 100 else None
+                        if not st[key]:
+                            st.pop(key)
             for k in _TABLE_STYLE_KEYS:                # only plain hex colours reach the template's style attribute
                 if k in st and not (isinstance(st[k], str) and _HEX6.match(st[k])):
                     st.pop(k)
+            for k in ("border_weight", "line_weight", "round_edge"):   # pt -> px, same factor as title_size
+                if isinstance(st.get(k), (int, float)):
+                    st[k] = round(st[k] * 4 / 3, 1)
             if st.get("table_header_bg") and not st.get("table_header_fg"):
                 st["table_header_fg"] = _readable_fg(st["table_header_bg"], theme) or theme["foreground"]
             if st.get("table_row_bg") and not st.get("table_row_fg"):

@@ -31,8 +31,15 @@ def test_each_union_arm_joins_only_its_own_fact_table():
     assert "'FactA: x' AS series" in arm_a and "'FactB: x' AS series" in arm_b
 
 
-def test_one_select_never_sums_two_fact_tables():
-    assert _draft("table", Values=["Dim.name", "Sum(FactA.x)", "Sum(FactB.y)"]) is None
+def test_a_table_joins_two_fact_tables_through_separate_arms_not_one_shared_from():
+    # Each fact gets its own derived table (join it to Dim alone, aggregate, then LEFT JOIN the
+    # results on Dim's key) — never a single FROM with both FactA and FactB joined directly,
+    # which would multiply each one's rows by the other's and inflate both sums.
+    sql, _ = _draft("table", Values=["Dim.name", "Sum(FactA.x)", "Sum(FactB.y)"])
+    assert "LEFT JOIN" in sql and sql.count("FROM") >= 3        # outer + one per arm
+    arm_a, arm_b = sql.split("LEFT JOIN")[1], sql.split("LEFT JOIN")[2]
+    assert "db.a" in arm_a and "db.b" not in arm_a
+    assert "db.b" in arm_b and "db.a" not in arm_b
     assert _draft("card", Values=["Sum(FactA.x)"]) is not None
 
 
