@@ -193,3 +193,34 @@ def test_month_categories_come_back_in_calendar_order_unless_the_report_sorts():
     assert res[2] == ["January", "February", "March"]
     assert res[3] == ["August 2026", "June 2026"]                      # the report sorts: untouched
     assert res[4] == ["North", "June 2026"] and res[5] == ["June 2026", "June 2026"]
+
+
+def test_chart_tooltip_is_appended_to_body_above_every_visual(fake_pbix, tmp_path):
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    from pbix2html.semantic import VisualSpec
+    layout = ex.extract_layout(fake_pbix)
+    spec = semantic.load("Executive_Dashboard")
+    base = layout["pages"][0]
+    chart = {**base["visuals"][0], "id": "c", "type": "clusteredColumnChart", "hidden": False, "is_group": False, "parent_group": None,
+             "groups": [], "x": 20, "y": 20, "width": 400, "height": 200, "z": 1, "title": None, "style": {}}
+    spec.visuals = {"c": VisualSpec(id="c", kind="column", title=None, sql="select 1")}
+    data = {"c": {"columns": ["category", "value"], "rows": [["a", 1], ["b", 2]]}}
+    html = tmp_path / "r.html"
+    html.write_text(render_html({**layout, "pages": [{**base, "visuals": [chart]}]}, spec, {}, data, mode="snapshot"), encoding="utf-8")
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page()
+        pg.route("**/echarts*", lambda r: r.abort())             # the stub below stands in for the library
+        pg.add_init_script("window.echarts = { init: () => ({ setOption: o => { window.__tip = o.tooltip; }, resize() {} }) };")
+        pg.goto(html.as_uri())
+        pg.wait_for_timeout(300)
+        tip = pg.evaluate("() => window.__tip")
+        br.close()
+    assert tip["appendToBody"] is True and "z-index:2147483600" in tip["extraCssText"]
+    assert tip["trigger"] == "axis"                                  # the chart's own tooltip settings are kept

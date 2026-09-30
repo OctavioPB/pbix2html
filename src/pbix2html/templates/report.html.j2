@@ -422,6 +422,9 @@
   function chart(el, v, option) {
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
+    // The tooltip lives in <body>, above every visual: inside the chart's own box it is clipped by the visual
+    // (`overflow: hidden`) and loses to any visual stacked higher, which is what hid it behind other charts.
+    option.tooltip = { ...(option.tooltip || {}), appendToBody: true, confine: false, extraCssText: 'z-index:2147483600;' };
     c.setOption(option); charts[v.id] = c;
   }
 
