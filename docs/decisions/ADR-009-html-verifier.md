@@ -37,3 +37,11 @@ suspicious; whether the Power BI original also has it is for a person to confirm
   noise, tune with real reports.
 - Not covered: fidelity to the original (needs reference screenshots), text drawn inside charts (canvas),
   interactions.
+
+## Addendum: runs after every `convert`
+
+`convert` (CLI and panel) now calls `verify.verify_after_convert` on the HTML it just wrote and prints the
+findings; `--no-verify` skips it. In `snapshot` mode the rendered checks run too; `live`/`hah` pages have no data
+until their service answers, so only the static checks run there. It never raises (a verifier problem must not
+lose the HTML). Browser discovery also tries Edge/Chrome in their usual Windows paths, so a locked-down PC needs
+no `playwright install`.

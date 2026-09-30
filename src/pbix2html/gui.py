@@ -882,6 +882,9 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
 
         n_err = sum(1 for d in (data or {}).values() if d.get("error")) if data else None
         detail = []
+        from . import verify
+        check, _res = verify.verify_after_convert(OUT_DIR / out_name, mode)
+        detail.extend(check)
         if n_err:
             detail.append(f"{n_err} visual(s) had an error fetching data (shown inside the HTML).")
         if mode == "hah":
