@@ -72,6 +72,8 @@
   .visual.sl-box { overflow: visible; }
   .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: .85rem; color: var(--sl-fg); font-size: var(--sl-fs); }
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; min-height: calc(28px * var(--scale, 1)); }
+  .ic { display: inline-flex; align-items: center; justify-content: center; width: 1.35em; height: 1.35em; border-radius: 50%; border: 1.5px solid; font-size: .85em; font-weight: 700; line-height: 1; }
+  .ic-ok { color: #2E7D32; border-color: #4C9A6A; background: #E3F2E8; } .ic-bad { color: #C62828; border-color: #C0392B; background: #FBE3E4; } .ic-warn { color: #8A6D00; border-color: #D9B300; background: #FFF5CC; }
   .sl-caret { width: .5em; height: .5em; margin-left: .5em; flex: none; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-25%) rotate(45deg); opacity: .7; }
   .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
   .sl-btn:disabled { cursor: default; opacity: .8; }
@@ -209,7 +211,12 @@
   const inkFor = bg => lum(bg) > .4 ? '#1F1F1F' : '#FFFFFF';
   const holds = (w, x) => w.and ? w.and.every(t => holds(t, x)) : w.or ? w.or.some(t => holds(t, x))
     : ({ '=': x === w.v, '>': x > w.v, '>=': x >= w.v, '<': x < w.v, '<=': x <= w.v })[w.op];
-  const ICONS = { High: ['\u2714', '#2E7D32'], Low: ['\u2716', '#C62828'], Medium: ['\u25CF', '#F9A825'] };
+  // An icon rule's result as a round badge: by the icon's name (Power BI names them `SymbolHigh`, `CircleCheck`,
+  // `Cross`, `Warning`...). An unknown or `null` name draws nothing.
+  const iconOf = name => /null|none|blank/i.test(name) ? null
+    : /high|check|good|tick|up|green/i.test(name) ? ['ok', '\u2713']
+    : /low|cross|bad|down|red|x$/i.test(name) ? ['bad', '\u2715']
+    : /medium|warn|neutral|yellow|excl|amber/i.test(name) ? ['warn', '!'] : null;
   function condCell(rules, vals, x) {          // -> { bg, fg, icon } for the value x of one column
     const out = {};
     if (typeof x !== 'number') return out;
@@ -233,7 +240,6 @@
     }
     return out;
   }
-  const iconOf = name => { const k = Object.keys(ICONS).find(n => name.includes(n)); return k ? ICONS[k] : null; };
   // the grand-total row, computed by Teradata (yaml `sql_total`): blank where the measure is not additive
   const totalRow = (v, b, isNum) => (b.total && b.total.length === b.columns.length)
     ? '<tfoot><tr>' + b.total.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${x === null || x === undefined ? '' : (typeof x === 'number' ? fmt(x, v.format[b.columns[i]]) : x)}</td>`).join('') + '</tr></tfoot>' : '';
@@ -340,8 +346,8 @@
         b.rows.map(r => '<tr>' + r.map((x, i) => {
           const cf = applyCond[i] ? condCell(applyCond[i], colVals[i], x) : {};
           const ic = cf.icon ? iconOf(cf.icon) : null;
-          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
-          const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
+          const style = [v.col_align && v.n_fields === b.columns.length && v.col_align[i] && `text-align:${v.col_align[i]}`, cf.bg && `background:${cf.bg}`, cf.fg && !ic && `color:${cf.fg}`].filter(Boolean).join(';');
+          const text = cf.icon ? (ic ? `<span class="ic ic-${ic[0]}">${ic[1]}</span>` : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
           return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
         }).join('') + '</tr>').join('') +
         '</tbody>' + totalRow(v, b, isNum) + '</table></div>';

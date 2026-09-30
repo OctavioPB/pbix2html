@@ -272,3 +272,24 @@ def test_default_container_background_button_layers_and_hah_total(fake_pbix):
     assert "background" not in by["b"] and "background" not in by["c"]      # switched off / a text box
     hah = render_html({**layout, "pages": [{**base, "visuals": [card_on]}]}, spec, {}, None, mode="hah", hah_base="https://h.example")
     assert '"sql_total": "select 2"' in hah
+
+
+def test_icon_rule_names_map_to_round_badges():
+    from pathlib import Path
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    tpl = (Path(__file__).parent.parent / "src" / "pbix2html" / "templates" / "report.html.j2").read_text(encoding="utf-8")
+    snippet = tpl[tpl.index("  const iconOf = name"):tpl.index("  function condCell")]
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page()
+        pg.set_content("<html></html>")
+        res = pg.evaluate("(src) => { const f = new Function(src + '; return iconOf;')();"
+                          "return ['SymbolHigh', 'CircleCheck', 'SymbolLow', 'CircleCross', 'Warning', 'null', 'Mystery'].map(n => { const r = f(n); return r && r[0]; }); }", snippet)
+        br.close()
+    assert res == ["ok", "ok", "bad", "bad", "warn", None, None]
