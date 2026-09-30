@@ -253,6 +253,24 @@
     return keys.every(k => k !== null) && new Set(keys).size === cats.length
       ? cats.map((c, i) => [c, keys[i]]).sort((a, b) => a[1] - b[1]).map(x => x[0]) : cats;
   };
+  // A slice's label as the report sets it: "486 (72.1%)" (data value and percent of total, the default when the
+  // report shows labels and names no style), or with the category name when the style says so. Outside, with leader lines.
+  const pieLabel = v => {
+    const cs = v.style || {};
+    if (!cs.labels) return { color: theme.foreground, fontSize: 11 };
+    const what = (cs.pie_label || 'Data value, Percent of total').toLowerCase();
+    const all = what.includes('all');
+    const useName = all || what.includes('category'), useVal = all || what.includes('value'), usePct = all || what.includes('percent');
+    const pd = Math.min(Math.max(cs.labels_pct_precision === undefined ? 1 : cs.labels_pct_precision, 0), 10);
+    return { show: true, color: cs.labels_color || theme.muted, fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
+      fontWeight: cs.labels_bold ? 'bold' : 'normal',
+      formatter: p => {
+        const val = fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value);
+        const pct = `${p.percent.toFixed(pd)}%`;
+        const nums = useVal && usePct ? `${val} (${pct})` : useVal ? val : usePct ? pct : '';
+        return [useName ? p.name : '', nums].filter(Boolean).join(' ');
+      } };
+  };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -332,7 +350,9 @@
       // to leave the box blank, which is what happened to both until now.
       if (v.style && v.style.line_color) {
         const w = v.style.line_weight || 2;
-        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:${w}px;margin-top:${-w / 2}px;background:${v.style.line_color}"></div>`;
+        el.innerHTML = v.style.line_vertical
+          ? `<div style="position:absolute;top:0;bottom:0;left:50%;width:${w}px;margin-left:${-w / 2}px;background:${v.style.line_color}"></div>`
+          : `<div style="position:absolute;left:0;right:0;top:50%;height:${w}px;margin-top:${-w / 2}px;background:${v.style.line_color}"></div>`;
       } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {
@@ -352,7 +372,7 @@
         series: [{ type: 'pie', radius: v.inner_radius ? ['45%', '75%'] : '75%',
                    data: b.rows.filter(r => r[vi] !== null).map(r => ({ name: String(r[ci]), value: r[vi],
                    ...(((v.style || {}).value_colors || {})[String(r[ci])] ? { itemStyle: { color: v.style.value_colors[String(r[ci])] } } : {}) })),
-                   label: { color: theme.foreground, fontSize: 11 } }] });
+                   label: pieLabel(v) }] });
     },
     gauge(el, v, b) {
       const r = b.rows[0] || []; const g = n => { const i = col(b, n); return i >= 0 ? r[i] : null; };

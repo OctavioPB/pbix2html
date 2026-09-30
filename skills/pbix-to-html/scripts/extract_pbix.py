@@ -481,6 +481,14 @@ def _chart_style(objects: dict, dim_fields: set[str] | None = None) -> dict:
         colour = _object_color(objects, "labels", "color")
         if colour:
             st["labels_color"] = colour
+        # pie / donut: what a slice label says (`labelStyle`: Category / Data value / Percent of total / combinations)
+        # and how many decimals the percentage has
+        style_txt = (_object_text(objects, "labels", "labelStyle") or "").strip()
+        if style_txt and re.fullmatch(r"[A-Za-z ,]{1,60}", style_txt):
+            st["pie_label"] = style_txt
+        pct = _lit_number(_object_text(objects, "labels", "percentageLabelPrecision"))
+        if pct is not None:
+            st["labels_pct_precision"] = pct
     if _object_flag(objects, "legend") is False:
         st["legend_show"] = False
     pos = (_object_text(objects, "legend", "position") or "").strip()
@@ -871,6 +879,10 @@ def _shape_geometry(objects: dict) -> dict:
     kind = (_object_text(objects, "shape", "tileShape") or _object_text(objects, "general", "shapeType") or "").lower()
     if kind in _SHAPE_KINDS:
         out["shape_kind"] = _SHAPE_KINDS[kind]
+    elif not kind and (objects or {}).get("line") and not (objects or {}).get("fill") and not (objects or {}).get("shape"):
+        # a basicShape that names no silhouette and no fill but has a Line card is Power BI's Line: its 6 x 270 box
+        # is a vertical rule (seen between the four charts of a real report), not a filled bar
+        out["shape_kind"] = "line"
     angle = _object_text(objects, "rotation", "shapeAngle") or _object_text(objects, "rotation", "angle")
     if angle and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", angle):
         deg = float(angle.strip().rstrip("DL"))

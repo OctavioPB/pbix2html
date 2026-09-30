@@ -395,7 +395,8 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
         # with the theme's first colour in Power BI, which the extractor (rightly) doesn't record as a fill
         painted = [{**w, "style": {**(w.get("style") or {}), "background": theme["data_colors"][0]}}
                    if (w["type"] in ("shape", "basicShape") and "fill" not in (w.get("objects_keys") or [])
-                       and not (w.get("style") or {}).get("background") and (w.get("style") or {}).get("transparency") is None)
+                       and not (w.get("style") or {}).get("background") and (w.get("style") or {}).get("transparency") is None
+                       and (w.get("style") or {}).get("shape_kind") != "line" and not (w.get("style") or {}).get("line_color"))
                    else w for w in p["visuals"]]
         default_fill = {w["id"]: w["style"]["background"] for w in painted if w is not None and w.get("style", {}).get("background")
                         and not next((o for o in p["visuals"] if o["id"] == w["id"]), {}).get("style", {}).get("background")}
@@ -465,11 +466,15 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                     st.pop(k)
             if isinstance(st.get("series_colors"), dict):
                 st["series_colors"] = {str(k): c for k, c in st["series_colors"].items() if isinstance(c, str) and _HEX6.match(c)}
+            if not (isinstance(st.get("pie_label"), str) and re.fullmatch(r"[A-Za-z ,]{1,60}", st["pie_label"])):
+                st.pop("pie_label", None)
             if isinstance(st.get("value_colors"), dict):
                 st["value_colors"] = {str(k): c for k, c in st["value_colors"].items() if isinstance(c, str) and _HEX6.match(c)}
             for k in ("table_grid_h_weight", "table_grid_v_weight"):
                 if k in st and not (isinstance(st[k], (int, float)) and 0 <= st[k] <= 20):
                     st.pop(k)
+            if st.get("line_color") and (v.get("height") or 0) > (v.get("width") or 0):
+                st["line_vertical"] = True          # a tall, thin box is a vertical rule
             for k in ("table_header_size", "table_row_size"):
                 if k in st and not (isinstance(st[k], (int, float)) and 1 <= st[k] <= 100):
                     st.pop(k)

@@ -176,3 +176,30 @@ def test_per_value_colours_only_count_for_the_fields_the_chart_uses_now():
     projections = {"Series": [{"queryRef": "Gender map.gender_name"}], "Y": [{"queryRef": "Sum(T.x)"}]}
     assert ex._chart_style(objects, ex._dim_refs(projections))["value_colors"] == {"Male": "#FF5F02"}
     assert ex._chart_style(objects)["value_colors"] == {"Male": "#AAAAAA"}         # without the chart's fields: first wins (theme)
+
+
+def test_basic_shape_with_only_a_line_card_is_a_vertical_rule_not_a_filled_bar():
+    line_only = {"line": [{"properties": {"lineColor": _color("'#FF5F02'")}}]}
+    st = ex._style_with_fill({}, line_only)
+    assert st["shape_kind"] == "line" and st["line_color"] == "#FF5F02" and "background" not in st
+    # a rectangle that has a fill (or names its silhouette) is not a line
+    assert ex._shape_geometry({**line_only, "fill": [{"properties": {}}]}) == {}
+    assert ex._shape_geometry({**line_only, "shape": [{"properties": {"tileShape": _lit("'rectangle'")}}]})["shape_kind"] == "rectangle"
+
+
+def test_pie_label_content_and_precision_are_read():
+    objects = {"labels": [{"properties": {"show": _lit("true"), "labelStyle": _lit("'Category, data value'"),
+                                          "percentageLabelPrecision": _lit("1L"), "labelPrecision": _lit("0L")}}]}
+    st = ex._chart_style(objects)
+    assert st["labels"] is True and st["pie_label"] == "Category, data value" and st["labels_pct_precision"] == 1.0
+    assert "pie_label" not in ex._chart_style({"labels": [{"properties": {"show": _lit("true"), "labelStyle": _lit("'x;}<'")}}]})
+
+
+def test_a_tall_thin_line_is_drawn_vertically(fake_pbix):
+    from pbix2html import semantic
+    from pbix2html.render import render_html
+    layout = ex.extract_layout(fake_pbix)
+    base = layout["pages"][0]
+    rule = {**base["visuals"][0], "id": "r", "type": "basicShape", "x": 100, "y": 50, "width": 6, "height": 270, "style": {"shape_kind": "line", "line_color": "#FF5F02"}}
+    html = render_html({**layout, "pages": [{**base, "visuals": [rule]}]}, semantic.load("Executive_Dashboard"), {}, None, mode="live")
+    assert '"line_vertical": true' in html
