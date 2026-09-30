@@ -12,9 +12,10 @@
     --muted: {{ theme.muted }};
     --border: {{ theme.border }};
     --accent: {{ theme.data_colors[0] }};
-    --font: {{ theme.font_family }};
+    --font: {{ theme.font_family|safe }};
   }
   * { box-sizing: border-box; }
+  button, input, select, textarea { font-family: inherit; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
   header { display: flex; align-items: baseline; gap: 1.5rem; padding: .75rem 1.25rem; border-bottom: 1px solid var(--border); }
   header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
@@ -29,6 +30,7 @@
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
   .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 600; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
   .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
@@ -43,9 +45,10 @@
   table { border-collapse: collapse; width: 100%; font-size: .8rem; }
   th, td { padding: .25rem .5rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
   th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: 600; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
+  .tablewrap.rh td:first-child { background: var(--rh-bg); color: var(--rh-fg, inherit); font-weight: 600; }
   tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .text { padding: .5rem .6rem; font-size: .85rem; overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
@@ -67,12 +70,14 @@
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; }
   .sl-btn { display: flex; justify-content: space-between; align-items: center; cursor: pointer; text-align: left; }
   .sl-btn:disabled { cursor: default; opacity: .8; }
+  .sl-sep { color: var(--sl-sep, var(--sl-fg)); }
   .sl-range { display: flex; gap: .3rem; align-items: center; }
+  .sl-range input { flex: 1 1 0; min-width: 0; }
   .sl-list { max-height: 100%; overflow: auto; background: var(--sl-bg); }
   .sl-item { display: flex; align-items: center; gap: .4rem; padding: .15rem .4rem; cursor: pointer; white-space: nowrap; }
   .sl-item:hover { background: rgba(127,127,127,.12); }
   .sl-parent { font-weight: 600; }
-  .sl-panel { position: fixed; z-index: 10000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
+  .sl-panel { position: fixed; z-index: 2147483000; max-height: 18rem; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border: 1px solid var(--border); box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: .85rem; }
   .sl-panel .sl-list { overflow: auto; }
   .sl-search { margin: .3rem; padding: .25rem .4rem; font: inherit; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -104,12 +109,12 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
+<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
   {# style: what the .pbix actually says about this visual's frame. Power BI's own
      default is no border and no fill, so a visual that says nothing gets neither —
      drawing a box around everything is what made every report look like a grid. #}
-  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
               {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
               ; border: {% if v.style.border %}1px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}">
@@ -167,6 +172,18 @@
     if (Math.abs(v) >= 1e4) return (v / 1e3).toLocaleString('en-US', { maximumFractionDigits: 1 }) + ' k';
     return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
   };
+  // A card's number as the report formats it: display unit (1 none, 1000 K, 1000000 M, 1e9 bn, 1e12 T; 0/unset auto)
+  // and decimals. Without either it falls back to fmt().
+  const UNITS = { 1000: ' K', 1e6: ' M', 1e9: ' bn', 1e12: ' T' };
+  const fmtCard = (v, x) => {
+    const st = v.style || {};
+    if (typeof x !== 'number' || (st.value_units === undefined && st.value_decimals === undefined) || (v.format.value || '').includes('%')) return fmt(x, v.format.value);
+    let u = st.value_units, div = 1;
+    if (!u) { const a = Math.abs(x); u = a >= 1e12 ? 1e12 : a >= 1e9 ? 1e9 : a >= 1e6 ? 1e6 : a >= 1e3 ? 1000 : 1; }
+    if (u > 1) div = u;
+    const d = Math.min(Math.max(st.value_decimals === undefined ? (div > 1 ? 1 : 0) : st.value_decimals, 0), 10);
+    return (x / div).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) + (UNITS[div] || '');
+  };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -190,13 +207,13 @@
   const R = {
     card(el, v, b) {
       const vi = col(b, 'value'), li = col(b, 'label'); const r = b.rows[0] || [];
-      el.innerHTML = `<div class="card"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmtCard(v, r[vi])}</div>` +
         (li >= 0 && r[li] ? `<div class="label">${r[li]}</div>` : '') + `</div>`;
     },
     kpi(el, v, b) {
       const r = b.rows[0] || []; const vi = col(b, 'value'), ti = col(b, 'target');
       const delta = (ti >= 0 && r[ti]) ? (r[vi] - r[ti]) / r[ti] : null;
-      el.innerHTML = `<div class="card kpi"><div class="value">${fmt(r[vi], v.format.value)}</div>` +
+      el.innerHTML = `<div class="card kpi"><div class="value"${v.value_css ? ` style="${v.value_css}"` : ''}>${fmtCard(v, r[vi])}</div>` +
         (ti >= 0 ? `<div class="target">Target ${fmt(r[ti], v.format.value)}${delta !== null ? ' · ' + fmt(delta, '%') : ''}</div>` : '') + `</div>`;
     },
     multicard(el, v, b) {
@@ -205,15 +222,14 @@
     },
     table(el, v, b) {
       const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
-      // A table style preset (extract.py's _table_style) sets its own header/row-banding
-      // colours; absent keys keep the theme-neutral default (no banding) below.
       const st = v.style || {};
       const vars = [
         st.table_header_bg && `--th-bg:${st.table_header_bg}`, st.table_header_fg && `--th-fg:${st.table_header_fg}`,
         st.table_row_bg && `--tr-bg:${st.table_row_bg}`, st.table_row_bg_alt && `--tr-bg-alt:${st.table_row_bg_alt}`,
         st.table_row_fg && `--tr-fg:${st.table_row_fg}`,
+        st.table_rowhdr_bg && `--rh-bg:${st.table_rowhdr_bg}`, st.table_rowhdr_fg && `--rh-fg:${st.table_rowhdr_fg}`,
       ].filter(Boolean).join(';');
-      el.innerHTML = `<div class="tablewrap"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
+      el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
         b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || c}</th>`).join('') + '</tr></thead><tbody>' +
         b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
         '</tbody></table></div>';
@@ -231,7 +247,9 @@
       // An `image` visual has its picture embedded as a data: URI; a shape or button
       // instead carries a label (extract.py's visual_text). Either way the point is not
       // to leave the box blank, which is what happened to both until now.
-      if (v.image) {
+      if (v.style && v.style.line_color) {
+        el.innerHTML = `<div style="position:absolute;left:0;right:0;top:50%;height:2px;margin-top:-1px;background:${v.style.line_color}"></div>`;
+      } else if (v.image) {
         el.innerHTML = `<img src="${v.image}" alt="" style="width:100%;height:100%;object-fit:contain;">`;
       } else if (v.texts && v.texts.shape_text) {
         el.innerHTML = '<div class="shape-text"></div>';
@@ -294,6 +312,25 @@
     c.setOption(option); charts[v.id] = c;
   }
 
+  // Text that does not fit its box shrinks (down to 9px) before it is cut with "…": Power BI's font sizes are
+  // absolute while the page here scales with the window, so a title or a big number that fit at design size
+  // would otherwise be truncated on a narrower screen.
+  function fitText(vis) {
+    scalePage(vis.closest('.page'));
+    vis.querySelectorAll('.title, .subtitle, .card .value, .card .label, .kpi .target').forEach(n => {
+      if (n.dataset.fs === undefined) n.dataset.fs = n.style.fontSize || '';
+      n.style.fontSize = n.dataset.fs; n.classList.remove('wrap');
+      const over = () => n.scrollWidth > n.clientWidth + 1;
+      let px = parseFloat(getComputedStyle(n).fontSize);
+      const title = n.classList.contains('title');
+      for (let i = 0; i < 60 && px > (title ? 11 : 9) && over(); i++) { px -= 1; n.style.fontSize = px + 'px'; }
+      if (title && over()) n.classList.add('wrap');          // still too long: two lines, then "…"
+    });
+  }
+  // Power BI sizes are px at the page's design width: --scale is how much the page is shrunk or grown here
+  const scalePage = pg => { if (pg && pg.clientWidth) pg.style.setProperty('--scale', (pg.clientWidth / (parseFloat(pg.dataset.w) || pg.clientWidth)).toFixed(4)); };
+  const fitAll = () => { document.querySelectorAll('.visual').forEach(fitText); };
+
   // ---------- data ----------
   function paint(id, block) {
     const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);
@@ -310,6 +347,7 @@
       return;
     }
     try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+    fitText(el.closest('.visual'));
   }
   function currentParams(names) {
     const q = new URLSearchParams();
@@ -362,6 +400,7 @@
     document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x.dataset.page === id));
     document.querySelectorAll('.page').forEach(p => { p.hidden = p.id !== id; });
     Object.values(charts).forEach(c => c.resize());
+    fitAll();
     if (window.API_BASE && !loadedPages.has(id)) { loadedPages.add(id); load(null, id); }
   }
   document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
@@ -387,7 +426,7 @@
     b.addEventListener('click', activate);
     b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
   });
-  window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+  window.addEventListener('resize', () => { Object.values(charts).forEach(c => c.resize()); fitAll(); });
   load();
 })();
 </script>

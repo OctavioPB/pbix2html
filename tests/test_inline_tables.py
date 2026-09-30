@@ -19,8 +19,8 @@ def _m(rows, types="a = _t, b = _t"):
 
 def test_inline_table_becomes_union_all():
     sql = semantic._detect_table_query(_m([["x", "it's"], ["y", None]]))
-    assert sql == ("SELECT CAST('x' AS VARCHAR(1)) AS a, CAST('it''s' AS VARCHAR(4)) AS b\n"
-                   "UNION ALL\nSELECT 'y', NULL")
+    assert sql == ("SELECT CAST('x' AS VARCHAR(1)) AS a, CAST('it''s' AS VARCHAR(4)) AS b FROM (SELECT 1 AS one) AS one_row\n"
+                   "UNION ALL\nSELECT 'y', NULL FROM (SELECT 1 AS one) AS one_row")
     assert semantic.validate_read_only_sql(sql)
 
 

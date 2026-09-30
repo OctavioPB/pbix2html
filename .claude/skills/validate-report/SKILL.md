@@ -33,11 +33,20 @@ For every visual with `sql` in the yaml:
 3. Compare with the same slicer state on both sides. Drill-through pages have no navigation in the HTML, and
    their saved filter value is ignored, so compare them for the value you pass explicitly.
 
+## Visual check before comparing numbers
+
+Run `pbix2html verify out/<Report>.html`: it flags what is objectively wrong in the HTML (overlapping visuals, text the
+same colour as its background, text hidden under another visual or a picture, clipped text, failed visuals, chart labels
+that don't fit) with numbered screenshots per page. Fix or accept each finding first; a chart that is blank or covered
+cannot be validated numerically.
+
 ## Diagnosing differences
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
 | `Error 3707 … between the 'AS' keyword and the 'value'/'rename' keyword` | a reserved word used as a name | fixed in the drafter and at run time (skill `dax-to-teradata-sql`, *Teradata rejections*) |
+| `Error 3888` A SELECT for a UNION ... must reference a table | an inline table without a FROM | repaired when sent; new drafts add the one-row source |
+| HTTP 503 `Teradata isn't reachable` (Hostname lookup failed, Error 503) | VPN / network, not the SQL | reconnect; the pool opens fresh sessions |
 | `Error 3706` ordered analytical functions in a subquery | Top N written with a window function | counted instead of windowed |
 | `Error 2621` `Bad character in format or data of CALDATES.cdate` | a multi default saved as the text `[2026]` | edit page fixed; open the yaml and make it a list (`[2026]`) |
 | Every value × k | A JOIN duplicates rows | relationships in `model.json`; add `DISTINCT` on the dimension |

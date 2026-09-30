@@ -84,6 +84,17 @@ colour is the default text of a slicer widget (`--sl-fg`). A background at 100 %
 (`style.transparency`); a partial one is `rgba`. The title text itself comes from the yaml (`title`), so an old
 yaml keeps old text until it is regenerated.
 
+## Verifying the result (`pbix2html verify`, ADR-009)
+
+`pbix2html verify out/Report.html` opens every page in a browser and writes `verify_report.md` with numbered
+screenshots. Rules: `overlap`, `outside_page`, `too_small`, `no_renderer`, `no_data` / `data_error` /
+`empty_result` (static); `invisible_text`, `low_contrast`, `text_busy_background` (pixel contrast),
+`text_covered`, `text_overlap`, `text_clipped` / `text_truncated`, `text_too_big`, `visual_error`, `visual_empty`,
+`broken_image`, `chart_labels_crowded` / `chart_labels_wide` / `chart_font_large` / `chart_legend_crowded` /
+`chart_many_slices`, `js_error`. Offline: `--echarts <local echarts.min.js>`; browser: `--browser <path>`.
+Fixes it led to: theme colour ids for a report without a custom theme, textbox paragraph alignment, default shape
+fill (the theme's first colour), card number colour, readable default text on dark panels and translucent buttons.
+
 ## 100 % stacked charts
 
 `hundredPercentStacked*` visuals are drawn with `v.percent`: each category's series are rescaled to sum to
@@ -143,3 +154,14 @@ group, and a range slicer (`between`/`before`/`after`) drives `<name>_from` / `<
 from `GET /reports/{report}/slicers/{id}` and a change reloads only the visuals using the changed
 parameters; in `hah` the options run client-side from `options_sql`. The widget code is
 `templates/slicer.js`, shared by both templates (`slicerWidget(el, v, host)`).
+
+## Text fit, tables and font (both templates)
+
+- Default face is Segoe UI (`render._FONT_STACK`); a theme face goes first with Segoe UI behind it. Buttons and inputs inherit it.
+- `fitText` shrinks a title / card value / label that does not fit (titles to 11px, then two lines and "…"; numbers
+  to 9px) instead of cutting it; it re-runs on resize and page change. Do not size cards with `vw`.
+- Table/matrix colours: `style.table_header_bg/fg`, `table_row_bg`, `table_row_bg_alt`, `table_row_fg`, matrix
+  `table_rowhdr_bg/fg`. Read from the visual's `objects` (`columnHeaders`, `values`, `rowHeaders`), else from the
+  theme's `visualStyles` (`extract.apply_theme_table_styles`). `ThemeDataColor` ColorId 2 + 0.6 = #FFBF9A on a
+  #FF5F02 first data colour. Both `report.html.j2` and `report_hah.html.j2` apply them (the main template did not).
+

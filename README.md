@@ -278,6 +278,7 @@ pbix2html convert reports/X.pbix --mode snapshot --params year=2026 [--role Sale
 pbix2html convert reports/X.pbix --mode live
 pbix2html convert reports/X.pbix --include-hidden  # also render pages hidden in Power BI
 pbix2html convert reports/X.pbix --mode hah        # HTML App Host — see ADR-004, unverified against a real HAH
+pbix2html verify out/X.html         # check the HTML for overlaps, unreadable text, failed visuals (needs: pip install '.[verify]')
 pbix2html validate X
 pbix2html gui                        # local web panel (see section 3); double-click: Open_Panel.bat / .command / .sh
 python -m uvicorn pbix2html.serve:app   # live mode (needs SSO in front; see serve.py)
@@ -311,6 +312,13 @@ Without Teradata you can test the render with `--fake-data tests/fixtures/fake_b
 > `--fake-data`, it always needs a real connection. Any other message comes from Teradata itself
 > (wrong table/column in a drafted SQL, no access to the view, a SQL syntax error): copy the query
 > from the yaml and run it in a SQL client.
+>
+> **Visual shows `HTTP 503`?** Teradata could not be reached at all (`Hostname lookup failed`, `Lost connection`): check the
+> VPN / network; nothing is wrong with the query. A 500 is the database or the SQL.
+>
+> **Old drafted queries still fail after an update?** The tool repairs the known cases when it sends a query. To draft again
+> what the tool wrote earlier (your own edits are never touched, a backup is kept): `pbix2html redraft <pbix>`, or tick
+> *also redo queries the tool drafted earlier* in the panel.
 >
 > **A slicer shows `HTTP 404`?** Older versions answered 404 when the yaml had no `slicers:` entry for
 > that slicer (a yaml written before slicers became widgets). It now answers "skipped" and the widget

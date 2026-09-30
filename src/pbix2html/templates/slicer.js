@@ -6,9 +6,15 @@ function slicerWidget(el, v, host) {
   const isRange = S.mode === 'between' || S.mode === 'before' || S.mode === 'after';
   el.classList.add('sl');
   if (el.parentElement) el.parentElement.classList.add('sl-box');   // let the widget overflow its box
-  if (st.color) el.style.setProperty('--sl-fg', st.color);
-  else if (v.fg) el.style.setProperty('--sl-fg', v.fg);   // readable on the panel behind it (no colour set by the report)
+  // Light item text is written for a dark backdrop (a slicer on a navy panel): the control must then not paint its
+  // own white box, or white text lands on white (found by `pbix2html verify`).
+  const isLight = c => { const m = /^#([0-9a-f]{6})$/i.exec(c || ''); if (!m) return false; const n = parseInt(m[1], 16);
+    return (0.2126 * (n >> 16) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255 > 0.6; };
+  const fgc = st.color || (st.background ? null : v.fg);   // an explicit control background keeps dark text
+  if (fgc) el.style.setProperty('--sl-fg', fgc);
+  if (v.fg) el.style.setProperty('--sl-sep', v.fg);          // text that sits on the panel, outside the controls
   if (st.background) el.style.setProperty('--sl-bg', st.background);
+  else if (isLight(fgc)) el.style.setProperty('--sl-bg', 'transparent');
   if (st.size) el.style.setProperty('--sl-fs', st.size + 'pt');
   const same = (a, b) => String(a) === String(b);
   const asList = x => (x === null || x === undefined || x === '') ? [] : (Array.isArray(x) ? x : [x]);
@@ -25,7 +31,7 @@ function slicerWidget(el, v, host) {
       inp.addEventListener('change', () => host.set({ [name]: inp.value || null }));
       return inp;
     });
-    inputs.forEach((inp, i) => { if (i) { const dash = document.createElement('span'); dash.textContent = '–'; box.appendChild(dash); } box.appendChild(inp); });
+    inputs.forEach((inp, i) => { if (i) { const dash = document.createElement('span'); dash.textContent = '–'; dash.className = 'sl-sep'; box.appendChild(dash); } box.appendChild(inp); });
     const refresh = () => inputs.forEach((inp, i) => { const cur = host.get(S.params[i]); inp.value = cur === null || cur === undefined ? '' : String(cur).slice(0, 10); });
     el.replaceChildren(box); refresh();
     return refresh;

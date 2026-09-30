@@ -176,7 +176,12 @@ Each of these passed sqlglot's Teradata parser, so **parsing with sqlglot is not
 |---|---|---|
 | 3707 `... between AS and value` (also `rename`) | a reserved word used as an alias or column name: the renderer's own `value`, or a Power BI column/table called Rename, Date, Index... | every generated name is checked against `_TERADATA_RESERVED` (columns are double-quoted, table aliases get `_t`); `quote_reserved_aliases` quotes `AS <reserved>` and `alias.<reserved>` in SQL and table maps written earlier (type names after AS are left alone) |
 | 3706 ordered analytical functions not allowed in subqueries | `IN (SELECT ... QUALIFY RANK() OVER ...)` for a Top N filter | count of strictly better values `< N` (same as RANK() <= N); windows are only safe in a derived table joined in FROM (`MIN(x) OVER ()` in the selection-min join) |
+| 3888 A SELECT for a UNION, INTERSECT or MINUS must reference a table | an inline ("Enter Data") table is `SELECT 'E', 'x' UNION ALL SELECT ...` with no FROM | every literal-only arm gets `FROM (SELECT 1 AS one) AS one_row` |
 | 2621 `Bad character in format or data of CALDATES.cdate` | a multi-value parameter default saved as the text `[2026]` (the edit page wrote `str(list)`), compared with an INTEGER year | the page shows a list as `a, b` and saves a list; `multi_values` also heals `[2026]`, `['a','b']` coming from a yaml or a URL |
+
+**Older drafts are repaired when they are sent** (`fix_teradata_sql`, run by `TeradataBackend`): quoted reserved names, the counted Top N in place of the `QUALIFY` form (checked on a real report: the 48 old Top N visuals come out identical to the current drafter's), and the one-row source for set-operation arms. A yaml/table map written by an older version therefore works without regenerating; `pbix2html redraft <pbix>` (or the panel's *also redo queries the tool drafted earlier*) redoes the auto-drafted visuals, with a backup, and never touches SQL a person wrote.
+
+Network failures (`Hostname lookup failed`, `Error 503 Lost connection`) come back as HTTP 503 "Teradata isn't reachable (network / VPN?)", not 500.
 
 Reserved words: `_TERADATA_RESERVED` (documentation list as remembered; a missing word shows as a 3707 and is added).
 Quoting is harmless in a Teradata-mode session (names are case-insensitive); an ANSI-mode session would make

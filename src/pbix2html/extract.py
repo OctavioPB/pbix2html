@@ -128,8 +128,10 @@ def extract_textbox_text(objects: dict) -> str | None:
                 css.append(f"font-size:{size}")
             escaped = html.escape(value)
             runs.append(f'<span style="{";".join(css)}">{escaped}</span>' if css else escaped)
-        lines.append("".join(runs))
-    return "<p>" + "</p><p>".join(lines) + "</p>" if any(lines) else None
+        align = str(para.get("horizontalTextAlignment") or "").lower()
+        attr = f' style="text-align:{align}"' if align in ("left", "center", "right", "justify") else ""
+        lines.append(f"<p{attr}>" + "".join(runs) + "</p>")
+    return "".join(lines) if any(re.sub(r"<[^>]*>", "", ln).strip() for ln in lines) else None
 
 
 # Power BI visualType → Content-Type, for the handful of raster/vector formats an
@@ -141,16 +143,20 @@ _IMAGE_MIME = {
 }
 
 
+_PBI_DEFAULT_DATA_COLORS = ["#118DFF", "#12239E", "#E66C37", "#6B007B", "#E044A7", "#744EC2", "#D9B300", "#D64550"]
+
+
 def theme_palette(theme: dict | None) -> list[str] | None:
     """The palette `ThemeDataColor.ColorId` indexes into: 0 = background, 1 = foreground,
     then the theme's `dataColors` from index 2 (verified against a real report: a fill of
-    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). None
-    when the report's theme JSON isn't available, in which case theme references are dropped
-    rather than guessed."""
+    ColorId 2 / Percent 0.6 is the first data colour, #FF5F02, tinted to #FFBF9A). With no custom theme, Power BI's default palette."""
     cj = (theme or {}).get("custom_json") or {}
     colors = cj.get("dataColors")
     if not colors:
-        return None
+        # A report without a custom theme uses Power BI's default one, whose palette is fixed: white, black and
+        # these eight colours. Dropping the reference (as this used to) turned a title set to "background
+        # colour" (white, on a dark panel) into the theme's dark text: dark on dark.
+        colors = _PBI_DEFAULT_DATA_COLORS
     return [cj.get("background") or "#FFFFFF", cj.get("foreground") or "#000000", *colors]
 
 
@@ -218,11 +224,14 @@ def resolve_theme_markers(layout: dict) -> None:
                 fix(style, "background")
                 fix(style, "border_color")
                 fix(style, "title_color")
+                fix(style, "value_color")
                 fix(style, "table_header_bg")
                 fix(style, "table_header_fg")
                 fix(style, "table_row_bg")
                 fix(style, "table_row_bg_alt")
                 fix(style, "table_row_fg")
+                fix(style, "table_rowhdr_bg")
+                fix(style, "table_rowhdr_fg")
             if isinstance(v.get("slicer"), dict) and isinstance(v["slicer"].get("style"), dict):
                 fix(v["slicer"]["style"], "color")
                 fix(v["slicer"]["style"], "background")
@@ -332,10 +341,13 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     when the report doesn't specify them, so the renderer can tell "explicitly set" from
     "not mentioned"."""
     style: dict[str, Any] = {}
-    background = _object_color(vc_objects, "background", theme_colors=theme_colors)
+    # A background that is switched off (`show: false`) keeps its colour and transparency in the file but is not
+    # drawn: reading them anyway put a half-transparent black box behind every slicer on a dark panel.
+    background_on = _object_flag(vc_objects, "background") is not False
+    background = _object_color(vc_objects, "background", theme_colors=theme_colors) if background_on else None
     if background:
         style["background"] = background
-    transparency = _object_text(vc_objects, "background", "transparency")
+    transparency = _object_text(vc_objects, "background", "transparency") if background_on else None
     if transparency and re.fullmatch(r"\s*-?\d+(\.\d+)?[DL]?\s*", transparency):
         style["transparency"] = float(transparency.strip().rstrip("DL"))          # 0-100: 100 means the fill is invisible
     # the title's own look: a slicer on a dark panel usually has a white title, which the theme's
@@ -368,27 +380,48 @@ _TABLE_KINDS = {"table", "tableEx", "matrix", "pivotTable"}
 def _table_style(objects: dict) -> dict:
     """A table/matrix's own header and row-banding colours
     (`objects.columnHeaders.backColor/fontColor`, `objects.values.backColorPrimary/
-    backColorSecondary/fontColorPrimary/fontColorSecondary`) — what a Power BI table
-    style preset (e.g. a themed alternating-row style) actually sets, as opposed to the
-    plain theme background every other visual falls back to. Keys are omitted when the
-    report doesn't set them, so the renderer keeps its neutral default (no banding)."""
+    backColorSecondary/fontColorPrimary`, a matrix's `objects.rowHeaders.backColor/fontColor`) — what a
+    Power BI table style preset (e.g. a themed alternating-row style) actually sets, as opposed to the
+    plain theme background every other visual falls back to. Keys are omitted when the report doesn't
+    set them, so the renderer keeps its neutral default (no banding)."""
     style: dict[str, Any] = {}
-    header_bg = _object_color(objects, "columnHeaders", "backColor")
-    if header_bg:
-        style["table_header_bg"] = header_bg
-    header_fg = _object_color(objects, "columnHeaders", "fontColor")
-    if header_fg:
-        style["table_header_fg"] = header_fg
-    row_bg = _object_color(objects, "values", "backColorPrimary")
-    if row_bg:
-        style["table_row_bg"] = row_bg
-    row_bg_alt = _object_color(objects, "values", "backColorSecondary")
-    if row_bg_alt:
-        style["table_row_bg_alt"] = row_bg_alt
-    row_fg = _object_color(objects, "values", "fontColorPrimary")
-    if row_fg:
-        style["table_row_fg"] = row_fg
+    for key, (obj, prop) in _TABLE_COLOR_KEYS.items():
+        colour = _object_color(objects, obj, prop)
+        if colour:
+            style[key] = colour
     return style
+
+
+# style key → (formatting object, property) — also where a theme's `visualStyles` keeps the same colours
+_TABLE_COLOR_KEYS = {
+    "table_header_bg": ("columnHeaders", "backColor"), "table_header_fg": ("columnHeaders", "fontColor"),
+    "table_row_bg": ("values", "backColorPrimary"), "table_row_bg_alt": ("values", "backColorSecondary"),
+    "table_row_fg": ("values", "fontColorPrimary"),
+    "table_rowhdr_bg": ("rowHeaders", "backColor"), "table_rowhdr_fg": ("rowHeaders", "fontColor"),
+}
+
+
+def apply_theme_table_styles(layout: dict) -> None:
+    """A table whose own formatting is silent inherits the theme's `visualStyles` for its kind (`tableEx`,
+    `table`, `pivotTable`, else `*`): the header and banding colours a report designer set once in the theme
+    file rather than on every table. Only fills keys the visual did not set itself."""
+    vs = ((layout.get("theme") or {}).get("custom_json") or {}).get("visualStyles") or {}
+    palette = theme_palette(layout.get("theme"))
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            if v.get("type") not in _TABLE_KINDS or not isinstance(v.get("style"), dict):
+                continue
+            entry = ((vs.get(v["type"]) or vs.get("*") or {}).get("*") or {})
+            for key, (obj, prop) in _TABLE_COLOR_KEYS.items():
+                if key in v["style"]:
+                    continue
+                for card in entry.get(obj) or []:
+                    solid = ((card or {}).get(prop) or {}).get("solid") or {}
+                    colour = solid.get("color")
+                    colour = literal_color(colour, palette) if isinstance(colour, dict) else colour
+                    if isinstance(colour, str) and colour.startswith("#"):
+                        v["style"][key] = colour
+                        break
 
 
 def _fill_color(objects: dict) -> str | None:
@@ -508,6 +541,22 @@ def _style_with_fill(style: dict, objects: dict) -> dict:
     """A shape/button's own fill is its background unless the container sets one."""
     if "background" not in style and (fill := _fill_color(objects)):
         style["background"] = fill
+    # a shape drawn as a line (`objects.shape.tileShape = 'line'`) is a rule across the middle of its box, not a filled box
+    if _object_text(objects, "shape", "tileShape") == "line":
+        style["line"] = True
+    # a card's number: its own colour (objects.labels, older; objects.calloutValue, newer)
+    for name in ("labels", "calloutValue"):
+        color = _object_color(objects, name, "color")
+        if color:
+            style["value_color"] = color
+            break
+    # ... its size in points, display unit (1 none, 1000 thousands, 1000000 millions...; 0 auto) and decimals
+    for name in ("labels", "calloutValue"):
+        for key, prop, pattern in (("value_size", "fontSize", r"\d+(\.\d+)?"), ("value_units", "labelDisplayUnits", r"\d+"),
+                                   ("value_decimals", "labelPrecision", r"\d+")):
+            raw = _object_text(objects, name, prop)
+            if key not in style and raw and re.fullmatch(r"\s*" + pattern + r"[DL]?\s*", raw):
+                style[key] = float(raw.strip().rstrip("DL"))
     return style
 
 
@@ -1085,6 +1134,7 @@ def extract_layout(pbix: Path) -> dict:
             "bookmarks": parse_bookmarks(loads_maybe(layout.get("config", "{}")) or {}),
         }
         resolve_theme_markers(result)
+        apply_theme_table_styles(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
 
@@ -1371,6 +1421,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
         "format": "pbir",
     }
     resolve_theme_markers(result)
+    apply_theme_table_styles(result)
     embed_image_resources(z, result)
     return result
 
