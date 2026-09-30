@@ -87,4 +87,6 @@ def test_default_shape_fill_and_translucent_button_give_readable_text(fake_pbix)
     out = R.build_spec(layout, semantic.load("Executive_Dashboard"), {"year": 2025})["pages"][0]["visuals"]
     by = {e["id"]: e for e in out}
     assert by["panel"]["style"]["background"] == "#00233C"                       # the theme's first colour
-    assert "--fg:#FFFFFF" in (by["btn"]["btn_css"] or "")                        # white text on the navy panel
+    # a button has its own opaque (theme-coloured) container under its translucent fill: a 24 % grey on white is light
+    # grey, so the page's dark text reads and the panel behind it is irrelevant (verified against a real report)
+    assert "--cbg:#FFFFFF" in (by["btn"]["btn_css"] or "") and "--fg:" not in (by["btn"]["btn_css"] or "")

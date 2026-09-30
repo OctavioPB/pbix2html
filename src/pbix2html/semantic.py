@@ -3146,7 +3146,7 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
                                       calc_columns=calc_columns)
             if draft:
                 entry["sql"], entry["params"] = draft
-                if kind == "table" and v.get("show_total", True) and v.get("type") in ("tableEx", "table"):
+                if kind in ("table", "matrix") and v.get("show_total", True) and v.get("type") in ("tableEx", "table", "pivotTable"):
                     total = table_total_sql(v, entry["sql"], measures, calc_columns)
                     if total:
                         entry["sql_total"] = total
@@ -3411,7 +3411,7 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
             still_todo.append(vid)
             continue
         entry["sql"], entry["params"] = draft
-        if kind == "table" and source.get("show_total", True) and source.get("type") in ("tableEx", "table"):
+        if kind in ("table", "matrix") and source.get("show_total", True) and source.get("type") in ("tableEx", "table", "pivotTable"):
             total = table_total_sql(source, entry["sql"], measures, calc_columns)
             if total:
                 entry["sql_total"] = total

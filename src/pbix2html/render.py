@@ -17,7 +17,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .config import settings
 from . import semantic
-from .extract import data_colors
+from .extract import _THEMED_SKIP, data_colors
 from .semantic import KIND_MAP, ReportSpec
 
 log = logging.getLogger(__name__)
@@ -156,7 +156,11 @@ def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict, _d
              and w.get("x") is not None and w["x"] <= cx <= w["x"] + (w.get("width") or 0)
              and w.get("y") is not None and w["y"] <= cy <= w["y"] + (w.get("height") or 0)
              and ((_fill_rgba(w) or (0, 0, 0, 0.0))[3] >= 0.5)]
-    if under and _depth < 6:
+    # a button's container has its own opaque background (the theme's) under the translucent fill: the fill blends
+    # with that, never with the panel behind the button (a 50 % orange on white is peach, not a dark brown)
+    if v.get("type") == "actionButton" and not (v.get("style") or {}).get("background_off"):
+        below = theme["background"]
+    elif under and _depth < 6:
         below = _backdrop(max(under, key=lambda w: w.get("z") or 0), visuals, page_bg, theme, _depth + 1)
     else:
         below = page_bg if page_bg and _rgb(page_bg) else theme["background"]
@@ -420,6 +424,11 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
                 "cond_formats": v.get("cond_formats") or [], "n_fields": v.get("n_fields"),
                 "has_sort": bool(v.get("sort")),
+                # the report sorts only by the category itself, ascending: a label sort, not a sort by value
+                "sort_by_category": bool(v.get("sort")) and all(
+                    s.get("direction") == "asc" and f"{s.get('entity')}.{s.get('property')}" in
+                    {re.sub(r"^\w+\((.*)\)$", r"\1", r) for r in ((v.get("projections") or {}).get("Category") or []) if isinstance(r, str)}
+                    for s in v["sort"]),
                 "y_refs": [r for r in ((v.get("projections") or {}).get("Y") or []) if isinstance(r, str)],
                 "y_fields": [{k: str(f.get(k) or "")[:200] for k in ("entity", "prop", "name", "ref")}
                              for f in (v.get("y_fields") or []) if isinstance(f, dict)],
@@ -451,6 +460,12 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             st = dict(entry["style"])
             if v["id"] in default_fill:
                 st["background"] = default_fill[v["id"]]
+            # Power BI's own default for a data visual is an opaque background in the theme's background colour; only
+            # "show: false" (`background_off`) or a transparency turns it off. Left transparent here, the lower of
+            # two views stacked in the same spot (a bookmark toggle) showed through the one on top.
+            if (v["type"] not in _THEMED_SKIP and not st.get("background") and not st.get("background_off")
+                    and kind not in ("static", "text", "tooltip") and not st.get("line_color")):
+                st["background"] = theme["background"]
             if st.get("transparency") is not None:
                 for key in ("background", "line_color"):
                     if st.get(key):
@@ -492,6 +507,8 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 st["table_row_fg"] = _readable_fg(st["table_row_bg"], theme) or theme["foreground"]
             entry["style"] = st
             readable = _readable_fg(_backdrop({**v, "btn_css": entry.get("btn_css")}, painted, p.get("background"), theme), theme)
+            if entry.get("btn_css") and not st.get("background_off") and _HEX6.match(theme["background"]):
+                entry["btn_css"] += f";--cbg:{theme['background']}"
             if entry.get("btn_css") and readable and "--fg:" not in entry["btn_css"]:
                 entry["btn_css"] += f";--fg:{readable}"       # the report names no text colour: one that reads
             entry["title_css"] = _title_css(v.get("style") or {}, readable)
@@ -510,6 +527,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 entry["slicer"] = slicer
             if include_sql:
                 entry["sql"] = vs.sql if vs else None
+                entry["sql_total"] = vs.sql_total if vs else None       # a table's grand-total row (ADR-010)
             visuals.append(entry)
         pages.append({"id": f"page-{i}", "name": p.get("display_name") or f"Page {i + 1}",
                       "width": W, "height": H, "background": p.get("background"),

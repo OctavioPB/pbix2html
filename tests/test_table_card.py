@@ -224,3 +224,51 @@ def test_chart_tooltip_is_appended_to_body_above_every_visual(fake_pbix, tmp_pat
         br.close()
     assert tip["appendToBody"] is True and "z-index:2147483600" in tip["extraCssText"]
     assert tip["trigger"] == "axis"                                  # the chart's own tooltip settings are kept
+
+
+def test_natural_order_of_numeric_labels_and_the_report_sort_rules():
+    from pathlib import Path
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    tpl = (Path(__file__).parent.parent / "src" / "pbix2html" / "templates" / "report.html.j2").read_text(encoding="utf-8")
+    snippet = tpl[tpl.index("  const MONTHS = "):tpl.index("  const col = (block, name) =>")]
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page()
+        pg.set_content("<html></html>")
+        tenure = ["11-<16 Years", "0-<1 Year", "2-<4 Years", "25+ Years", "4-<6 Years", "1-<2 Years"]
+        res = pg.evaluate("(src) => { const f = new Function(src + '; return inCalendarOrder;')(); const t = %s; return ["
+                          "f({}, t), f({ has_sort: true, sort_by_category: true }, t), f({ has_sort: true }, t),"
+                          "f({}, ['29 & under', '30-39', '40-49']), f({}, ['North', '2']), f({}, ['Sep 2017', '10 Oct'])]; }" % tenure, snippet)
+        br.close()
+    assert res[0] == ["0-<1 Year", "1-<2 Years", "2-<4 Years", "4-<6 Years", "11-<16 Years", "25+ Years"]
+    assert res[1] == res[0]                                         # the report sorts by the label itself: a label sort, natural order is right
+    assert res[2] == tenure                                          # sorted by something else (a value): untouched
+    assert res[3] == ["29 & under", "30-39", "40-49"] and res[4] == ["North", "2"]
+
+
+def test_default_container_background_button_layers_and_hah_total(fake_pbix):
+    from pbix2html import semantic
+    from pbix2html.render import render_html
+    from pbix2html.semantic import VisualSpec
+    layout = ex.extract_layout(fake_pbix)
+    base = layout["pages"][0]
+    common = {**base["visuals"][0], "hidden": False, "is_group": False, "parent_group": None, "groups": [], "z": 1}
+    card_on = {**common, "id": "a", "type": "card", "style": {}}
+    card_off = {**common, "id": "b", "type": "card", "style": {"background_off": True}}
+    text = {**common, "id": "c", "type": "textbox", "style": {}}
+    spec = semantic.load("Executive_Dashboard")
+    spec.visuals = {"a": VisualSpec(id="a", kind="card", title=None, sql="select 1", sql_total="select 2")}
+    html = render_html({**layout, "pages": [{**base, "visuals": [card_on, card_off, text]}]}, spec, {}, None, mode="live")
+    import json as _json
+    page = _json.loads(html.split('<script id="spec" type="application/json">')[1].split("</script>")[0])["pages"][0]["visuals"]
+    by = {v["id"]: v["style"] for v in page}
+    assert by["a"]["background"] == "#FFFFFF"                      # Power BI's own default for a data visual
+    assert "background" not in by["b"] and "background" not in by["c"]      # switched off / a text box
+    hah = render_html({**layout, "pages": [{**base, "visuals": [card_on]}]}, spec, {}, None, mode="hah", hah_base="https://h.example")
+    assert '"sql_total": "select 2"' in hah

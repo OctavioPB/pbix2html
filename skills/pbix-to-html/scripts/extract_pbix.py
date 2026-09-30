@@ -491,6 +491,8 @@ def _chart_style(objects: dict, dim_fields: set[str] | None = None) -> dict:
             st["labels_pct_precision"] = pct
     if _object_flag(objects, "legend") is False:
         st["legend_show"] = False
+    elif _object_flag(objects, "legend") is True:
+        st["legend_on"] = True
     pos = (_object_text(objects, "legend", "position") or "").strip()
     if pos in ("Top", "Bottom", "Left", "Right", "TopCenter", "BottomCenter", "LeftCenter", "RightCenter"):
         st["legend_pos"] = pos
