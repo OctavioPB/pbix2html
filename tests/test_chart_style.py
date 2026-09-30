@@ -60,3 +60,32 @@ def test_table_type_and_column_captions():
     sv["prototypeQuery"]["Select"].pop()                              # a caption is missing: no partial mapping
     assert ex._header_names_classic(sv) is None
     assert ex._header_names_classic({**sv, "visualType": "columnChart"}) is None
+
+
+def _cmp(kind, prop, v):
+    return {"Comparison": {"ComparisonKind": kind, "Left": {"Aggregation": {"Expression": {"Column": {"Expression": {"SourceRef": {"Entity": "T"}}, "Property": prop}}, "Function": 4}},
+                           "Right": {"Literal": {"Value": f"{v}D"}}}}
+
+
+def test_conditional_formatting_gradient_and_icon_rules_are_read_by_field_position():
+    lit = lambda v: {"Literal": {"Value": v}}                                              # noqa: E731
+    grad = {"FillRule": {"Input": {}, "FillRule": {"linearGradient3": {
+        "min": {"color": lit("'minColor'"), "value": lit("0D")}, "mid": {"color": lit("'#fae99f'")},
+        "max": {"color": lit("'#93CA89'"), "value": lit("100D")}}}}}
+    icons = {"Conditional": {"Cases": [
+        {"Condition": {"And": {"Left": _cmp(2, "flag", 1), "Right": _cmp(4, "flag", 100)}}, "Value": lit("'SymbolHigh'")},
+        {"Condition": _cmp(0, "flag", 0), "Value": lit("'SymbolLow'")},
+        {"Condition": _cmp(0, "other", 7), "Value": lit("'SymbolHigh'")}]}}                 # another field: dropped
+    objects = {"values": [
+        {"selector": {"metadata": "Sum(T.load)"}, "properties": {"backColor": {"solid": {"color": {"expr": grad}}}}},
+        {"selector": {"metadata": "Sum(T.flag)"}, "properties": {"icon": {"value": {"expr": icons}}}},
+        {"selector": {"metadata": "Sum(T.gone)"}, "properties": {"icon": {"value": {"expr": icons}}}},      # not in the wells
+        {"properties": {"backColorSecondary": {}}}]}
+    out = ex._cond_formats(objects, ["T.site", "Sum(T.load)", "Sum(T.flag)"])
+    g = next(c for c in out if c["kind"] == "gradient")
+    assert g["col"] == 1 and g["prop"] == "back"
+    assert [s["color"] for s in g["stops"]] == ["#F8696B", "#FAE99F", "#93CA89"] and g["stops"][1]["value"] is None
+    i = next(c for c in out if c["prop"] == "icon")
+    assert i["col"] == 2 and i["rules"][0]["when"] == {"and": [{"op": ">=", "v": 1.0}, {"op": "<=", "v": 100.0}]}
+    assert [r["icon"] for r in i["rules"]] == ["SymbolHigh", "SymbolLow"] and len(out) == 2
+    assert ex._cond_formats({}, []) == []

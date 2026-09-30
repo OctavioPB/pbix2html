@@ -237,6 +237,39 @@
     const d = Math.min(Math.max(st.value_decimals === undefined ? (div > 1 ? 1 : 0) : st.value_decimals, 0), 10);
     return (x / div).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) + (UNITS[div] || '');
   };
+  // Conditional formatting of a table's value columns (extract._cond_formats): a colour gradient, colour rules or an
+  // icon. Applied by field position, so only when the well has as many fields as the SQL has columns.
+  const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const rgbHex = c => '#' + c.map(x => Math.round(Math.max(0, Math.min(255, x))).toString(16).padStart(2, '0')).join('');
+  const lum = h => { const [r, g, b] = hexRgb(h).map(x => { x /= 255; return x <= .03928 ? x / 12.92 : Math.pow((x + .055) / 1.055, 2.4); }); return .2126 * r + .7152 * g + .0722 * b; };
+  const inkFor = bg => lum(bg) > .4 ? '#1F1F1F' : '#FFFFFF';
+  const holds = (w, x) => w.and ? w.and.every(t => holds(t, x)) : w.or ? w.or.some(t => holds(t, x))
+    : ({ '=': x === w.v, '>': x > w.v, '>=': x >= w.v, '<': x < w.v, '<=': x <= w.v })[w.op];
+  const ICONS = { High: ['\u2714', '#2E7D32'], Low: ['\u2716', '#C62828'], Medium: ['\u25CF', '#F9A825'] };
+  function condCell(rules, vals, x) {          // -> { bg, fg, icon } for the value x of one column
+    const out = {};
+    if (typeof x !== 'number') return out;
+    for (const r of rules) {
+      if (r.kind === 'gradient') {
+        const lo = r.stops[0].value ?? Math.min(...vals), hi = r.stops[r.stops.length - 1].value ?? Math.max(...vals);
+        const mid = r.stops.length === 3 ? (r.stops[1].value ?? (lo + hi) / 2) : null;
+        const pts = [[lo, r.stops[0].color], ...(mid === null ? [] : [[mid, r.stops[1].color]]), [hi, r.stops[r.stops.length - 1].color]];
+        let c = x <= pts[0][0] ? pts[0][1] : x >= pts[pts.length - 1][0] ? pts[pts.length - 1][1] : null;
+        for (let i = 1; c === null && i < pts.length; i++) if (x <= pts[i][0]) {
+          const t = (x - pts[i - 1][0]) / ((pts[i][0] - pts[i - 1][0]) || 1), a = hexRgb(pts[i - 1][1]), b2 = hexRgb(pts[i][1]);
+          c = rgbHex(a.map((v0, k) => v0 + (b2[k] - v0) * t));
+        }
+        if (r.prop === 'back') { out.bg = c; out.fg = inkFor(c); } else out.fg = c;
+      } else {
+        const hit = r.rules.find(z => holds(z.when, x));
+        if (!hit) continue;
+        if (r.prop === 'icon') out.icon = hit.icon;
+        else if (r.prop === 'back') { out.bg = hit.color; out.fg = inkFor(hit.color); } else out.fg = hit.color;
+      }
+    }
+    return out;
+  }
+  const iconOf = name => { const k = Object.keys(ICONS).find(n => name.includes(n)); return k ? ICONS[k] : null; };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -294,6 +327,8 @@
     },
     table(el, v, b) {
       const isNum = b.columns.map((_, i) => b.rows.some(r => typeof r[i] === 'number'));
+      const applyCond = {}, colVals = {};
+      if (v.cond_formats && v.cond_formats.length && v.n_fields === b.columns.length) v.cond_formats.forEach(c => { (applyCond[c.col] = applyCond[c.col] || []).push(c); colVals[c.col] = b.rows.map(r => r[c.col]).filter(n => typeof n === 'number'); });
       const st = v.style || {};
       const vars = [
         st.table_header_bg && `--th-bg:${st.table_header_bg}`, st.table_header_fg && `--th-fg:${st.table_header_fg}`,
@@ -305,7 +340,13 @@
       ].filter(Boolean).join(';');
       el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
         b.columns.map((c, i) => `<th class="${isNum[i] ? 'num' : ''}">${v.headers?.[c] || (v.header_names && v.header_names.length === b.columns.length ? v.header_names[i] : c)}</th>`).join('') + '</tr></thead><tbody>' +
-        b.rows.map(r => '<tr>' + r.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '')}</td>`).join('') + '</tr>').join('') +
+        b.rows.map(r => '<tr>' + r.map((x, i) => {
+          const cf = applyCond[i] ? condCell(applyCond[i], colVals[i], x) : {};
+          const ic = cf.icon ? iconOf(cf.icon) : null;
+          const style = [cf.bg && `background:${cf.bg}`, cf.fg && `color:${ic ? ic[1] : cf.fg}`].filter(Boolean).join(';');
+          const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
+          return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
+        }).join('') + '</tr>').join('') +
         '</tbody></table></div>';
     },
     matrix(el, v, b) { R.table(el, v, b); },

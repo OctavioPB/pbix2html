@@ -417,6 +417,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "w": round(100 * (v["width"] or 0) / W, 3), "h": round(100 * (v["height"] or 0) / H, 3),
                 "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
+                "cond_formats": v.get("cond_formats") or [], "n_fields": v.get("n_fields"),
                 "stacked": "stacked" in v["type"].lower(),
                 "percent": v["type"].lower().startswith("hundredpercent"),
                 "area": "area" in v["type"].lower(),

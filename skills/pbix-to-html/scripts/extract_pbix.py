@@ -457,6 +457,99 @@ def _chart_style(objects: dict) -> dict:
 _TABLE_KINDS = {"table", "tableEx", "matrix", "pivotTable"}
 
 
+# Power BI's built-in gradient ends, named by the file instead of given as a colour
+_GRADIENT_DEFAULTS = {"minColor": "#F8696B", "midColor": "#FFEB84", "maxColor": "#63BE7B"}
+_COMPARISON = {0: "=", 1: ">", 2: ">=", 3: "<", 4: "<="}
+_ICON_NAMES = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+
+
+def _cond_tree(cond: dict, prop: str) -> dict | None:
+    """A rule's condition as data: {"op": ">=", "v": 1} or {"and"|"or": [a, b]}. Only a comparison of the formatted
+    column itself with a number is understood; a rule on another field is dropped (it would colour the wrong cells)."""
+    if not isinstance(cond, dict):
+        return None
+    for key in ("And", "Or"):
+        if key in cond:
+            left, right = _cond_tree(cond[key].get("Left"), prop), _cond_tree(cond[key].get("Right"), prop)
+            return {key.lower(): [left, right]} if left and right else None
+    cmp_ = cond.get("Comparison")
+    if not isinstance(cmp_, dict) or cmp_.get("ComparisonKind") not in _COMPARISON:
+        return None
+    field = ((cmp_.get("Left") or {}).get("Aggregation") or cmp_.get("Left") or {})
+    col = ((field.get("Expression") or field).get("Column") or {}).get("Property")
+    raw = literal_to_text(cmp_.get("Right") or {})
+    try:
+        num = float((raw or "").rstrip("DLdl"))
+    except ValueError:
+        return None
+    return {"op": _COMPARISON[cmp_["ComparisonKind"]], "v": num} if col == prop else None
+
+
+def _stop(node: dict | None) -> dict | None:
+    color = literal_to_text(((node or {}).get("color") or {})) if isinstance((node or {}).get("color"), dict) else None
+    color = _GRADIENT_DEFAULTS.get(color, color)
+    if not (isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color)):
+        return None
+    raw = literal_to_text((node.get("value") or {})) if isinstance(node.get("value"), dict) else None
+    try:
+        value = float((raw or "").rstrip("DLdl")) if raw else None
+    except ValueError:
+        value = None
+    return {"color": color.upper(), "value": value}
+
+
+def _cond_formats(objects: dict, refs: list[str]) -> list[dict]:
+    """Conditional formatting of a table/matrix's value columns — `objects.values[]` entries whose selector names
+    a field (`selector.metadata`): a colour gradient (`FillRule`), colour rules or an icon rule (`Conditional`).
+    Each is {col: position in the field wells, prop: back|font|icon, kind: gradient|rules, ...}; the renderer
+    only applies them when the well has as many fields as the SQL has columns."""
+    out: list[dict] = []
+    for entry in (objects or {}).get("values") or []:
+        meta = ((entry or {}).get("selector") or {}).get("metadata")
+        if meta not in refs:
+            continue
+        prop_name = meta[meta.rfind(".") + 1:].rstrip(")")
+        props = entry.get("properties") or {}
+        for prop, key in (("backColor", "back"), ("fontColor", "font")):
+            expr = ((((props.get(prop) or {}).get("solid") or {}).get("color") or {}).get("expr")) or {}
+            rule = expr.get("FillRule")
+            if isinstance(rule, dict):
+                g = (rule.get("FillRule") or {})
+                grad = g.get("linearGradient3") or g.get("linearGradient2")
+                stops = [_stop(grad.get(n)) for n in ("min", "mid", "max") if grad and grad.get(n)]
+                if stops and all(stops) and len(stops) >= 2:
+                    out.append({"col": refs.index(meta), "prop": key, "kind": "gradient", "stops": stops})
+            cases = (expr.get("Conditional") or {}).get("Cases")
+            if cases:
+                rules = []
+                for c in cases:
+                    tree = _cond_tree(c.get("Condition"), prop_name)
+                    colour = literal_color(c.get("Value"))
+                    if tree and colour and re.fullmatch(r"#[0-9A-Fa-f]{6}", colour):
+                        rules.append({"when": tree, "color": colour.upper()})
+                if rules:
+                    out.append({"col": refs.index(meta), "prop": key, "kind": "rules", "rules": rules})
+        icon_expr = ((((props.get("icon") or {}).get("value") or {}).get("expr")) or {}).get("Conditional") or {}
+        rules = []
+        for c in icon_expr.get("Cases") or []:
+            tree = _cond_tree(c.get("Condition"), prop_name)
+            name = literal_to_text(c.get("Value") or {})
+            if tree and name and _ICON_NAMES.match(name):
+                rules.append({"when": tree, "icon": name})
+        if rules:
+            out.append({"col": refs.index(meta), "prop": "icon", "kind": "rules", "rules": rules})
+    return out
+
+
+def _flat_refs_classic(sv: dict) -> list[str]:
+    return [p.get("queryRef") for lst in (sv.get("projections") or {}).values() for p in (lst or []) if isinstance(p, dict)]
+
+
+def _flat_refs_pbir(vis: dict) -> list[str]:
+    qs = ((vis.get("query") or {}).get("queryState")) or {}
+    return [p.get("queryRef") for role in qs.values() for p in ((role or {}).get("projections") or [])]
+
+
 def _header_names_classic(sv: dict) -> list[str] | None:
     """A flat table's column captions in field-well order, as the report names them
     (`prototypeQuery.Select[].NativeReferenceName`); None unless every column has one."""
@@ -1010,6 +1103,8 @@ def _parse_visual(vc: dict) -> dict:
         "has_drill_other_visuals": bool(sv.get("drillFilterOtherVisuals")),
         "objects_keys": sorted((sv.get("objects") or {}).keys()),   # applied formatting (dataPoint, labels...)
         "header_names": _header_names_classic(sv),
+        "cond_formats": _cond_formats(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
+        "n_fields": len(_flat_refs_classic(sv)) if vtype in _TABLE_KINDS else None,
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
         "style": {**_style_with_fill(container_style(vco), sv.get("objects") or {}),
@@ -1569,6 +1664,8 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
             "objects_keys": sorted((vis.get("objects") or {}).keys()),
             "header_names": _header_names_pbir(vis),
+            "cond_formats": _cond_formats(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
+            "n_fields": len(_flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else None,
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),
             "texts": _pbir_texts(vco, vis),
