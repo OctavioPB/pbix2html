@@ -137,3 +137,15 @@ def test_chart_measure_fields_carry_the_caption_the_report_shows():
     assert [f["name"] for f in ex._y_fields_pbir(vis)] == ["A", "M"]
     sv = {"projections": {"Y": [{"queryRef": "Sum(T.a)"}]}, "prototypeQuery": {"Select": [{"Name": "Sum(T.a)", "NativeReferenceName": "Total A"}]}}
     assert ex._y_fields_classic(sv)[0]["name"] == "Total A"
+
+
+def test_table_total_sql_wraps_the_detail_query_and_blanks_non_additive_measures():
+    from pbix2html import semantic
+    v = {"projections": {"Values": ["T.site", "Sum(T.units)", "Avg(T.load)"]}}
+    sql = "SELECT t0.site AS site, SUM(t0.units) AS units, AVG(t0.load) AS load\nFROM tbl AS t0\nWHERE t0.x = ?\nGROUP BY 1\nORDER BY 2 DESC"
+    total = semantic.table_total_sql(v, sql, {})
+    assert total and total.startswith("SELECT CAST('Total' AS VARCHAR(5)) AS site, SUM(t.units) AS units, CAST(NULL AS DECIMAL(18,2)) AS load")
+    assert "ORDER BY" not in total and "FROM (\nSELECT t0.site" in total and total.rstrip().endswith(") AS t")
+    assert semantic.table_total_sql({"projections": {"Values": ["T.site"]}}, sql, {}) is None            # nothing to add up
+    assert semantic.table_total_sql(v, "WITH a AS (SELECT 1) SELECT * FROM a", {}) is None              # cannot sit in a derived table
+    assert semantic._strip_final_order_by("SELECT a FROM (SELECT b FROM c ORDER BY 1) AS t ORDER BY 1") == "SELECT a FROM (SELECT b FROM c ORDER BY 1) AS t"

@@ -53,6 +53,7 @@
   td { font-size: var(--tr-fs, inherit); }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
   .tablewrap.rh td:first-child { background: var(--rh-bg); color: var(--rh-fg, inherit); font-weight: 600; }
+  tfoot td { position: sticky; bottom: 0; font-weight: 700; background: var(--tt-bg, var(--bg)); color: var(--tt-fg, inherit); border-top: 2px solid var(--tt-bg, var(--border)); }
   tbody tr:nth-child(even) { background: var(--tr-bg-alt, var(--tr-bg, transparent)); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   th + th, td + td { border-left: var(--gv, none); }
@@ -271,6 +272,26 @@
     return out;
   }
   const iconOf = name => { const k = Object.keys(ICONS).find(n => name.includes(n)); return k ? ICONS[k] : null; };
+  // the grand-total row, computed by Teradata (yaml `sql_total`): blank where the measure is not additive
+  const totalRow = (v, b, isNum) => (b.total && b.total.length === b.columns.length)
+    ? '<tfoot><tr>' + b.total.map((x, i) => `<td class="${isNum[i] ? 'num' : ''}">${x === null || x === undefined ? '' : (typeof x === 'number' ? fmt(x, v.format[b.columns[i]]) : x)}</td>`).join('') + '</tr></tfoot>' : '';
+  // Categories that are months ("June 2026", "Mar-25", "March") come back in whatever order the database likes; Power BI
+  // shows them in calendar order (the model sorts the label by its date). Reordered only when the report names no
+  // sort of its own and every category reads as a month, so a sort by value is never undone.
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const monthKey = c => {
+    const m = /(?:^|[^a-z])(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?![a-z])/i.exec(String(c));
+    if (!m) return null;
+    const y = /(?:^|\D)(\d{4}|\d{2})(?!\d)/.exec(String(c).replace(m[0], ' '));
+    const yr = y ? (y[1].length === 2 ? 2000 + +y[1] : +y[1]) : 0;
+    return yr * 12 + MONTHS.indexOf(m[1].toLowerCase());
+  };
+  const inCalendarOrder = (v, cats) => {
+    if (v.has_sort || cats.length < 2) return cats;
+    const keys = cats.map(monthKey);
+    return keys.every(k => k !== null) && new Set(keys).size === cats.length
+      ? cats.map((c, i) => [c, keys[i]]).sort((a, b) => a[1] - b[1]).map(x => x[0]) : cats;
+  };
   const col = (block, name) => block.columns.indexOf(name);
   const series = (block) => {
     const ci = col(block, 'category'), vi = col(block, 'value'), si = col(block, 'series');
@@ -340,6 +361,7 @@
         st.table_header_align && `--th-ta:${st.table_header_align}`, st.table_header_bold !== undefined && `--th-fw:${st.table_header_bold ? 700 : 400}`,
         st.table_grid_h === false ? '--gh:none' : (st.table_grid_h_color || st.table_grid_h_weight) && `--gh:${st.table_grid_h_weight || 1}px solid ${st.table_grid_h_color || 'var(--border)'}`,
         st.table_grid_v && `--gv:${st.table_grid_v_weight || 1}px solid ${st.table_grid_v_color || '#E1E1E1'}`,
+        st.table_total_bg && `--tt-bg:${st.table_total_bg}`, st.table_total_fg && `--tt-fg:${st.table_total_fg}`,
         st.table_rowhdr_bg && `--rh-bg:${st.table_rowhdr_bg}`, st.table_rowhdr_fg && `--rh-fg:${st.table_rowhdr_fg}`,
       ].filter(Boolean).join(';');
       el.innerHTML = `<div class="tablewrap${v.kind === 'matrix' && st.table_rowhdr_bg ? ' rh' : ''}"${vars ? ` style="${vars}"` : ''}><table><thead><tr>` +
@@ -351,7 +373,7 @@
           const text = cf.icon ? (ic ? ic[0] : '') : isNum[i] ? fmt(x, v.format[b.columns[i]]) : (x ?? '');
           return `<td class="${isNum[i] ? 'num' : ''}"${style ? ` style="${style}"` : ''}${cf.icon ? ' data-icon="1"' : ''}>${text}</td>`;
         }).join('') + '</tr>').join('') +
-        '</tbody></table></div>';
+        '</tbody>' + totalRow(v, b, isNum) + '</table></div>';
     },
     matrix(el, v, b) { R.table(el, v, b); },
     text(el, v) { el.innerHTML = `<div class="text">${v.text || ''}</div>`; },
@@ -430,7 +452,8 @@
     },
   };
   function cartesian(v, b, type, horizontal, area) {
-    const { cats, groups } = series(b);
+    const { cats: seen, groups } = series(b);
+    const cats = inCalendarOrder(v, seen);
     // 100% stacked: every category's series are rescaled to share 100 (ECharts has no such mode)
     const totals = v.percent ? cats.map(c => [...groups.values()].reduce((t, m) => t + (m.get(c) || 0), 0)) : null;
     const val = (m, c, i) => { const x = m.get(c) ?? null; return totals && x !== null ? (totals[i] ? 100 * x / totals[i] : 0) : x; };

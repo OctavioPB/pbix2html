@@ -254,6 +254,8 @@ def resolve_theme_markers(layout: dict) -> None:
                     fix(style["series_colors"], meta)
                 for meta in list((style.get("value_colors") or {})):
                     fix(style["value_colors"], meta)
+                fix(style, "table_total_bg")
+                fix(style, "table_total_fg")
                 fix(style, "table_grid_h_color")
                 fix(style, "table_grid_v_color")
                 if "series_colors" in style and not style["series_colors"]:
@@ -676,6 +678,7 @@ _TABLE_COLOR_KEYS = {
     "table_row_bg": ("values", "backColorPrimary"), "table_row_bg_alt": ("values", "backColorSecondary"),
     "table_row_fg": ("values", "fontColorPrimary"),
     "table_rowhdr_bg": ("rowHeaders", "backColor"), "table_rowhdr_fg": ("rowHeaders", "fontColor"),
+    "table_total_bg": ("total", "backColor"), "table_total_fg": ("total", "fontColor"),
     "table_grid_h_color": ("grid", "gridHorizontalColor"), "table_grid_v_color": ("grid", "gridVerticalColor"),
 }
 
@@ -1241,6 +1244,7 @@ def _parse_visual(vc: dict) -> dict:
         "y_fields": _y_fields_classic(sv) if "Chart" in vtype else [],
         "cond_formats": _cond_formats(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "n_fields": len(_flat_refs_classic(sv)) if vtype in _TABLE_KINDS else None,
+        "show_total": _object_flag(sv.get("objects") or {}, "total", "totals") is not False,
         "col_align": _col_align(sv.get("objects") or {}, _flat_refs_classic(sv)) if vtype in _TABLE_KINDS else [],
         "text": extract_textbox_text(sv.get("objects") or {}),
         "image_ref": _image_ref(sv.get("objects") or {}),
@@ -1805,6 +1809,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "y_fields": _y_fields_pbir(vis) if "Chart" in vtype else [],
             "cond_formats": _cond_formats(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "n_fields": len(_flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else None,
+            "show_total": _object_flag(vis.get("objects") or {}, "total", "totals") is not False,
             "col_align": _col_align(vis.get("objects") or {}, _flat_refs_pbir(vis)) if vtype in _TABLE_KINDS else [],
             "text": extract_textbox_text(vis.get("objects") or {}),
             "image_ref": _image_ref(vis.get("objects") or {}),

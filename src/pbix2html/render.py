@@ -143,7 +143,7 @@ def _blend(top: tuple[int, int, int, float], under_hex: str) -> str:
     return "#%02X%02X%02X" % tuple(round(top[i] * a + u[i] * (1 - a)) for i in range(3))
 
 
-_TABLE_STYLE_KEYS = ("table_grid_h_color", "table_grid_v_color", "table_header_bg", "table_header_fg", "table_row_bg", "table_row_bg_alt", "table_row_fg", "table_rowhdr_bg", "table_rowhdr_fg")
+_TABLE_STYLE_KEYS = ("table_total_bg", "table_total_fg", "table_grid_h_color", "table_grid_v_color", "table_header_bg", "table_header_fg", "table_row_bg", "table_row_bg_alt", "table_row_fg", "table_rowhdr_bg", "table_rowhdr_fg")
 
 
 def _backdrop(v: dict, visuals: list[dict], page_bg: str | None, theme: dict, _depth: int = 0) -> str:
@@ -418,6 +418,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
                 "z": int(v.get("z") or 0),     # CSS z-index must be an integer: "3000.0" is dropped, layering lost
                 "format": (vs.format if vs else {}), "headers": r.get("headers") or {}, "header_names": v.get("header_names"),
                 "cond_formats": v.get("cond_formats") or [], "n_fields": v.get("n_fields"),
+                "has_sort": bool(v.get("sort")),
                 "y_refs": [r for r in ((v.get("projections") or {}).get("Y") or []) if isinstance(r, str)],
                 "y_fields": [{k: str(f.get(k) or "")[:200] for k in ("entity", "prop", "name", "ref")}
                              for f in (v.get("y_fields") or []) if isinstance(f, dict)],

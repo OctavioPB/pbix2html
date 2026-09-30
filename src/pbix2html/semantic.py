@@ -55,6 +55,7 @@ class VisualSpec:
     sql: str | None
     params: list[str] = field(default_factory=list)
     reference_sql: str | None = None
+    sql_total: str | None = None     # a table's grand-total row, run by Teradata (same parameters as `sql`)
     format: dict[str, str] = field(default_factory=dict)
     tolerance: dict[str, float] = field(default_factory=lambda: {"rel": 1e-6})
     sort: str | None = None
@@ -2774,6 +2775,56 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
     return assemble(parts, group_positions if values else [], _order_by(sort, pos)), params_used
 
 
+def _strip_final_order_by(sql: str) -> str:
+    """`sql` without its last top-level `ORDER BY` (a derived table may not have one in Teradata)."""
+    depth, cut = 0, None
+    for m in re.finditer(r"[()]|\bORDER\s+BY\b", sql, flags=re.I):
+        tok = m.group(0)
+        if tok == "(":
+            depth += 1
+        elif tok == ")":
+            depth -= 1
+        elif depth == 0:
+            cut = m.start()
+    return sql[:cut].rstrip() if cut is not None else sql
+
+
+_ADDITIVE = {"Sum": "SUM", "Count": "SUM", "CountNonNull": "SUM", "Min": "MIN", "Max": "MAX"}
+
+
+def table_total_sql(v: dict, sql: str, measures: dict[tuple[str, str], str],
+                    calc_columns: dict[tuple[str, str], str | None] | None = None) -> str | None:
+    """The grand-total row of a flat table, computed by Teradata over the table's own detail query:
+    `SELECT 'Total', NULL, SUM(a), ... FROM (<detail sql>) AS t`. Sums, counts, minimums and maximums combine
+    that way; any other measure (average, distinct count, a DAX ratio) is not additive, so its total is left blank
+    rather than shown wrong. None when the detail query cannot be wrapped (a WITH, or unresolved markers)."""
+    if not sql or "{" in sql or re.match(r"\s*WITH\b", sql, flags=re.I):
+        return None
+    cols, first_dim = [], True
+    for role, refs in (v.get("projections") or {}).items():
+        if role.lower() == "tooltips":
+            continue
+        for ref in refs or []:
+            f = _resolve_field(role, ref, measures, calc_columns)
+            if f is None:
+                return None
+            if f.is_value:
+                fn = _ADDITIVE.get(query_ref_parts(ref)[0] or "")
+                cols.append(f"{fn}(t.{f.out_name}) AS {f.out_name}" if fn else f"CAST(NULL AS DECIMAL(18,2)) AS {f.out_name}")
+            elif first_dim:
+                cols.append(f"CAST('Total' AS VARCHAR(5)) AS {f.out_name}")
+                first_dim = False
+            else:
+                cols.append(f"CAST(NULL AS VARCHAR(1)) AS {f.out_name}")
+    if not cols or not any(c.startswith(("SUM(", "MIN(", "MAX(")) for c in cols):
+        return None
+    total = "SELECT " + ", ".join(cols) + "\nFROM (\n" + _strip_final_order_by(sql) + "\n) AS t"
+    try:
+        return validate_read_only_sql(total)
+    except ValueError:
+        return None
+
+
 def _combo_axis(v: dict, measures: dict[tuple[str, str], str],
                 calc_columns: dict[tuple[str, str], str | None] | None = None) -> dict[str, str]:
     """A combo chart's per-series axis (`{series_name: "line"}`; a name absent here is the
@@ -3074,6 +3125,10 @@ def scaffold(layout: dict, model: dict, table_map: dict[str, str] | None = None)
                                       calc_columns=calc_columns)
             if draft:
                 entry["sql"], entry["params"] = draft
+                if kind == "table" and v.get("show_total", True) and v.get("type") in ("tableEx", "table"):
+                    total = table_total_sql(v, entry["sql"], measures, calc_columns)
+                    if total:
+                        entry["sql_total"] = total
                 if kind == "combo":
                     axis = _combo_axis(v, measures, calc_columns)
                     if axis:
@@ -3335,6 +3390,12 @@ def autofill(raw: dict, layout: dict, model: dict, table_map: dict[str, str] | N
             still_todo.append(vid)
             continue
         entry["sql"], entry["params"] = draft
+        if kind == "table" and source.get("show_total", True) and source.get("type") in ("tableEx", "table"):
+            total = table_total_sql(source, entry["sql"], measures, calc_columns)
+            if total:
+                entry["sql_total"] = total
+            else:
+                entry.pop("sql_total", None)
         if kind == "combo":
             axis = _combo_axis(source, measures, calc_columns)
             if axis:
@@ -3445,7 +3506,7 @@ def load(report: str) -> ReportSpec:
         v = v or {}  # a visual written as "v3:" with nothing under it parses as None
         visuals[str(vid)] = VisualSpec(
             id=str(vid), kind=v.get("kind", "unsupported"), title=v.get("title"), sql=v.get("sql"),
-            params=list(v.get("params") or []), reference_sql=v.get("reference_sql"),
+            params=list(v.get("params") or []), reference_sql=v.get("reference_sql"), sql_total=v.get("sql_total"),
             format=dict(v.get("format") or {}), tolerance=dict(v.get("tolerance") or {"rel": 1e-6}),
             sort=v.get("sort"), notes=v.get("notes"),
         )

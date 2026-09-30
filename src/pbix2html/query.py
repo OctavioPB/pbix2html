@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -22,6 +23,7 @@ from .semantic import ReportSpec, VisualSpec, fix_teradata_sql
 
 CACHE_DIR = Path("cache")
 
+log = logging.getLogger(__name__)
 DataBlock = dict[str, Any]   # {"columns": [...], "rows": [[...], ...]}
 
 _PARAM_RE = re.compile(r":(\w+)\b")
@@ -202,11 +204,21 @@ def run_visual(spec: ReportSpec, visual: VisualSpec, values: dict[str, Any], bac
     if not visual.has_data:
         return {"columns": [], "rows": [], "skipped": True}
     ttl = settings.cache_ttl_seconds if ttl is None else ttl
-    key = _cache_key(spec.report, visual.id, {k: values.get(k) for k in visual.params}, proxy_user, visual.sql)
+    key = _cache_key(spec.report, visual.id, {k: values.get(k) for k in visual.params}, proxy_user,
+                     visual.sql + (visual.sql_total or ""))
     if use_cache and key.exists() and time.time() - key.stat().st_mtime < ttl:
         return json.loads(key.read_text(encoding="utf-8"))
     sql, bound = bind(visual.sql, visual.params, values)
     block = backend.execute(sql, bound, proxy_user)
+    if visual.sql_total and not block.get("error"):
+        # the grand-total row is a second query; if it fails the table still shows, just without a total row
+        try:
+            tsql, tbound = bind(visual.sql_total, visual.params, values)
+            total = backend.execute(tsql, tbound, proxy_user)
+            if total.get("rows") and total.get("columns") == block.get("columns"):
+                block = {**block, "total": total["rows"][0]}
+        except Exception as e:  # noqa: BLE001
+            log.warning("total row of %s.%s skipped: %s", spec.report, visual.id, e)
     if use_cache:
         CACHE_DIR.mkdir(exist_ok=True)
         key.write_text(json.dumps(block, ensure_ascii=False, default=str), encoding="utf-8")
