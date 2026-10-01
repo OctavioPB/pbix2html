@@ -21,10 +21,27 @@
   }
   * { box-sizing: border-box; }
   button, input, select, textarea { font-family: inherit; }
+  /* Where the page tabs sit is the viewer's choice (`data-tabs` on <body>), so the layout is a
+     flex column and the tab strip is re-ordered rather than moved in the DOM. Not `data-nav`:
+     that already means "this button navigates to page X" on a visual. */
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  main.content { flex: 1 1 auto; min-width: 0; }
+  body[data-tabs="bottom"] main.content { order: 1; }
+  body[data-tabs="bottom"] nav.tabs { order: 2; padding: 0 1.25rem .5rem; border-top: 1px solid var(--border); }
+  body[data-tabs="left"] { flex-flow: row wrap; align-items: flex-start; }
+  body[data-tabs="left"] > header { flex: 1 0 100%; }
+  body[data-tabs="left"] > nav.tabs { flex: 0 0 auto; flex-direction: column; align-items: stretch;
+    width: 11rem; padding: .75rem .5rem; border-right: 1px solid var(--border); align-self: stretch; }
+  body[data-tabs="left"] > nav.tabs button { text-align: left; border-bottom: 0; border-left: 2px solid transparent; }
+  body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--accent); background: var(--bg-alt, transparent); }
+  body[data-tabs="left"] > main.content { flex: 1 1 0; min-width: 0; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
   header { display: flex; align-items: baseline; gap: 1.5rem; padding: .9rem 1.25rem;
            color: #fff; background: linear-gradient(135deg, var(--td-navy) 0%, #2d2d5e 100%);
            border-bottom: 3px solid var(--td-teal); }
+  header .view { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: #fff; }
+  header .view select { font: inherit; color: inherit; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35); border-radius: 2px; padding: .15rem .3rem; }
+  header .view option { color: #111; }
   header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
   header .meta { color: #c8c8e0; font-size: .8rem; }
   nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
@@ -103,22 +120,46 @@
              border-top-color: var(--td-teal); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-  @media print { nav.tabs, .params { display: none; } .page[hidden] { display: block; page-break-after: always; } .page.navonly[hidden] { display: none; } }
+  @media print { nav.tabs, .params, header .view { display: none; } .page[hidden] { display: block; page-break-after: always; } .page.navonly[hidden] { display: none; }
+    /* the on-screen zoom is a per-viewer choice, not a property of the report: paper gets the full width */
+    .page { width: 100% !important; max-width: none !important; } }
 </style>
 </head>
 <body>
+{% set tab_pages = spec.pages|rejectattr('nav_only')|list %}
+{% set tab_pages_count = tab_pages|length %}
 <header>
   <h1>{{ spec.report }}</h1>
   <span class="meta">HAH{% if role %} · role {{ role }}{% endif %} · generated {{ generated_at }}</span>
+  <label class="view">View
+    <select id="view-mode" title="How the report canvas is sized on this screen">
+      <option value="fit">Fit page</option>
+      <option value="width">Fit width</option>
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1">100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+    </select>
+  </label>
+  {% if tab_pages_count > 1 %}
+  <label class="view">Tabs
+    <select id="nav-pos" title="Where the page tabs sit">
+      <option value="top">Top</option>
+      <option value="bottom">Bottom</option>
+      <option value="left">Left</option>
+    </select>
+  </label>
+  {% endif %}
 </header>
 
-{% set tab_pages = spec.pages|rejectattr('nav_only')|list %}
-{% if tab_pages|length > 1 %}
+{% if tab_pages_count > 1 %}
 <nav class="tabs" role="tablist">
   {% for p in tab_pages %}<button role="tab" data-page="{{ p.id }}" aria-selected="{{ 'true' if p.initial else 'false' }}">{{ p.name }}</button>{% endfor %}
 </nav>
 {% endif %}
 
+<main class="content">
 {% set bar_params = spec.parameters.items()|rejectattr('1.widget')|list %}
 {% if bar_params %}
 <div class="params">
@@ -129,7 +170,7 @@
 {% endif %}
 
 {% for p in spec.pages %}
-<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
+<section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-h="{{ p.height }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
   <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.style.border and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
        style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: {{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}{% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}{% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
@@ -139,6 +180,7 @@
   {% endfor %}
 </section>
 {% endfor %}
+</main>
 
 <script id="spec" type="application/json">{{ spec_json|safe }}</script>
 <script>window.__PBIX2HTML_SQL_API__ = {{ sql_api|tojson }};</script>
@@ -364,6 +406,66 @@
   // Power BI sizes are px at the page's design width: --scale is how much the page is shrunk or grown here
   const scalePage = pg => { if (pg && pg.clientWidth) pg.style.setProperty('--scale', (pg.clientWidth / (parseFloat(pg.dataset.w) || pg.clientWidth)).toFixed(4)); };
   const fitAll = () => { document.querySelectorAll('.visual').forEach(fitText); };
+
+  // ---------- canvas size ----------
+  // The canvas has the .pbix's own fixed proportions, so on a wide-but-short screen "as wide as
+  // the window" runs off the bottom, and on a narrow one everything is squeezed. The CSS alone
+  // can only fit the width (`width:100%` + aspect-ratio), never the height — which is why a
+  // report looked right on one monitor and cut off on another. These are Power BI's own view
+  // modes; the choice is per viewer, so it lives in localStorage, not in the file.
+  const VIEW_KEY = 'pbix2html.view';
+  const NAV_KEY = 'pbix2html.nav';
+  const viewSel = document.getElementById('view-mode');
+  const navSel = document.getElementById('nav-pos');
+  // a tab strip on the left takes width, not height, so it must not count against the fit
+  const chromeHeight = () => ['header', 'nav.tabs', '.params'].reduce((h, s) => {
+    const el = document.querySelector(s);
+    if (!el || (s === 'nav.tabs' && document.body.dataset.tabs === 'left')) return h;
+    return h + (el.offsetHeight || 0);
+  }, 0);
+
+  function applyView() {
+    const mode = (viewSel && viewSel.value) || 'fit';
+    document.querySelectorAll('.page').forEach(pg => {
+      const dw = parseFloat(pg.dataset.w) || 1280, dh = parseFloat(pg.dataset.h) || 720;
+      // the page's own container, measured on the element itself so a hidden page sizes too
+      const availW = Math.max(200, (pg.parentElement?.clientWidth || window.innerWidth) - 24);
+      let w;
+      if (mode === 'width') {
+        w = availW;
+      } else if (mode === 'fit') {
+        // room left under the header/tabs/parameter bar, minus the page's own vertical margins
+        const availH = Math.max(160, window.innerHeight - chromeHeight() - 40);
+        w = Math.min(availW, availH * (dw / dh));
+      } else {
+        w = dw * (parseFloat(mode) || 1);          // an explicit zoom, in design pixels
+      }
+      pg.style.maxWidth = 'none';                  // the CSS cap is the no-JS fallback only
+      pg.style.width = Math.round(w) + 'px';
+    });
+    fitAll();
+    Object.values(charts).forEach(c => c.resize());
+  }
+
+  // Both choices belong to the person looking at the report, not to the report: a snapshot sent
+  // to ten people must not carry one reader's zoom or tab position, so they live in localStorage.
+  const remember = (sel, key, after) => {
+    if (!sel) return;
+    let saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) { /* storage blocked */ }
+    if (saved && [...sel.options].some(o => o.value === saved)) sel.value = saved;
+    after();
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem(key, sel.value); } catch (e) { /* private mode */ }
+      after();
+    });
+  };
+  const applyNav = () => {
+    document.body.dataset.tabs = (navSel && navSel.value) || 'top';
+    applyView();                       // the strip changed which way it eats space
+  };
+  remember(viewSel, VIEW_KEY, () => applyView());
+  remember(navSel, NAV_KEY, applyNav);
 
   // ---------- renderers (same contract as report.html.j2) ----------
   const R = {
@@ -639,7 +741,8 @@
     b.addEventListener('click', activate);
     b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
   });
-  window.addEventListener('resize', () => { Object.values(charts).forEach(c => c.resize()); fitAll(); });
+  window.addEventListener('resize', () => { applyView(); });
+  applyView();
 
   // HAH's snapshot-capture pass needs every tab's data present in one shot, not just
   // whichever page is visible on load — see ADR-004 / pbix2html-fixv1.md #10.

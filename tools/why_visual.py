@@ -10,6 +10,8 @@ stacks, and whether it drafts (or the reason it won't).
       --list         one line per visual (every page, every visual) — start here
       --yaml         compare metrics/<Report>.yaml against what the drafter produces NOW, and
                      say whether `redraft` would replace it (it only replaces its own drafts)
+      --tables       every model table: does it have a Teradata source, and where from? For a
+                     DAX calculated table with no source, prints the expression that was rejected
       --sql          include the drafted SQL (off by default: a real one runs to 50k characters)
 
 A visual's *title* belongs to whatever sits above it, so a chart under a titled card is usually
@@ -35,6 +37,7 @@ def main() -> int:
     ap.add_argument("--charts", action="store_true")
     ap.add_argument("--list", action="store_true", dest="list_all")
     ap.add_argument("--yaml", action="store_true", dest="check_yaml")
+    ap.add_argument("--tables", action="store_true", dest="check_tables")
     ap.add_argument("--sql", action="store_true")
     a = ap.parse_args()
 
@@ -44,9 +47,42 @@ def main() -> int:
                 for m in (model.get("measures") or []) if isinstance(m, dict)}
     calc_columns = semantic._table_calc_columns(model)
     rels = model.get("relationships") if isinstance(model.get("relationships"), list) else []
-    table_map = semantic.detect_table_map_from_power_query(model) or {}
+    # Build the map the same way `sync_table_map` does, but without writing anything: a DAX
+    # CALENDAR() table has no Power Query source and is rebuilt on sys_calendar.calendar, so
+    # using only `detect_table_map_from_power_query` here reported a phantom `no_source:Calendar`
+    # that the real pipeline would never produce.
+    calendars = semantic.detect_calendar_tables(model)
+    detected: dict[str, str] = {t: info["sql"] for t, info in calendars.items()}
+    detected.update(semantic.detect_table_map_from_power_query(model) or {})
+    mapped_by_hand, _problem = semantic.read_table_map(layout["report"])
+    table_map = {**detected, **mapped_by_hand}      # a hand-mapped entry wins, as in the pipeline
     tables = {t for t in (model.get("tables") or []) if isinstance(t, str)}
     params_all = semantic._slicer_parameters(layout, model)
+
+    if a.check_tables:
+        pq = semantic.detect_table_map_from_power_query(model) or {}
+        calc = {t.get("TableName"): (t.get("Expression") or "")
+                for t in (model.get("calculated_tables") or []) if isinstance(t, dict)}
+        used = {tb for page in layout["pages"] for v in page["visuals"]
+                for refs in (v.get("projections") or {}).values() for ref in refs or []
+                for tb in [semantic.query_ref_parts(ref)[1]]}
+        print(f"{'table':34} {'source':22} used by a visual?")
+        for t in sorted({*(model.get("tables") or []), *table_map, *calc, *used}):
+            if not isinstance(t, str):
+                continue
+            where = ("hand-mapped" if t in mapped_by_hand else "Power Query" if t in pq
+                     else "rebuilt CALENDAR()" if t in calendars
+                     else "NONE - calculated table" if t in calc else "NONE")
+            print(f"{t[:34]:34} {where:22} {'yes' if t in used else '-'}")
+        missing = [t for t in calc if t not in table_map]
+        if missing:
+            print("\nCalculated tables with no source. `detect_calendar_tables` only rebuilds"
+                  "\n`CALENDAR(a, b)` where each bound is TODAY()/NOW(), a quoted date, or"
+                  "\nDATE(y, m, d) — anything else (e.g. MIN/MAX of a column) is refused:")
+            for t in missing:
+                expr = " ".join((calc[t] or "").split())
+                print(f"\n  {t}:\n    {expr[:300]}{' …' if len(expr) > 300 else ''}")
+        return 0
 
     if a.check_yaml:
         # `convert` reuses the SQL saved in the yaml; it never re-derives it. So a fix in the

@@ -18,6 +18,26 @@ Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-
 visuals are absolutely positioned in **percentages** (`left = x/width*100`), which
 preserves the original layout and scales with width.
 
+**How big the canvas is on screen is the viewer's choice** (2026-09-30). A fixed-proportion
+canvas plus `width: 100%` can only fit the *width*, so a wide-but-short monitor cut the bottom
+off and a narrow one squeezed everything. The header carries a `View` control — Fit page (the
+default), Fit width, 50–150 % — and `applyView()` sets each page's width in px (`aspect-ratio`
+supplies the height), then re-runs `fitAll()` and the ECharts resize. Fit page measures
+`window.innerHeight` minus the header/tabs/parameter bar, so the whole page is visible without
+scrolling. Two rules worth keeping: the choice lives in `localStorage`, **never in the file** (a
+report sent to ten people must not carry one person's zoom), and printing ignores it entirely
+(`width: 100% !important`). `--scale`, which keeps Power BI's absolute font sizes proportional,
+is derived from the resulting width, so it follows automatically.
+
+**Where the page tabs sit is the viewer's choice too**: a `Tabs` control (Top / Bottom / Left,
+shown only when the report has more than one page) sets `data-tabs` on `<body>`. The body is a
+flex column, so Top/Bottom only re-order the strip — the buttons and the page-switching JS never
+move. `Left` makes the body `row wrap` and the strip an 11rem rail beside `<main class="content">`
+(which wraps the parameter bar and the pages). Two things to keep in mind when touching this: the
+attribute is `data-tabs`, **not** `data-nav` (that already means "this button navigates to page X"
+on a visual), and a left rail costs width rather than height, so `chromeHeight()` must not count
+it — otherwise Fit page reserves vertical space nothing is using.
+
 **Frames come from the report, not from us.** A visual's fill and border are read from its
 `vcObjects` (`extract.py`'s `container_style` → `v.style`), and the page's canvas colour
 from the section's `objects.background`/`outspace` (`page.background`). Power BI's own

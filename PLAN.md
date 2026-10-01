@@ -407,6 +407,45 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## The page tabs can sit top, bottom or left, 2026-09-30
+
+- [x] A **`Tabs`** control beside `View` (both templates): Top (default), Bottom, Left. The body
+  is a flex column and `data-tabs` on `<body>` re-orders the strip rather than moving it in the
+  DOM, so the tab buttons, their `aria-selected` state and the page-switching JS are untouched.
+  `Left` turns the strip into an 11rem rail: the body becomes `row wrap`, the header keeps the
+  full width, and the active page is marked with a left accent bar instead of an underline.
+- Params and pages are wrapped in a `<main class="content">` so the rail has something to sit
+  beside. That also makes `applyView()` measure the *content* width rather than the window's, so
+  the canvas correctly uses what the rail leaves — no change needed for the other two positions.
+- A left rail costs **width, not height**, so `chromeHeight()` stops counting the strip in that
+  position; otherwise Fit page shrank the canvas for vertical space nothing was using.
+- **Not** `data-nav`: that attribute already means "this button navigates to page X" on a visual,
+  and reusing it broke a test that counts navigation buttons. Named `data-tabs` instead.
+- Only offered when the report has more than one page. Per viewer (`localStorage`), like the zoom.
+- Verified in Chromium for both templates: strip above / below / beside, the canvas still fits in
+  all three, tabs keep switching pages from the rail, and the choice survives a reload.
+
+## Canvas size is now the viewer's choice, 2026-09-30
+
+A user reported the report "covers too much" on some monitors and "looks truncated" on others.
+The cause is structural: a Power BI canvas has fixed proportions, and `.page { width: 100%;
+aspect-ratio: var(--ratio) }` can only ever fit the **width**. On a wide-but-short screen the
+bottom ran off; on a narrow one everything was squeezed. Nothing fitted the height.
+
+- [x] **A `View` control in the header** (both `report.html.j2` and `report_hah.html.j2`): Fit
+  page (the new default), Fit width, and 50/75/100/125/150 %. `applyView()` sets each page's width
+  in px — `aspect-ratio` then gives the height — and re-runs `fitAll()` and the ECharts resize.
+  Fit page sizes against `window.innerHeight` minus the header/tabs/parameter bar, so the whole
+  canvas is visible without scrolling whatever the window shape.
+- The choice is **per viewer, not per report**: it lives in `localStorage`, never in the HTML, so
+  one person's zoom doesn't travel to everyone the file is sent to. Printing ignores it entirely
+  (`width: 100% !important`) — paper has its own width.
+- The old CSS (`width: 100%`, `max-width: 1400px`) stays as the no-JS fallback; `applyView()`
+  clears `max-width` once it manages the size.
+- Verified in Chromium at 1920×800, 1440×900, 1100×1400 and 900×600: Fit page never overflows in
+  any of them, a portrait page re-fits when you switch tabs, and the choice survives a reload.
+  Fit width and an explicit zoom are still allowed to overflow — that is what the viewer asked for.
+
 ## Date slicers listed raw dates instead of Year > Month, 2026-09-30
 
 Reported against `TestReport3`: the real report's date slicer groups months under years with

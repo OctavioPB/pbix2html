@@ -1,4 +1,6 @@
 """Table header/banding colours (visual objects and theme), card text that must fit, and the default font."""
+import re
+
 import pytest
 
 from pbix2html import extract as ex, semantic
@@ -293,3 +295,132 @@ def test_icon_rule_names_map_to_round_badges():
                           "return ['SymbolHigh', 'CircleCheck', 'SymbolLow', 'CircleCross', 'Warning', 'null', 'Mystery'].map(n => { const r = f(n); return r && r[0]; }); }", snippet)
         br.close()
     assert res == ["ok", "ok", "bad", "bad", "warn", None, None]
+
+
+def _one_page_report(width=1280, height=720, mode="snapshot"):
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    card = {"id": "c1", "type": "card", "hidden": False, "is_group": False, "parent_group": None,
+            "groups": [], "x": 40, "y": 40, "width": 300, "height": 150, "z": 1, "title": "Revenue",
+            "style": {}, "sort": None, "cond_formats": [], "n_fields": None, "col_align": [],
+            "y_fields": [], "action": None}
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "P", "width": width, "height": height, "visuals": [card]}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={}, roles={},
+                      visuals={"c1": VisualSpec(id="c1", kind="card", title=None, sql="s")}, raw={})
+    return render_html(layout, spec, {}, {"c1": {"columns": ["value"], "rows": [[1234]]}},
+                       mode=mode, hah_base="https://h.example")
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_the_canvas_has_a_view_size_control_in_every_mode(mode):
+    html = _one_page_report(mode=mode)
+    assert 'id="view-mode"' in html and 'value="fit"' in html and 'value="width"' in html
+    assert re.search(r'data-h="720(\.0)?"', html)   # the design height, for fitting the viewport
+    # the on-screen zoom is a per-viewer choice, so it must not reach the printed page
+    assert ".page { width: 100% !important" in html
+
+
+def test_fit_page_never_runs_off_a_wide_but_short_screen():
+    """The canvas keeps the .pbix's own proportions, so `width:100%` + aspect-ratio can only ever
+    fit the *width*: on a wide-but-short monitor the bottom of the report was cut off, and on a
+    narrow one everything was squeezed. "Fit page" sizes against the viewport height too."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    f = Path(tempfile.mkdtemp()) / "r.html"
+    f.write_text(_one_page_report(), encoding="utf-8")
+    measure = """() => { const p = document.querySelector('.page'), b = p.getBoundingClientRect();
+        return {overflow: Math.round(b.bottom - window.innerHeight), w: Math.round(b.width)}; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        for w, h in ((1920, 800), (1440, 900), (900, 600), (1100, 1400)):
+            pg = br.new_page(viewport={"width": w, "height": h})
+            pg.goto(f.as_uri())
+            pg.wait_for_timeout(600)
+            assert pg.eval_on_selector("#view-mode", "e => e.value") == "fit"   # the default
+            assert pg.evaluate(measure)["overflow"] <= 1, f"fit page overflowed at {w}x{h}"
+            # an explicit zoom is allowed to overflow — that is what the viewer asked for
+            pg.select_option("#view-mode", "1.5")
+            pg.wait_for_timeout(300)
+            assert pg.evaluate(measure)["w"] == 1920                 # 1280 design px x 1.5
+            pg.close()
+        br.close()
+
+
+def _two_page_report(mode="snapshot"):
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    def card(i):
+        return {"id": f"c{i}", "type": "card", "hidden": False, "is_group": False,
+                "parent_group": None, "groups": [], "x": 40, "y": 40, "width": 300, "height": 150,
+                "z": 1, "title": f"Card {i}", "style": {}, "sort": None, "cond_formats": [],
+                "n_fields": None, "col_align": [], "y_fields": [], "action": None}
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}}, "pages": [
+        {"display_name": "Overview", "width": 1280, "height": 720, "visuals": [card(1)]},
+        {"display_name": "Detail", "width": 1280, "height": 720, "visuals": [card(2)]}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={}, roles={},
+                      visuals={f"c{i}": VisualSpec(id=f"c{i}", kind="card", title=None, sql="s")
+                               for i in (1, 2)}, raw={})
+    data = {f"c{i}": {"columns": ["value"], "rows": [[1234]]} for i in (1, 2)}
+    return render_html(layout, spec, {}, data, mode=mode, hah_base="https://h.example")
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_the_tab_strip_can_be_moved_and_only_offers_it_when_there_are_tabs(mode):
+    html = _two_page_report(mode)
+    assert 'id="nav-pos"' in html and 'value="bottom"' in html and 'value="left"' in html
+    assert '<main class="content">' in html and "</main>" in html
+    # the attribute is `data-tabs`: `data-nav` already means "this button goes to page X"
+    assert 'body[data-tabs="left"]' in html and 'body[data-tabs="bottom"]' in html
+    # a one-page report has no tab strip, so it must not offer to move one
+    assert 'id="nav-pos"' not in _one_page_report(mode=mode)
+
+
+def test_the_tab_strip_actually_moves_and_the_canvas_still_fits():
+    """Top/bottom re-order the flex column; left turns the strip into a rail beside the page,
+    which costs *width* rather than height — so the fit has to stop counting it vertically."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    f = Path(tempfile.mkdtemp()) / "r.html"
+    f.write_text(_two_page_report(), encoding="utf-8")
+    probe = """() => { const n = document.querySelector('nav.tabs').getBoundingClientRect();
+        const p = [...document.querySelectorAll('.page')].find(x => !x.hidden).getBoundingClientRect();
+        return {navTop: n.top, navLeft: n.left, navW: n.width, pageTop: p.top, pageLeft: p.left,
+                fits: p.bottom <= window.innerHeight + 1}; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page(viewport={"width": 1500, "height": 820})
+        pg.goto(f.as_uri())
+        pg.wait_for_timeout(600)
+        assert pg.eval_on_selector("#nav-pos", "e => e.value") == "top"        # default
+        pg.select_option("#nav-pos", "top")
+        pg.wait_for_timeout(300)
+        top = pg.evaluate(probe)
+        assert top["navTop"] < top["pageTop"] and top["fits"]
+        pg.select_option("#nav-pos", "bottom")
+        pg.wait_for_timeout(300)
+        bottom = pg.evaluate(probe)
+        assert bottom["navTop"] > bottom["pageTop"], "bottom strip did not move below the page"
+        assert bottom["fits"], "the canvas must still fit with the strip underneath"
+        pg.select_option("#nav-pos", "left")
+        pg.wait_for_timeout(300)
+        left = pg.evaluate(probe)
+        assert left["navLeft"] < left["pageLeft"] and left["navW"] < 300, "left strip is not a rail"
+        assert left["fits"]
+        # tabs keep working wherever the strip is
+        pg.click("nav.tabs button:nth-child(2)")
+        pg.wait_for_timeout(400)
+        assert pg.evaluate("() => [...document.querySelectorAll('.page')].find(x => !x.hidden).id") == "page-1"
+        br.close()
