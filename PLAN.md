@@ -407,6 +407,33 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## Date slicers listed raw dates instead of Year > Month, 2026-09-30
+
+Reported against `TestReport3`: the real report's date slicer groups months under years with
+month names (January, February…); the HTML listed raw dates (`2026-08-31`).
+
+- [x] **Every level of a date hierarchy resolved to the same ref, and the list was de-duplicated.**
+  Power BI's levels (`Calendar.Date.Variation.Date Hierarchy.Year` / `…Month`) all sit on one
+  underlying column, so `_entity_prop` returned `("Calendar", "Date")` for each and
+  `canonical_query_ref` rewrote them all to the identical `Calendar.Date`. The slicer's field
+  list is a de-duplicated set, so a Year+Month slicer collapsed to **one** field over the raw
+  date and its options query became `SELECT DISTINCT calendar.date`. The level is the only thing
+  that distinguishes the entries, so it is now kept beside the ref (`_hierarchy_level`,
+  `_proto_levels`, and `level` on each PBIR field) and surfaces as `slicer.levels`.
+- [x] **One parameter per level, filtering on the level.** `date_year` (number) and `date_month`
+  (text) over the same column; the predicate is `EXTRACT(YEAR FROM d) IN (:date_year)` and
+  `TRIM(TO_CHAR(d, 'Month')) IN (:date_month)`, because picking "January" means *every* January,
+  not one date. The options query groups by the level expressions and orders by `MIN(date)` — a
+  month name sorts alphabetically, so the order has to come from the real date behind it.
+- The widget needed no change: `slicer.js` already drew a hierarchy tree keyed on the number of
+  parameters. Verified in Chromium — years with their months nested and checkboxes on both.
+- Two honest caveats: `TO_CHAR(d, 'Month')` depends on the Teradata **session language** (the
+  calendar translator already carries this caveat), and the level predicates are not sargable,
+  so a large fact table will scan rather than seek. Both are worth revisiting if a real run
+  shows wrong month names or slow slicer filtering.
+- Gated entirely on `levels` being present, which nothing produced before, so every existing
+  slicer behaves exactly as it did.
+
 ## The 100 % stacked column: two more root causes, 2026-09-30
 
 Reported three times against `TestReport3`'s four header charts ("Starting Headcount", "New

@@ -1295,7 +1295,11 @@ def _parse_visual(vc: dict) -> dict:
         **({"slicer": parse_slicer(sv.get("objects") or {}, list(dict.fromkeys(
             qmap.get(p.get("queryRef"), p.get("queryRef")) for refs in projections.values()
             if isinstance(refs, list) for p in refs if isinstance(p, dict) and p.get("queryRef"))),
-            sv.get("syncGroup"))}
+            sv.get("syncGroup"),
+            list(dict.fromkeys(lv for p in (
+                p for refs in projections.values() if isinstance(refs, list)
+                for p in refs if isinstance(p, dict) and p.get("queryRef"))
+                if (lv := _proto_levels(sv).get(p["queryRef"])))))}
            if vtype in _SLICER_TYPES else {}),
     })
     return visual
@@ -1440,8 +1444,13 @@ def _filter_selection(filt: Any) -> dict:
     return out
 
 
-def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = None) -> dict:
+def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = None,
+                 levels: list[str] | None = None) -> dict:
     """A slicer's widget description: {mode, fields, single, select_all, initial, style}.
+
+    `levels` are the hierarchy levels the slicer shows over a single underlying column (a date
+    hierarchy: Year, Quarter, Month, Day — see `_hierarchy_level`). They are only recorded when
+    every field resolves to one column, which is exactly the case the de-duplication flattens.
 
     `mode` (objects.data.mode: Dropdown / Basic / Between / Before / After / Relative / Tile) is
     normalised to dropdown / list / between / before / after / relative / tile; a slicer that
@@ -1466,6 +1475,7 @@ def parse_slicer(objects: dict, fields: list[str], sync_group: dict | None = Non
         "mode": _SLICER_MODES.get(mode, "other"),
         **({"sync_group": group} if group else {}),     # slicers sharing a group share one selection
         "fields": list(fields),
+        **({"levels": list(levels)} if levels and len(set(fields)) == 1 else {}),
         "single": _bool((prop("selection", "singleSelect") or {}).get("expr")) is True,
         "select_all": _bool((prop("selection", "selectAllCheckboxEnabled") or {}).get("expr")) is not False,
         "initial": _filter_selection(flt),
@@ -1703,6 +1713,38 @@ def canonical_query_ref(query_ref: str, entity: str, prop: str) -> str:
     return f"{m.group(1)}({inner})" if m else inner
 
 
+def _hierarchy_level(node: Any) -> str | None:
+    """The level of a `HierarchyLevel` field ("Year", "Month", …), or None for a plain column.
+
+    A date hierarchy's levels all sit on the *same* underlying column, so `_entity_prop` resolves
+    every one of them to that column and `canonical_query_ref` rewrites them all to the identical
+    ref: `Calendar.Date.Variation.Date Hierarchy.Year` and `...Month` both become `Calendar.Date`.
+    A slicer's field list is de-duplicated, so a Year/Month slicer collapsed into one field over
+    the raw date and its widget listed raw dates (`2026-08-31`) instead of years and month names.
+    The level is the only part that distinguishes them, so it is kept alongside the ref."""
+    if isinstance(node, dict):
+        lvl = node.get("HierarchyLevel")
+        if isinstance(lvl, dict) and lvl.get("Level"):
+            return str(lvl["Level"])
+        if node.get("Level") and "Expression" in node:
+            return str(node["Level"])
+        for v in node.values():
+            found = _hierarchy_level(v)
+            if found:
+                return found
+    return None
+
+
+def _proto_levels(sv: dict) -> dict[str, str]:
+    """queryRef → hierarchy level, for the classic format's `prototypeQuery.Select` nodes."""
+    out: dict[str, str] = {}
+    for sel in ((sv.get("prototypeQuery") or {}).get("Select") or []):
+        name, lvl = (sel or {}).get("Name"), _hierarchy_level(sel)
+        if name and lvl:
+            out[name] = lvl
+    return out
+
+
 def _entity_prop(node: Any, aliases: dict | None = None) -> tuple[str, str] | None:
     """First (entity, property) found in a field/expression node (any nesting: Column,
     Measure, Aggregation, HierarchyLevel...). `aliases` maps a classic `Source` alias to its
@@ -1783,6 +1825,7 @@ def _pbir_fields(query_state: dict) -> list[dict]:
             else:
                 entity, prop = "", ""
             fields.append({"role": role_name, "entity": entity, "property": prop,
+                           "level": _hierarchy_level(field),
                            "queryRef": canonical_query_ref(query_ref, entity, prop)})
     return fields
 
@@ -1859,7 +1902,8 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             **({"tooltip": parse_tooltip(vis.get("objects") or {})} if vtype == "dynamicTooltip" else {}),
             **({"slicer": parse_slicer(vis.get("objects") or {},
                                        list(dict.fromkeys(f["queryRef"] for f in fields if f["queryRef"])),
-                                       vis.get("syncGroup"))}
+                                       vis.get("syncGroup"),
+                                       list(dict.fromkeys(f["level"] for f in fields if f.get("level"))))}
                if vtype in _SLICER_TYPES else {}),
         }
     except Exception as e:

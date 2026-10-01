@@ -244,3 +244,73 @@ def test_autofill_adds_the_slicers_section_an_old_yaml_lacks(fake_pbix):
     assert "sl1" in out["slicers_added"] and "sl1" in out["raw"]["slicers"]
     again = semantic.autofill(out["raw"], layout, {"tables": ["Calendar"]}, {})
     assert again["slicers_added"] == []                             # never touches an existing entry
+
+
+def _hierarchy_level_node(level):
+    """A Power BI date-hierarchy level, as a slicer's prototypeQuery carries it."""
+    return {"Name": f"Calendar.Date.Variation.Date Hierarchy.{level}",
+            "HierarchyLevel": {"Expression": {"Hierarchy": {
+                "Expression": {"PropertyVariationSource": {
+                    "Expression": {"SourceRef": {"Source": "c"}}, "Name": "Variation", "Property": "Date"}},
+                "Hierarchy": "Date Hierarchy"}}, "Level": level}}
+
+
+def test_a_date_hierarchy_slicer_keeps_its_levels_instead_of_collapsing_to_the_raw_date():
+    """Every level of a date hierarchy sits on the same underlying column, so `_entity_prop`
+    resolved Year and Month to the identical ref and the de-duplicated field list kept one
+    field over the raw date — the widget then listed `2026-08-31` instead of years and months."""
+    for level in ("Year", "Quarter", "Month", "Day"):
+        assert ex._hierarchy_level(_hierarchy_level_node(level)) == level
+    assert ex._hierarchy_level({"Column": {"Expression": {"SourceRef": {"Entity": "T"}},
+                                           "Property": "c"}}) is None
+    sv = {"prototypeQuery": {"Select": [_hierarchy_level_node("Year"), _hierarchy_level_node("Month")]}}
+    assert ex._proto_levels(sv) == {"Calendar.Date.Variation.Date Hierarchy.Year": "Year",
+                                    "Calendar.Date.Variation.Date Hierarchy.Month": "Month"}
+    d = ex.parse_slicer({}, ["Calendar.Date"], None, ["Year", "Month"])
+    assert d["fields"] == ["Calendar.Date"] and d["levels"] == ["Year", "Month"]
+    # levels are only kept when every field resolves to the one column they all share
+    assert "levels" not in ex.parse_slicer({}, ["A.x", "B.y"], None, ["Year"])
+
+
+def test_a_date_hierarchy_slicer_lists_years_and_month_names_in_calendar_order():
+    v = {"type": "slicer", "fields": ["Calendar.Date"],
+         "slicer": {"mode": "list", "fields": ["Calendar.Date"], "levels": ["Year", "Month"],
+                    "single": False, "select_all": True, "initial": {}, "style": {}}}
+    sql = semantic._slicer_options_sql(v, {"Calendar": "SELECT date FROM db.calendar"}, {})
+    assert "EXTRACT(YEAR FROM calendar.\"date\") AS level1" in sql
+    assert "TRIM(TO_CHAR(calendar.\"date\", 'Month')) AS level2" in sql
+    # a month name sorts alphabetically, so the order has to come from the real date behind it
+    assert sql.rstrip().endswith('ORDER BY MIN(calendar."date")')
+
+
+def test_each_hierarchy_level_is_its_own_parameter_and_filters_on_the_level():
+    v = {"type": "slicer", "fields": ["Calendar.Date"],
+         "slicer": {"mode": "list", "fields": ["Calendar.Date"], "levels": ["Year", "Month"],
+                    "single": False, "select_all": True, "initial": {}, "style": {}}}
+    layout = {"pages": [{"display_name": "P", "visuals": [v]}]}
+    model = {"columns": [{"TableName": "Calendar", "ColumnName": "Date",
+                          "PandasDataType": "datetime64[ns]"}]}
+    params = semantic._slicer_parameters(layout, model)
+    assert set(params) == {"date_year", "date_month"}
+    assert params["date_year"]["level"] == "Year" and params["date_year"]["dtype"] == "number"
+    assert params["date_month"]["level"] == "Month" and params["date_month"]["dtype"] == "text"
+    assert params["date_month"]["from_slicer"] == "Calendar.Date"   # still the real column
+    # picking "January" means every January, so the predicate is over the level, not the date
+    where, used = semantic._draft_where(params, {"Calendar": "calendar"},
+                                        {"Calendar": "SELECT date FROM db.calendar"}, [], None)
+    assert 'EXTRACT(YEAR FROM calendar."date") IN (:date_year)' in where
+    assert 'TRIM(TO_CHAR(calendar."date", \'Month\')) IN (:date_month)' in where
+    assert semantic.slicer_params(v, "P", params) == ["date_year", "date_month"]
+
+
+def test_a_plain_slicer_is_untouched_by_the_hierarchy_path():
+    v = {"type": "slicer", "fields": ["Dim.name"],
+         "slicer": {"mode": "list", "fields": ["Dim.name"], "single": False,
+                    "select_all": True, "initial": {}, "style": {}}}
+    layout = {"pages": [{"display_name": "P", "visuals": [v]}]}
+    params = semantic._slicer_parameters(layout, {"columns": []})
+    assert set(params) == {"name"} and "level" not in params["name"]
+    sql = semantic._slicer_options_sql(v, {"Dim": "SELECT name FROM db.dim"}, {})
+    assert sql.startswith("SELECT DISTINCT dim.name AS level1")
+    # an unrecognised level name disables the whole hierarchy path rather than half-applying it
+    assert semantic.slicer_levels({"levels": ["Year", "Fortnight"]}) == []

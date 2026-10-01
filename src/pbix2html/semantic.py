@@ -2623,10 +2623,16 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
         if not slicer_ref:
             continue
         _, ptable, pcol = query_ref_parts(slicer_ref)
+        # a date-hierarchy level filters on the level, not the date: picking "January" means
+        # every January, so the predicate has to be over the same expression the widget lists
+        level = (p or {}).get("level")
+        def target(alias: str) -> str:
+            col = f"{alias}.{_sql_col(pcol)}"
+            return _level_expr(level, col) if level and level.lower() in _LEVEL_SQL else col
         if ptable in aliases:
             # IN (...) rather than "=": works unchanged whether the parameter stays a
             # single value or someone later turns on `multi` — see query.py's bind().
-            where_parts.append(predicate(f"{aliases[ptable]}.{_sql_col(pcol)}", pname, p))
+            where_parts.append(predicate(target(aliases[ptable]), pname, p))
             params_used.append(pname)
             continue
         if ptable not in table_map:
@@ -2640,7 +2646,7 @@ def _draft_where(parameters: dict[str, dict], aliases: dict[str, str],
             if src != ptable or dst not in aliases or dst in seen:
                 continue
             seen.add(dst)
-            inner = predicate(f"{_sql_alias(ptable)}.{_sql_col(pcol)}", pname, p, wrap=False)
+            inner = predicate(target(_sql_alias(ptable)), pname, p, wrap=False)
             where_parts.append(
                 f"/*if {pname}*/ {aliases[dst]}.{_sql_col(dcol)} IN (SELECT {_sql_col(scol)} FROM "
                 f"{_subquery(source, _sql_alias(ptable))} WHERE {inner}) /*fi {pname}*/")
@@ -3461,6 +3467,13 @@ def slicer_descriptor(v: dict) -> dict:
 _BOUNDS_BY_MODE = {"between": ("from", "to"), "before": ("to",), "after": ("from",)}
 
 
+def _ref_level(ref: str) -> tuple[str, str | None]:
+    """`"Calendar.Date|Month"` → `("Calendar.Date", "Month")`; a plain ref keeps level None.
+    A date hierarchy's levels all share one column, so the level is what tells them apart."""
+    plain, sep, level = ref.partition("|")
+    return (plain, level) if sep and level else (ref, None)
+
+
 def _column_dtype(model: dict | None, ref: str) -> str:
     """'date' | 'number' | 'text' for `Table.Column`, from the model's column list."""
     table, _, col = ref.partition(".")
@@ -3488,7 +3501,10 @@ def _slicer_parameters(layout: dict, model: dict | None = None) -> dict[str, dic
             d = slicer_descriptor(v)
             scope = d.get("sync_group") or f"page:{page['display_name']}"
             label = d.get("sync_group") or page["display_name"]
-            for ref in d.get("fields") or []:
+            # a date hierarchy filters on each level separately (Year 2026 AND Month January),
+            # so each level is its own parameter over the same underlying column
+            refs = [f"{d['fields'][0]}|{lv}" for lv in slicer_levels(d)] or list(d.get("fields") or [])
+            for ref in refs:
                 for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
                     slot = entries.setdefault((ref, bound), {}).setdefault(scope, {
                         "label": label, "pages": [], "d": d, "sync": d.get("sync_group")})
@@ -3496,7 +3512,9 @@ def _slicer_parameters(layout: dict, model: dict | None = None) -> dict[str, dic
                         slot["pages"].append(page["display_name"])
     # base names, disambiguated between different tables that share a column name
     def base(ref: str, bound: str | None) -> str:
-        return _slug(ref.partition(".")[2]) + (f"_{bound}" if bound else "")
+        plain, level = _ref_level(ref)
+        return (_slug(plain.partition(".")[2]) + (f"_{_slug(level)}" if level else "")
+                + (f"_{bound}" if bound else ""))
     by_base: dict[str, set[str]] = {}
     for (ref, bound) in entries:
         by_base.setdefault(base(ref, bound), set()).add(ref)
@@ -3505,21 +3523,28 @@ def _slicer_parameters(layout: dict, model: dict | None = None) -> dict[str, dic
         stem = base(ref, bound)
         if len(by_base[stem]) > 1:
             stem = f"{_slug(ref.partition('.')[0])}_{stem}"
-        dtype = "date" if bound and _column_dtype(model, ref) == "text" else _column_dtype(model, ref)
+        col_dtype = _column_dtype(model, _ref_level(ref)[0])
+        dtype = "date" if bound and col_dtype == "text" else col_dtype
         for scope, slot in scopes.items():
             name = stem if len(scopes) == 1 else f"{stem}__{_slug(slot['label'])}"
             n = 2
             while name in parameters:
                 name, n = f"{name}_{n}", n + 1
             d, initial = slot["d"], slot["d"].get("initial") or {}
+            plain, level = _ref_level(ref)
             if bound:
-                default = ((initial.get("range") or {}).get(ref) or {}).get(bound)
+                default = ((initial.get("range") or {}).get(plain) or {}).get(bound)
             else:
-                vals = (initial.get("values") or {}).get(ref)
+                vals = (initial.get("values") or {}).get(plain)
                 default = None if not vals else (vals[0] if d.get("single") else list(vals))
-            p: dict[str, Any] = {"type": "string", "default": default, "from_slicer": ref,
+            p: dict[str, Any] = {"type": "string", "default": default, "from_slicer": plain,
                                  "multi": bool(not bound and not d.get("single")),
-                                 "label": ref.partition(".")[2], "dtype": dtype, "pages": slot["pages"]}
+                                 "label": level or plain.partition(".")[2],
+                                 "dtype": dtype, "pages": slot["pages"]}
+            if level:
+                # the widget filters on the level, not on the raw date behind it
+                p["level"] = level
+                p["dtype"] = "number" if level.lower() in ("year", "day") else "text"
             if bound:
                 p["bound"] = bound
             if slot["sync"]:
@@ -3540,13 +3565,38 @@ def slicer_params(v: dict, page_name: str, parameters: dict[str, dict]) -> list[
     """Parameter names a slicer visual drives, one per level (or per bound), in field order."""
     d = slicer_descriptor(v)
     out: list[str] = []
-    for ref in d.get("fields") or []:
+    levels = slicer_levels(d)
+    pairs = ([(d["fields"][0], lv) for lv in levels] if levels
+             else [(ref, None) for ref in d.get("fields") or []])
+    for ref, level in pairs:
         for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
             for name, p in _params_for_page(parameters, page_name).items():
-                if (p or {}).get("from_slicer") == ref and (p or {}).get("bound") == bound:
+                if ((p or {}).get("from_slicer") == ref and (p or {}).get("bound") == bound
+                        and (p or {}).get("level") == level):
                     out.append(name)
                     break
     return out
+
+
+# A date hierarchy's levels as Teradata expressions over the underlying date column, labelled the
+# way Power BI labels them ("January", "Qtr 1"). Ordering never uses these — a month name sorts
+# alphabetically — so a levelled slicer always orders by the earliest real date behind each value.
+_LEVEL_SQL = {
+    "year": "EXTRACT(YEAR FROM {col})",
+    "quarter": "('Qtr ' || TRIM(CAST(((EXTRACT(MONTH FROM {col}) + 2) / 3) AS INTEGER)))",
+    "month": "TRIM(TO_CHAR({col}, 'Month'))",
+    "day": "EXTRACT(DAY FROM {col})",
+}
+
+
+def slicer_levels(d: dict) -> list[str]:
+    """The hierarchy levels of a slicer that this translator can express, in well order, or []."""
+    levels = [lv for lv in (d.get("levels") or []) if str(lv).lower() in _LEVEL_SQL]
+    return levels if len(levels) == len(d.get("levels") or []) else []
+
+
+def _level_expr(level: str, col: str) -> str:
+    return _LEVEL_SQL[level.lower()].format(col=col)
 
 
 def _slicer_options_sql(v: dict, table_map: dict[str, str], calendars: dict[str, dict]) -> str | None:
@@ -3570,6 +3620,16 @@ def _slicer_options_sql(v: dict, table_map: dict[str, str], calendars: dict[str,
     alias = _sql_alias(table)
     cols = [f"{alias}.{_sql_col(ref.partition('.')[2])}" for ref in d["fields"]]
     cal = calendars.get(table)
+    levels = slicer_levels(d)
+    if levels:
+        # a date hierarchy: one column per level over the single underlying date column,
+        # ordered by the real date so months come out January…December, not alphabetically
+        base = cols[0]
+        cols = [_level_expr(lv, base) for lv in levels]
+        select = ", ".join(f"{c} AS level{i}" for i, c in enumerate(cols, start=1))
+        group = ", ".join(str(i) for i in range(1, len(cols) + 1))
+        return (f"SELECT {select}\nFROM {_subquery(source, alias)}"
+                f"\nGROUP BY {group}\nORDER BY MIN({base})")
     if cal:
         order = f"MIN({alias}.{_sql_col(cal['date_column'])})"
     else:

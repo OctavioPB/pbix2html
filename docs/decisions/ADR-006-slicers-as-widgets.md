@@ -33,6 +33,28 @@ Power BI unless they share a sync group.
    - `hah`: options run client-side from the embedded `options_sql`.
 6. The top bar keeps only parameters nothing else edits (no widget, or on a page not shown).
 
+## Date hierarchies (2026-09-30)
+
+A slicer over Power BI's date hierarchy shows Year > Quarter > Month > Day, but every level sits
+on the *same* underlying column, so each resolved to the identical `Table.Date` ref and the
+de-duplicated field list kept one — the widget listed raw dates. The level is now kept beside the
+ref (`extract._hierarchy_level`, `slicer.levels`) and becomes **one parameter per level**, each
+filtering on the level's own expression rather than on the date:
+
+| Level | SQL over the date column | Parameter type |
+|---|---|---|
+| Year | `EXTRACT(YEAR FROM d)` | number |
+| Quarter | `'Qtr ' \|\| ((EXTRACT(MONTH FROM d) + 2) / 3)` | text |
+| Month | `TRIM(TO_CHAR(d, 'Month'))` — "January", as Power BI labels it | text |
+| Day | `EXTRACT(DAY FROM d)` | number |
+
+Picking "January" means every January, so the predicate must be over the same expression the
+widget lists. Options are grouped by the level expressions and ordered by `MIN(date)`: a month
+name sorts alphabetically, so the order has to come from the real date behind it. A level outside
+this table disables the whole hierarchy path for that slicer (`semantic.slicer_levels`) rather
+than half-applying it. Caveats: `TO_CHAR(d, 'Month')` follows the Teradata **session language**,
+and the predicates are not sargable.
+
 ## Known limits (deliberate)
 - **Hierarchy selection** is normalised to "fully selected parents" (`p1`) or leaves (`p1` + `p2`):
   picking children of several parents at once yields a superset (`p1 × p2`), because independent
