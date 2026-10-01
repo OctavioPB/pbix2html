@@ -2465,13 +2465,24 @@ def _filter_where(filters: list[dict] | None, aliases: dict[str, str], table_map
     return out, used
 
 
+_PLAIN_COLUMN = re.compile(r'^[\w."]+$')
+
+
 def _param_predicate(column: str, pname: str, p: dict, wrap: bool = True) -> str:
     """`col IN (:p)` for a value slicer; `col >= / <= CAST(:p AS DATE)` for a range bound,
     wrapped as optional (so `bind` drops it when that bound is empty) unless `wrap` is off
     (inside a semi-join the whole predicate is already wrapped: markers must not nest)."""
     bound = (p or {}).get("bound")
     if not bound:
-        return f"{column} IN (:{pname})"
+        text = f"{column} IN (:{pname})"
+        # "Nothing selected" means "no filter" in Power BI. `bind` delivers that by rewriting
+        # `<column> IN (:name)` to `1=1`, but its pattern only recognises a *plain* column on
+        # the left. A date-hierarchy level is an expression — `EXTRACT(YEAR FROM c.d)` — which
+        # does not match, so an empty slicer became `IN (NULL)`: no rows, and every chart over
+        # that calendar rendered blank. Marking the predicate lets `bind` drop the whole thing.
+        if wrap and not _PLAIN_COLUMN.match(column.strip()):
+            return f"/*if {pname}*/ {text} /*fi {pname}*/"
+        return text
     rhs = f"CAST(:{pname} AS DATE)" if (p or {}).get("dtype") == "date" else f":{pname}"
     text = f"{column} {'>=' if bound == 'from' else '<='} {rhs}"
     return f"/*if {pname}*/ {text} /*fi {pname}*/" if wrap else text

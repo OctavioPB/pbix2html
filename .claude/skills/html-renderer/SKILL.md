@@ -38,6 +38,27 @@ attribute is `data-tabs`, **not** `data-nav` (that already means "this button na
 on a visual), and a left rail costs width rather than height, so `chromeHeight()` must not count
 it — otherwise Fit page reserves vertical space nothing is using.
 
+**Data labels** have a `Labels` control (As report / Show / Hide). The option a chart was built
+from is kept in `chartOptions[id]` and only `series[].label.show` is flipped, so toggling costs no
+query and a chart painted later honours the current choice. The label object in `cartesian()` is
+therefore built **even when the report hides them**, with `show: !!cs.labels` — forcing labels on
+has to keep the report's formatter, display units and precision rather than printing raw numbers.
+Keep `show` explicit anywhere a label config is returned (the pie fallback included), or the
+control has nothing to flip.
+
+**Everything inside `.page` is sized as a multiple of `--scale`**, because a Power BI size is
+absolute at the design width. A fixed `rem` ceiling is a bug: `clamp(1rem, 20cqmin, 2.4rem)` made
+a scorecard's callout stop growing past 33.6px, so it shrank relative to its own card on a large
+monitor. Write `clamp(calc(1rem * var(--scale, 1)), 20cqmin, calc(2.4rem * var(--scale, 1)))`.
+Page chrome (header, tabs, parameter bar) is *not* part of the report and must not scale.
+
+Chart text is the exception that needs JS: it is drawn inside a canvas where `--scale` cannot
+reach. `scaleFonts` multiplies every `fontSize` in the chart's stored option by the page scale and
+re-applies it — it rebuilds plain objects and arrays only and passes everything else through **by
+reference**, because a deep clone would destroy the formatter functions. Any size you want to
+scale must be spelled out in the option (`axisLabel.fontSize: 12`); leaving it to ECharts' default
+gives `scaleFonts` nothing to multiply.
+
 **Frames come from the report, not from us.** A visual's fill and border are read from its
 `vcObjects` (`extract.py`'s `container_style` → `v.style`), and the page's canvas colour
 from the section's `objects.background`/`outspace` (`page.background`). Power BI's own

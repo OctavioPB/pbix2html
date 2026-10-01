@@ -45,20 +45,20 @@
   .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
-  .visual .title { font-size: clamp(.65rem, 8cqmin, .9rem); font-weight: 400; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin, calc(.9rem * var(--scale, 1))); font-weight: 400; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
-  .visual .subtitle { font-size: .72rem; color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: .8rem; padding: .3rem; }
+  .visual .subtitle { font-size: calc(.72rem * var(--scale, 1)); color: var(--muted); padding: 0 .6rem .1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: calc(.8rem * var(--scale, 1)); padding: .3rem; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
   .chart { position: absolute; inset: 0; }
   .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
-  .card .value { font-size: clamp(1rem, 20cqmin, 2.4rem); font-weight: 600; line-height: 1.1; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .card .label { color: var(--muted); font-size: clamp(.6rem, 7cqmin, .8rem); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .kpi .target { color: var(--muted); font-size: clamp(.6rem, 6cqmin, .8rem); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .multicard { display: grid; grid-template-columns: 1fr auto; gap: .2rem .8rem; padding: .5rem .6rem; font-size: .85rem; align-content: start; }
+  .card .value { font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin, calc(2.4rem * var(--scale, 1))); font-weight: 600; line-height: 1.1; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .label { color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 7cqmin, calc(.8rem * var(--scale, 1))); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .target { color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 6cqmin, calc(.8rem * var(--scale, 1))); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .multicard { display: grid; grid-template-columns: 1fr auto; gap: .2rem .8rem; padding: .5rem .6rem; font-size: calc(.85rem * var(--scale, 1)); align-content: start; }
   .multicard .v { text-align: right; font-weight: 600; }
   .tablewrap { overflow: auto; height: 100%; }
-  table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; font-size: calc(.8rem * var(--scale, 1)); }
   th, td { padding: .25rem .5rem; border-bottom: var(--gh, 1px solid var(--border)); text-align: left; white-space: nowrap; }
   th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: var(--th-fw, 600); font-size: var(--th-fs, inherit); }
   td { font-size: var(--tr-fs, inherit); }
@@ -69,7 +69,7 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   th + th, td + td { border-left: var(--gv, none); }
   th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
-  .text { padding: .15rem .3rem; line-height: 1.2; font-size: .85rem; overflow: auto; }
+  .text { padding: .15rem .3rem; line-height: 1.2; font-size: calc(.85rem * var(--scale, 1)); overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
   .visual.btn { background: linear-gradient(var(--bg0, transparent), var(--bg0, transparent)), var(--cbg, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
@@ -128,6 +128,13 @@
       <option value="1">100%</option>
       <option value="1.25">125%</option>
       <option value="1.5">150%</option>
+    </select>
+  </label>
+  <label class="view">Labels
+    <select id="label-mode" title="Data labels on charts: as the report sets them, always, or hidden">
+      <option value="report">As report</option>
+      <option value="on">Show</option>
+      <option value="off">Hide</option>
     </select>
   </label>
   {% if tab_pages_count > 1 %}
@@ -315,7 +322,9 @@
   // report shows labels and names no style), or with the category name when the style says so. Outside, with leader lines.
   const pieLabel = v => {
     const cs = v.style || {};
-    if (!cs.labels) return { color: theme.foreground, fontSize: 11 };
+    // `show` is always explicit so the viewer's Labels control has something to flip (a pie's
+    // labels are on by default in ECharts, which is the behaviour this keeps)
+    if (!cs.labels) return { show: true, color: theme.foreground, fontSize: 11 };
     const what = (cs.pie_label || 'Data value, Percent of total').toLowerCase();
     const all = what.includes('all');
     const useName = all || what.includes('category'), useVal = all || what.includes('value'), usePct = all || what.includes('percent');
@@ -345,7 +354,9 @@
   const base = { color: theme.data_colors, textStyle: { fontFamily: theme.font_family, color: theme.foreground },
                  grid: { left: 8, right: 12, top: 28, bottom: 8, containLabel: true },
                  tooltip: { trigger: 'axis', valueFormatter: v => fmt(v) } };
-  const axisStyle = { axisLine: { lineStyle: { color: theme.border } }, axisLabel: { color: theme.muted },
+  // fontSize is spelled out (ECharts' own default is 12) so `scaleFonts` has something to
+  // multiply: an axis label is text inside a canvas, which CSS `--scale` cannot reach.
+  const axisStyle = { axisLine: { lineStyle: { color: theme.border } }, axisLabel: { color: theme.muted, fontSize: 12 },
                       splitLine: { lineStyle: { color: theme.border } } };
 
   // ---------- renderers ----------
@@ -465,15 +476,18 @@
                                 : { OutsideEnd: 'top', InsideEnd: 'insideTop', InsideCenter: 'inside', InsideBase: 'insideBottom' };
     const insideLabel = v.stacked || /^inside/.test(labelPos[cs.labels_pos] || '');
     const labelFor = (i, name) => { const bar = colorOf(i, name); return cs.labels_color || (insideLabel && bar ? inkFor(bar) : insideLabel ? '#FFFFFF' : theme.muted); };
-    const label = cs.labels ? { show: true, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
+    // Built even when the report hides them, with `show` carrying the report's own choice: the
+    // viewer's Labels control flips `show` and nothing else, so turning them on keeps the
+    // report's formatter, units and precision instead of dumping raw numbers on the chart.
+    const label = { show: !!cs.labels, position: v.stacked ? 'inside' : (labelPos[cs.labels_pos] || labelPos.OutsideEnd),
       color: undefined, fontWeight: cs.labels_bold ? 'bold' : 'normal',
       fontSize: cs.labels_size ? Math.round(cs.labels_size * 4 / 3) : 11,
-      formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) } : undefined;
+      formatter: p => v.percent ? Math.round(p.value) + '%' : fmtCard({ style: { value_units: cs.labels_units, value_decimals: cs.labels_precision }, format: v.format }, p.value) };
     const ser = order.map(n => [n, groups.get(n)]).map(([name, m], i) => ({
       name: shown(name), type: type === 'combo' ? (v.axis && v.axis[name] === 'line' ? 'line' : 'bar') : type,
       // a colour the report gave to one value of the category field recolours that bar (single series only)
       data: cats.map((c, k) => groups.size === 1 && vc[c] ? { value: val(m, c, k), itemStyle: { color: vc[c] } } : val(m, c, k)), stack: v.stacked ? 'total' : undefined,
-      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label: label && { ...label, color: labelFor(i, name) },
+      areaStyle: area ? (colorOf(i, name) ? { color: colorOf(i, name) } : {}) : undefined, smooth: false, label: { ...label, color: labelFor(i, name) },
       ...(colorOf(i, name) ? { itemStyle: { color: colorOf(i, name) }, lineStyle: { color: colorOf(i, name) } } : {}),
       ...(type === 'line' ? { symbol: 'circle', symbolSize: 5 } : {}),
     }));
@@ -485,7 +499,7 @@
                                        nameTextStyle: { color: theme.muted, fontSize: 10 } } : {};
     const catAxis = { type: 'category', data: cats, ...axisStyle, ...axisTitle(t.axis_x), show: horizontal ? cs.y_axis_show !== false && cs.x_axis_show !== false : cs.x_axis_show !== false };
     const valAxis = { type: 'value', ...(v.percent ? { min: 0, max: 100 } : {}), ...axisStyle, show: cs.y_axis_show !== false,
-                      splitLine: { show: cs.gridlines !== false, lineStyle: { color: theme.border, type: 'dotted' } }, axisLabel: { color: theme.muted, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
+                      splitLine: { show: cs.gridlines !== false, lineStyle: { color: theme.border, type: 'dotted' } }, axisLabel: { color: theme.muted, fontSize: 12, formatter: x => v.percent ? x + '%' : fmt(x, v.format.value) },
                       ...axisTitle(t.axis_y) };
     const lp = cs.legend_pos || 'Top';
     const legend = groups.size > 1 && cs.legend_show !== false
@@ -503,13 +517,60 @@
     return { ...base, grid, legend,
              xAxis: horizontal ? valAxis : catAxis, yAxis: horizontal ? { ...catAxis, inverse: true } : valAxis, series: ser };
   }
+  // ---------- data labels ----------
+  // A dense time series carries one number per point, which Power BI happily draws on top of
+  // itself — unreadable. The viewer can hide them (or force them on) without re-querying: the
+  // option each chart was built from is kept, and only `series[].label.show` is flipped.
+  const chartOptions = {};
+  const labelSel = document.getElementById('label-mode');
+  const labelMode = () => (labelSel && labelSel.value) || 'report';
+  const withLabels = (option, mode) => mode === 'report' ? option : {
+    ...option,
+    series: (option.series || []).map(s => ({ ...s, label: { ...(s.label || {}), show: mode === 'on' } })),
+  };
+
+  // A chart's text is the one thing that does not follow the page: CSS `--scale` cannot reach
+  // inside a canvas, so axis labels, the legend and data labels stayed at their design pixel
+  // size — unreadably small on a big monitor, oversized at 50 %. Every `fontSize` in the option
+  // is multiplied by the page's own scale. Plain objects and arrays are rebuilt; anything else
+  // (formatter functions above all) is passed through by reference, never cloned.
+  const scaleFonts = (o, k) => {
+    if (Array.isArray(o)) return o.map(x => scaleFonts(x, k));
+    if (o && typeof o === 'object' && Object.getPrototypeOf(o) === Object.prototype) {
+      const out = {};
+      for (const key of Object.keys(o)) {
+        const val = o[key];
+        out[key] = (key === 'fontSize' && typeof val === 'number')
+          ? Math.max(6, Math.round(val * k)) : scaleFonts(val, k);
+      }
+      return out;
+    }
+    return o;
+  };
+  const pageScaleOf = id => {
+    const pg = (document.getElementById('v-' + id) || {}).closest ? document.getElementById('v-' + id).closest('.page') : null;
+    return pg ? (parseFloat(pg.style.getPropertyValue('--scale')) || 1) : 1;
+  };
+  const chartState = {};            // id -> the label mode and scale already applied
+  const applyChart = (id, force) => {
+    const c = charts[id], option = chartOptions[id];
+    if (!c || !option) return;
+    const mode = labelMode(), k = pageScaleOf(id), was = chartState[id];
+    if (!force && was && was.mode === mode && Math.abs(was.k - k) < 0.005) return;   // nothing moved
+    chartState[id] = { mode, k };
+    c.setOption(scaleFonts(withLabels(option, mode), k), { notMerge: true });
+  };
+  const applyLabels = () => Object.keys(charts).forEach(id => applyChart(id, false));
+
   function chart(el, v, option) {
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
     // The tooltip lives in <body>, above every visual: inside the chart's own box it is clipped by the visual
     // (`overflow: hidden`) and loses to any visual stacked higher, which is what hid it behind other charts.
     option.tooltip = { ...(option.tooltip || {}), appendToBody: true, confine: false, extraCssText: 'z-index:2147483600;' };
-    c.setOption(option); charts[v.id] = c;
+    chartOptions[v.id] = option;          // a chart painted later still honours the current choice
+    charts[v.id] = c;
+    applyChart(v.id, true);
   }
 
   // Text that does not fit its box shrinks (down to 9px) before it is cut with "…": Power BI's font sizes are
@@ -539,6 +600,7 @@
   // modes; the choice is per viewer, so it lives in localStorage, not in the file.
   const VIEW_KEY = 'pbix2html.view';
   const NAV_KEY = 'pbix2html.nav';
+  const LABEL_KEY = 'pbix2html.labels';
   const viewSel = document.getElementById('view-mode');
   const navSel = document.getElementById('nav-pos');
   // a tab strip on the left takes width, not height, so it must not count against the fit
@@ -567,8 +629,9 @@
       pg.style.maxWidth = 'none';                  // the CSS cap is the no-JS fallback only
       pg.style.width = Math.round(w) + 'px';
     });
-    fitAll();
+    fitAll();                                      // sets --scale, which the chart fonts follow
     Object.values(charts).forEach(c => c.resize());
+    Object.keys(charts).forEach(id => applyChart(id, false));
   }
 
   // Both choices belong to the person looking at the report, not to the report: a snapshot sent
@@ -590,6 +653,7 @@
   };
   remember(viewSel, VIEW_KEY, () => applyView());
   remember(navSel, NAV_KEY, applyNav);
+  remember(labelSel, LABEL_KEY, () => applyLabels());
 
   // ---------- data ----------
   function paint(id, block) {

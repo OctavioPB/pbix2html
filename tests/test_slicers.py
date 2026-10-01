@@ -295,12 +295,43 @@ def test_each_hierarchy_level_is_its_own_parameter_and_filters_on_the_level():
     assert params["date_year"]["level"] == "Year" and params["date_year"]["dtype"] == "number"
     assert params["date_month"]["level"] == "Month" and params["date_month"]["dtype"] == "text"
     assert params["date_month"]["from_slicer"] == "Calendar.Date"   # still the real column
-    # picking "January" means every January, so the predicate is over the level, not the date
+    # picking "January" means every January, so the predicate is over the level, not the date —
+    # and it must be marked optional, see the regression test below
     where, used = semantic._draft_where(params, {"Calendar": "calendar"},
                                         {"Calendar": "SELECT date FROM db.calendar"}, [], None)
-    assert 'EXTRACT(YEAR FROM calendar."date") IN (:date_year)' in where
-    assert 'TRIM(TO_CHAR(calendar."date", \'Month\')) IN (:date_month)' in where
+    assert any('EXTRACT(YEAR FROM calendar."date") IN (:date_year)' in w for w in where)
+    assert any('TRIM(TO_CHAR(calendar."date", \'Month\')) IN (:date_month)' in w for w in where)
     assert semantic.slicer_params(v, "P", params) == ["date_year", "date_month"]
+
+
+def test_an_empty_level_slicer_drops_its_predicate_instead_of_returning_no_rows():
+    """Regression, found on a real report: every chart over the calendar rendered blank.
+
+    "Nothing selected" means "no filter" in Power BI, and `query.bind` delivers that by rewriting
+    `<column> IN (:name)` to `1=1` — but its pattern only recognises a *plain* column on the left.
+    A date-hierarchy level is an expression (`EXTRACT(YEAR FROM c.d)`), so it never matched: the
+    empty parameter fell through to `IN (NULL)`, which returns no rows at all. The predicate is
+    now marked `/*if name*/ … /*fi name*/` so `bind` drops the whole thing."""
+    v = {"type": "slicer", "fields": ["Calendar.end_of_month"],
+         "slicer": {"mode": "list", "fields": ["Calendar.end_of_month"], "levels": ["Year", "Month"],
+                    "single": False, "select_all": True, "initial": {}, "style": {}}}
+    layout = {"pages": [{"display_name": "P", "visuals": [v]}]}
+    model = {"columns": [{"TableName": "Calendar", "ColumnName": "end_of_month",
+                          "PandasDataType": "datetime64[ns]"}]}
+    params = semantic._slicer_parameters(layout, model)
+    where, used = semantic._draft_where(params, {"Calendar": "calendar"},
+                                        {"Calendar": "SELECT end_of_month FROM db.cal"}, [], None)
+    sql = "SELECT 1 FROM t WHERE " + " AND ".join(where)
+    out, values = bind(sql, used, {n: [] for n in used})
+    assert "IN (NULL)" not in out, "an empty level slicer still filtered everything out"
+    assert out.split("WHERE", 1)[1].strip() == "1=1 AND 1=1"
+    assert values == []
+    # a real selection still filters, on the level expression
+    out, values = bind(sql, used, {"end_of_month_year": [2026], "end_of_month_month": ["January"]})
+    assert "EXTRACT(YEAR FROM calendar.end_of_month) IN (?)" in out and values == [2026, "January"]
+    # a plain column keeps the exact SQL it always had: no churn for every other report
+    plain = {"type": "string", "from_slicer": "Dim.name", "multi": True, "dtype": "text"}
+    assert semantic._param_predicate("dim.name", "name", plain) == "dim.name IN (:name)"
 
 
 def test_a_plain_slicer_is_untouched_by_the_hierarchy_path():

@@ -424,3 +424,142 @@ def test_the_tab_strip_actually_moves_and_the_canvas_still_fits():
         pg.wait_for_timeout(400)
         assert pg.evaluate("() => [...document.querySelectorAll('.page')].find(x => !x.hidden).id") == "page-1"
         br.close()
+
+
+def _label_report(report_labels=True, mode="snapshot"):
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    v = {"id": "v0", "type": "columnChart", "hidden": False, "is_group": False,
+         "parent_group": None, "groups": [], "x": 20, "y": 40, "width": 600, "height": 300,
+         "z": 1, "title": "Chart", "style": {"labels": report_labels, "labels_precision": 0},
+         "sort": None, "cond_formats": [], "n_fields": None, "col_align": [], "y_fields": [],
+         "action": None}
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 400, "visuals": [v]}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={},
+                      roles={}, visuals={"v0": VisualSpec(id="v0", kind="column", title=None,
+                                                          sql="s")}, raw={})
+    data = {"v0": {"columns": ["category", "value"], "rows": [[f"M{m}", 1234.5 + m] for m in range(6)]}}
+    return render_html(layout, spec, {}, data, mode=mode, hah_base="https://h.example")
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_a_data_label_control_exists_and_the_formatter_is_always_built(mode):
+    html = _label_report(mode=mode)
+    assert 'id="label-mode"' in html
+    for value in ('value="report"', 'value="on"', 'value="off"'):
+        assert value in html
+    # the label object is built even when the report hides them, so forcing them on keeps the
+    # report's own formatter rather than dumping raw numbers on the chart
+    assert "show: !!cs.labels" in html and "const chartOptions = {}" in html
+
+
+def test_data_labels_can_be_hidden_or_forced_without_losing_the_reports_formatting():
+    """A dense time series draws one number per point on top of itself. The viewer can hide them
+    (or force them on) without re-querying: only `series[].label.show` is flipped, on the option
+    the chart was built from."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    probe = """() => { const c = echarts.getInstanceByDom(document.querySelector('#v-v0 .chart'));
+        const s = c.getOption().series[0];
+        return {show: s.label.show === true, formatter: typeof s.label.formatter}; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        for report_labels in (True, False):
+            f = Path(tempfile.mkdtemp()) / "r.html"
+            f.write_text(_label_report(report_labels), encoding="utf-8")
+            errors = []
+            pg = br.new_page(viewport={"width": 1300, "height": 600})
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(f.as_uri())
+            pg.wait_for_timeout(1200)
+            assert pg.eval_on_selector("#label-mode", "e => e.value") == "report"   # default
+            # "As report" leaves each chart exactly as the .pbix set it
+            assert pg.evaluate(probe)["show"] is report_labels
+            pg.select_option("#label-mode", "off")
+            pg.wait_for_timeout(400)
+            assert pg.evaluate(probe)["show"] is False
+            pg.select_option("#label-mode", "on")
+            pg.wait_for_timeout(400)
+            forced = pg.evaluate(probe)
+            assert forced["show"] is True
+            assert forced["formatter"] == "function", "forcing labels on lost the report's formatter"
+            assert not errors, errors[:2]
+            pg.close()
+        br.close()
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_text_inside_the_canvas_scales_with_the_page_but_the_chrome_does_not(mode):
+    html = _label_report(mode=mode)
+    # a Power BI size is absolute at the design width, so every size inside the page is a
+    # multiple of --scale; the fixed clamp ceilings used to stop a callout growing on a big screen
+    for rule in (".card .value { font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin,",
+                 ".visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin,",
+                 "table { border-collapse: collapse; width: 100%; font-size: calc(.8rem * var(--scale, 1)); }"):
+        assert rule in html, rule
+    # an axis label is text inside a canvas, which --scale cannot reach: it is scaled in JS, so
+    # its size has to be spelled out rather than left to ECharts' default
+    assert "axisLabel: { color: theme.muted, fontSize: 12 }" in html
+    assert "const scaleFonts = (o, k) =>" in html
+    # the page chrome is not part of the report and must keep its own size
+    assert re.search(r"header \.meta \{ color: [^;]+; font-size: \.8rem; \}", html)
+
+
+def test_a_callout_keeps_its_proportion_at_every_zoom_and_chart_text_follows():
+    """A scorecard's number is the thing people read from across a room. It used to stop growing
+    at the `2.4rem` clamp ceiling, so on a large monitor it shrank *relative to its card*; chart
+    text never scaled at all, because CSS cannot reach inside a canvas."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    card = {"id": "c1", "type": "card", "hidden": False, "is_group": False, "parent_group": None,
+            "groups": [], "x": 40, "y": 40, "width": 220, "height": 110, "z": 1, "title": "Headcount",
+            "style": {}, "sort": None, "cond_formats": [], "n_fields": None, "col_align": [],
+            "y_fields": [], "action": None}
+    chart = {**card, "id": "v0", "type": "columnChart", "x": 300, "width": 600, "height": 300,
+             "title": "Chart", "style": {"labels": True}}
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 500, "visuals": [card, chart]}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={}, roles={},
+                      visuals={"c1": VisualSpec(id="c1", kind="card", title=None, sql="s"),
+                               "v0": VisualSpec(id="v0", kind="column", title=None, sql="s")}, raw={})
+    data = {"c1": {"columns": ["value"], "rows": [[4804]]},
+            "v0": {"columns": ["category", "value"], "rows": [[f"M{m}", 100 + m] for m in range(6)]}}
+    f = Path(tempfile.mkdtemp()) / "r.html"
+    f.write_text(render_html(layout, spec, {}, data, mode="snapshot"), encoding="utf-8")
+    probe = """() => { const box = document.querySelector('#v-c1').getBoundingClientRect();
+        const val = document.querySelector('#v-c1 .value');
+        const c = echarts.getInstanceByDom(document.querySelector('#v-v0 .chart'));
+        return {ratio: parseFloat(getComputedStyle(val).fontSize) / box.width,
+                clipped: val.scrollWidth > val.clientWidth + 1,
+                axis: c.getOption().xAxis[0].axisLabel.fontSize}; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page(viewport={"width": 2400, "height": 1300})
+        pg.goto(f.as_uri())
+        pg.wait_for_timeout(1200)
+        seen = {}
+        for mode in ("0.5", "1", "1.5", "fit"):
+            pg.select_option("#view-mode", mode)
+            pg.wait_for_timeout(450)
+            seen[mode] = pg.evaluate(probe)
+        br.close()
+    ratios = [r["ratio"] for r in seen.values()]
+    assert max(ratios) - min(ratios) < 0.005, f"callout lost its proportion: {seen}"
+    assert not any(r["clipped"] for r in seen.values()), seen
+    # chart text follows the page: bigger at 150 % than at 50 %, and never below the 6px floor
+    assert seen["1.5"]["axis"] > seen["1"]["axis"] > seen["0.5"]["axis"] >= 6, seen

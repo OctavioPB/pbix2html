@@ -407,6 +407,92 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## Everything inside the canvas now scales with it, 2026-10-01
+
+A user asked why a scorecard's callout number stops being legible after resizing. Measured before
+changing anything, on a card with no explicit size in the report:
+
+| viewport (Fit page) | card width | value | value / card |
+|---|---|---|---|
+| 2560×1400 | 402px | **33.6px (capped)** | 8.4% |
+| 1500×820 | 224px | 22.4px | 10.0% |
+| 900×600 | 151px | 15.1px | 10.0% |
+
+- [x] **The fixed `rem` ceilings were the bug.** `clamp(1rem, 20cqmin, 2.4rem)` tops out at 33.6px,
+  so past a certain page size the number stops growing while its card keeps going — it shrinks
+  *relative to the card*. Every size inside the page is now a multiple of `--scale`
+  (`clamp(calc(1rem * var(--scale)), 20cqmin, calc(2.4rem * var(--scale)))`), the same treatment a
+  report-specified size already got. Also applied to the visual title and subtitle, card label,
+  KPI target, table and multicard text, shape text and text boxes. After: a constant **10.0%** at
+  every viewport and zoom tested, nothing clipped. A size the report *does* specify was already
+  proportional (14.5%) and is unchanged.
+- [x] **Chart text could not follow at all**: it is drawn inside a canvas, which CSS `--scale`
+  cannot reach, so axis labels and data labels stayed at their design pixel size — tiny on a big
+  monitor, oversized at 50 %. `scaleFonts` multiplies every `fontSize` in the chart's stored option
+  by the page scale and re-applies it. It rebuilds plain objects and arrays only, passing anything
+  else (formatter **functions** above all) through by reference — a deep clone would have silently
+  destroyed the number formatting. A 6px floor stops text vanishing at 50 %.
+- `axisLabel` had no `fontSize` of its own (ECharts defaults to 12), so there was nothing to
+  multiply; it is now spelled out as 12, which leaves 100 % looking exactly as it did.
+- Re-applied only when the mode or the scale actually changed (`chartState`), so dragging a window
+  edge does not call `setOption` on every chart on every resize event.
+- **Page chrome deliberately does not scale** — the header, tabs and parameter bar belong to the
+  viewer's browser, not to the report.
+- Two bugs the Python suite could not see, both caught by a browser smoke test: the `hah` template
+  threw `Cannot access 'labelSel' before initialization` (its script defines `chart()` far later,
+  so the helpers had to move above the canvas block), and lifting a block between templates
+  duplicated `fitText`/`scalePage`/`fitAll`, giving `Identifier 'scalePage' has already been
+  declared`. **Render the hah template in a browser after touching its script**, not just the main one.
+
+## Data labels are the viewer's choice too, 2026-10-01
+
+A user pointed at a dense time series whose data labels overdraw each other into an unreadable
+smear — Power BI draws one number per point regardless of how many points there are.
+
+- [x] A **`Labels`** control beside `View`: *As report* (default), *Show*, *Hide*. The option each
+  chart was built from is kept in `chartOptions[id]`, and only `series[].label.show` is flipped —
+  no re-query, and a chart painted later (live mode) picks up the current choice as it is created.
+- **The label object is now built even when the report hides them**, carrying `show: !!cs.labels`.
+  That is the point of the change: forcing labels on keeps the report's own formatter, display
+  units and precision, instead of dumping raw unformatted numbers on the chart. A pie's label
+  fallback gained an explicit `show: true` (ECharts' default) so it has something to flip.
+- *As report* leaves every chart exactly as the `.pbix` set it, so the default output is unchanged.
+  Per viewer (`localStorage`), like the zoom and the tab position.
+- Verified in Chromium for both templates, for a chart whose report says labels on *and* one whose
+  report says off: the default honours each, Hide clears both, Show sets both and the formatter
+  survives (`typeof label.formatter === 'function'`).
+- The `hah` template needed the label helpers moved **above** the canvas-size block: its script
+  defines `chart()` much later than the main template, so the `remember(labelSel, …)` call hit a
+  temporal-dead-zone error on `labelSel`. Caught by a browser smoke test, not by the suite.
+
+## Regression: an empty level slicer blanked every chart over the calendar, 2026-10-01
+
+Reported with before/after HTML, yaml and screenshots: after the date-hierarchy slicer feature,
+`Headcount (at month end)`, `Departures and New Hires` and `Voluntary Attrition` rendered as empty
+boxes. Cards and tables were fine. The cause is the interaction between two mechanisms, neither
+obviously wrong on its own:
+
+- "Nothing selected" means "no filter" in Power BI, and `query.bind` delivers that by rewriting
+  `<column> IN (:name)` to `1=1`. Its pattern (`[\w."]+ IN (:name)`) only recognises a **plain
+  column** on the left.
+- A date-hierarchy level is an *expression* — `EXTRACT(YEAR FROM calendar.end_of_month)` — so it
+  never matched. The empty parameter fell through to the generic substitution, which turns an
+  empty list into `NULL`: `... IN (NULL)`, which returns **no rows at all**. Every chart joined to
+  the calendar came back empty, while cards reading the fact table directly were unaffected.
+- [x] Fixed in `_param_predicate`: a predicate whose left side is not a plain column is emitted
+  as `/*if name*/ … /*fi name*/`, the marker `bind` already uses to drop a whole predicate. Plain
+  columns are untouched, so every other report's SQL is byte-identical — no churn, no re-drafting.
+- Proved locally without Teradata, which is the useful part of this one: binding the **shipped**
+  yaml with an empty slicer gives 2 × `IN (NULL)`; the old yaml gives 0; re-drafting the same
+  three visuals from the real `.pbix` now gives 0. The regression test asserts the bound SQL, not
+  the drafted text, since the drafted text looked perfectly reasonable.
+- The other diff in that report (`QUALIFY RANK() OVER (...)` → a correlated subquery) is **not**
+  part of this: it comes from `72e389c`, the deliberate fix for Teradata rejecting a window
+  function inside a subquery (error 3706).
+- Lesson for the next feature here: changing the *shape* of a predicate is not a local change.
+  `bind` pattern-matches the SQL it is given, so anything that stops producing `alias.column`
+  silently changes what an empty slicer means. Grep `bind` before changing predicate text.
+
 ## The page tabs can sit top, bottom or left, 2026-09-30
 
 - [x] A **`Tabs`** control beside `View` (both templates): Top (default), Bottom, Left. The body

@@ -5,6 +5,7 @@ cache/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+NewReport/
 fixv2/
 .scratch/
 TracebackV4/
