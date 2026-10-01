@@ -8,6 +8,8 @@ stacks, and whether it drafts (or the reason it won't).
       --kind K       only this renderer kind (card, column, bar, table, slicer, ...)
       --charts       only chart kinds (bar/column/line/combo/pie) — the ones that stack
       --list         one line per visual (every page, every visual) — start here
+      --yaml         compare metrics/<Report>.yaml against what the drafter produces NOW, and
+                     say whether `redraft` would replace it (it only replaces its own drafts)
       --sql          include the drafted SQL (off by default: a real one runs to 50k characters)
 
 A visual's *title* belongs to whatever sits above it, so a chart under a titled card is usually
@@ -32,6 +34,7 @@ def main() -> int:
     ap.add_argument("--kind", default="")
     ap.add_argument("--charts", action="store_true")
     ap.add_argument("--list", action="store_true", dest="list_all")
+    ap.add_argument("--yaml", action="store_true", dest="check_yaml")
     ap.add_argument("--sql", action="store_true")
     a = ap.parse_args()
 
@@ -44,6 +47,54 @@ def main() -> int:
     table_map = semantic.detect_table_map_from_power_query(model) or {}
     tables = {t for t in (model.get("tables") or []) if isinstance(t, str)}
     params_all = semantic._slicer_parameters(layout, model)
+
+    if a.check_yaml:
+        # `convert` reuses the SQL saved in the yaml; it never re-derives it. So a fix in the
+        # drafter cannot reach a report whose yaml predates it, and `redraft` only replaces the
+        # drafts it wrote itself (notes containing "Auto-drafted") — hand-written SQL is left
+        # alone on purpose. This says, per visual, which of those two situations you are in.
+        name = layout["report"]
+        path = semantic.yaml_path(name)
+        if not path.exists():
+            print(f"no {path} — nothing to compare; `convert` would scaffold it fresh")
+            return 0
+        spec = semantic.load(name)
+        print(f"{path}\n")
+        print(f"{'title':26} {'in yaml':12} {'vs current draft':18} redraft replaces it?")
+        for page in layout["pages"]:
+            pname = page.get("display_name") or ""
+            if a.page and a.page.lower() not in pname.lower():
+                continue
+            for v in page["visuals"]:
+                if v.get("is_group"):
+                    continue
+                kind = semantic.KIND_MAP.get(v["type"], "unsupported")
+                if kind in semantic.NO_DATA_KINDS:
+                    continue
+                entry = (spec.raw.get("visuals") or {}).get(v["id"]) or {}
+                saved = entry.get("sql")
+                auto = "Auto-drafted" in (entry.get("notes") or "")
+                drafted = semantic._draft_visual_sql(
+                    v, entry.get("kind") or kind, measures, table_map, rels,
+                    semantic._params_for_page(params_all, entry.get("page") or pname),
+                    semantic.effective_filters(layout, page, v), calc_columns=calc_columns)
+                if not saved:
+                    state, cmp_ = "missing", "-"
+                elif semantic.is_unwritten_sql(saved):
+                    state, cmp_ = "TODO stub", "-"
+                else:
+                    state = "auto-drafted" if auto else "hand-written"
+                    cmp_ = ("same" if drafted and drafted[0].strip() == saved.strip()
+                            else "STALE" if drafted else "drafter can't")
+                stub = not saved or semantic.is_unwritten_sql(saved)
+                if drafted and (stub or auto):
+                    will = "YES"
+                elif not drafted:
+                    will = "no - the drafter still can't do this one"
+                else:
+                    will = "NO - hand-written, left alone on purpose"
+                print(f"{(v.get('title') or '(untitled)')[:26]:26} {state:12} {cmp_:18} {will}")
+        return 0
 
     if a.list_all:
         # Deliberately unfilterable: every page, every visual, one line each. A chart drawn under
