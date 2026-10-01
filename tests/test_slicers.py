@@ -314,3 +314,51 @@ def test_a_plain_slicer_is_untouched_by_the_hierarchy_path():
     assert sql.startswith("SELECT DISTINCT dim.name AS level1")
     # an unrecognised level name disables the whole hierarchy path rather than half-applying it
     assert semantic.slicer_levels({"levels": ["Year", "Fortnight"]}) == []
+
+
+@pytest.mark.parametrize("levels", [["Year", "Month"], None])
+@pytest.mark.parametrize("params", [
+    {"date": {"type": "string", "from_slicer": "Calendar.Date", "label": "Date",
+              "dtype": "date", "multi": True, "pages": ["P"], "default": None}},
+    {"date_year": {"type": "string", "from_slicer": "Calendar.Date", "level": "Year",
+                   "label": "Year", "dtype": "number", "multi": True, "pages": ["P"], "default": None},
+     "date_month": {"type": "string", "from_slicer": "Calendar.Date", "level": "Month",
+                    "label": "Month", "dtype": "text", "multi": True, "pages": ["P"], "default": None}},
+])
+def test_a_slicer_never_vanishes_when_its_field_has_parameters(levels, params):
+    """Regression: adding hierarchy levels made `slicer_params` demand a level-matched parameter.
+    A yaml written before levels existed has one parameter over the date column, so nothing
+    matched, `_slicer_entry` returned None and the date filter disappeared from the page.
+
+    The yaml and the extractor version are independent — a report's parameters can predate any
+    extractor change — so every combination of the two must still find the slicer's parameters.
+    Losing a widget silently hides a filter the report depends on."""
+    from pbix2html.render import _slicer_entry
+    from pbix2html.semantic import ReportSpec
+    d = {"mode": "list", "fields": ["Calendar.Date"], "single": False, "select_all": True,
+         "initial": {}, "style": {}, **({"levels": levels} if levels else {})}
+    v = {"id": "s1", "type": "slicer", "fields": ["Calendar.Date"], "slicer": d}
+    assert semantic.slicer_params(v, "P", params), "no parameters matched"
+    spec = ReportSpec(report="R", source=None, connection="", delivery="", parameters=params,
+                      roles={}, visuals={}, raw={"slicers": {"s1": {}}})
+    assert _slicer_entry(v, "P", spec, False) is not None, "the slicer would not render"
+
+
+def test_a_slicer_with_no_widget_still_draws_nothing():
+    """The fallbacks must not resurrect the modes that deliberately have no widget."""
+    from pbix2html.render import _slicer_entry
+    from pbix2html.semantic import ReportSpec
+    params = {"date": {"type": "string", "from_slicer": "Calendar.Date", "label": "Date",
+                       "dtype": "date", "multi": True, "pages": ["P"], "default": None}}
+    spec = ReportSpec(report="R", source=None, connection="", delivery="", parameters=params,
+                      roles={}, visuals={}, raw={"slicers": {}})
+    for mode in ("relative", "other"):
+        v = {"id": "s2", "type": "slicer", "fields": ["Calendar.Date"],
+             "slicer": {"mode": mode, "fields": ["Calendar.Date"], "single": False,
+                        "select_all": True, "initial": {}, "style": {}}}
+        assert _slicer_entry(v, "P", spec, False) is None, mode
+    # and a slicer whose field drives no parameter at all still has no widget
+    v = {"id": "s3", "type": "slicer", "fields": ["Other.col"],
+         "slicer": {"mode": "list", "fields": ["Other.col"], "single": False,
+                    "select_all": True, "initial": {}, "style": {}}}
+    assert _slicer_entry(v, "P", spec, False) is None

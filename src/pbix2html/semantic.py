@@ -3562,19 +3562,38 @@ def _params_for_page(parameters: dict[str, dict], page_name: str | None) -> dict
 
 
 def slicer_params(v: dict, page_name: str, parameters: dict[str, dict]) -> list[str]:
-    """Parameter names a slicer visual drives, one per level (or per bound), in field order."""
+    """Parameter names a slicer visual drives, one per level (or per bound), in field order.
+
+    The parameters come from the report's yaml, which may predate any given extractor change, so
+    this never *requires* the shape the current extractor would produce. A date hierarchy is
+    matched per level when the yaml has per-level parameters and falls back to the plain field
+    otherwise: a yaml written before levels existed has one parameter over the date column, and
+    demanding a level match there returned no parameters at all — which made `_slicer_entry`
+    return None and the slicer disappear from the page entirely."""
     d = slicer_descriptor(v)
-    out: list[str] = []
     levels = slicer_levels(d)
-    pairs = ([(d["fields"][0], lv) for lv in levels] if levels
-             else [(ref, None) for ref in d.get("fields") or []])
-    for ref, level in pairs:
-        for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
-            for name, p in _params_for_page(parameters, page_name).items():
-                if ((p or {}).get("from_slicer") == ref and (p or {}).get("bound") == bound
-                        and (p or {}).get("level") == level):
-                    out.append(name)
-                    break
+
+    def match(pairs: list[tuple[str, str | None]]) -> list[str]:
+        out: list[str] = []
+        for ref, level in pairs:
+            for bound in _BOUNDS_BY_MODE.get(d.get("mode"), (None,)):
+                for name, p in _params_for_page(parameters, page_name).items():
+                    if ((p or {}).get("from_slicer") == ref and (p or {}).get("bound") == bound
+                            and (p or {}).get("level") == level):
+                        out.append(name)
+                        break
+        return out
+
+    out = match([(d["fields"][0], lv) for lv in levels]) if levels else []
+    if not out:
+        out = match([(ref, None) for ref in d.get("fields") or []])
+    if not out:
+        # Last resort: any parameter this slicer's own field drives, whatever its level/bound.
+        # A slicer that has parameters must never render as nothing — losing the widget hides a
+        # filter the report depends on, which is far worse than showing it with the wrong levels.
+        fields = set(d.get("fields") or [])
+        out = [n for n, p in _params_for_page(parameters, page_name).items()
+               if (p or {}).get("from_slicer") in fields]
     return out
 
 
