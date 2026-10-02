@@ -102,6 +102,36 @@ def cmd_mapping(args):
     print(f"mapping report: {path}  (data visuals {v['data_visuals']}, drafted {v['drafted']})")
 
 
+def _refresh_stale_drafts(spec, layout, model):
+    """Re-draft the queries this tool wrote itself, but only the ones that are actually out of date.
+
+    `convert` runs the SQL saved in the yaml, so a fix to the drafter never reached a report whose
+    yaml predated it — the HTML kept being rendered from the old query until someone remembered to
+    run `redraft`. Checking costs a few milliseconds of pure Python and nothing is rewritten when
+    every draft already matches. SQL a person wrote is never touched (see `semantic.refresh_drafts`).
+    """
+    name = layout["report"]
+    try:
+        table_map, _ = semantic.sync_table_map(name, model)
+        refreshed, changed = semantic.refresh_drafts(spec.raw, layout, model, table_map)
+    except Exception as e:                                        # noqa: BLE001
+        print(f"! could not check whether the saved queries are up to date ({type(e).__name__}: {e});"
+              f" using the yaml as it is")
+        return spec
+    if not changed:
+        return spec
+    print(f"{len(changed)} saved quer{'y was' if len(changed) == 1 else 'ies were'} out of date and "
+          f"{'has' if len(changed) == 1 else 'have'} been re-drafted: " +
+          ", ".join(changed[:6]) + (" ..." if len(changed) > 6 else ""))
+    try:
+        backup = semantic.backup_yaml(name)
+        semantic.save_raw(name, refreshed)
+        print(f"  saved to the yaml (backup: {backup}); --no-redraft skips this check")
+    except OSError as e:
+        print(f"  could not save the yaml ({e}); this run uses the refreshed SQL anyway")
+    return semantic.spec_from_raw(refreshed)
+
+
 def cmd_convert(args):
     pbix = Path(args.pbix)
     layout, model = _layout_and_model(pbix, Path(args.out))
@@ -117,6 +147,8 @@ def cmd_convert(args):
         semantic.write_scaffold(layout, model, table_map=semantic.sync_table_map(layout["report"], model)[0])
         print(f"! metrics/{layout['report']}.yaml didn't exist: generated the scaffold. Fill in the SQL and convert again.")
     spec = semantic.load(layout["report"])
+    if not args.no_redraft:
+        spec = _refresh_stale_drafts(spec, layout, model)
     values = semantic.resolve_params(spec, _kv(args.params))
     role = args.role
     proxy_user = None
@@ -204,6 +236,8 @@ def main(argv=None) -> int:
                                     "(default: metrics/<report>.theme.json if it exists)")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--no-verify", action="store_true", help="skip the HTML check that normally runs after converting (ADR-009)")
+    p.add_argument("--no-redraft", action="store_true",
+                   help="use the yaml's SQL as it is, even if this tool's own drafts are out of date")
     p.add_argument("--include-hidden", action="store_true")
     p.set_defaults(fn=cmd_convert)
 

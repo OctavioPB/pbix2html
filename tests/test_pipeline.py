@@ -754,3 +754,61 @@ def test_a_var_can_hold_an_aggregate_and_be_used_in_the_return():
     assert semantic.translate_dax("VAR d = MAX(T[log_dt]) RETURN SUM(T[x]) * DAY(d)", {}) is not None
     # and a VAR whose expression is genuinely untranslatable still refuses the whole measure
     assert semantic.translate_dax("VAR x = TOTALYTD([M], C[Date]) RETURN x", {}) is None
+
+
+_DRAFTABLE_LAYOUT = {"report": "R", "pages": [{"display_name": "P", "name": "p1", "filters": [], "visuals": [
+    {"id": "v1", "type": "card", "title": "Total", "is_group": False, "hidden": False,
+     "projections": {"Values": ["Sum(T.amount)"]}, "filters": []},
+    {"id": "v2", "type": "card", "title": "Count", "is_group": False, "hidden": False,
+     "projections": {"Values": ["Count(T.id)"]}, "filters": []}]}]}
+_DRAFTABLE_MODEL = {"tables": ["T"], "measures": [], "relationships": [], "power_query": [
+    {"TableName": "T", "Expression":
+     'let Source = Teradata.Database("h"), t = Source{[Schema="db",Item="T"]}[Data] in t'}]}
+
+
+def test_refresh_drafts_only_reports_the_drafts_that_actually_went_stale():
+    """`convert` runs the SQL saved in the yaml, so a fix to the drafter never reached a report
+    whose yaml predated it — the HTML kept rendering from the old query until someone remembered
+    to run `redraft`. This answers "is any saved draft out of date?" so it can be refreshed only
+    when it genuinely is, and never touches SQL a person wrote."""
+    import copy
+    table_map = semantic.detect_table_map_from_power_query(_DRAFTABLE_MODEL)
+    raw = semantic.scaffold(_DRAFTABLE_LAYOUT, _DRAFTABLE_MODEL, table_map=table_map)
+    assert all(raw["visuals"][v]["sql"].startswith("SELECT") for v in ("v1", "v2"))
+
+    # nothing has changed: a freshly drafted yaml reports nothing and is left alone
+    updated, changed = semantic.refresh_drafts(copy.deepcopy(raw), _DRAFTABLE_LAYOUT,
+                                               _DRAFTABLE_MODEL, table_map)
+    assert changed == []
+    assert updated["visuals"]["v1"]["sql"] == raw["visuals"]["v1"]["sql"]
+
+    # one of the tool's own drafts goes stale; the other is adopted by a person
+    stale = copy.deepcopy(raw)
+    stale["visuals"]["v1"]["sql"] = "SELECT 'stale' AS value"
+    stale["visuals"]["v2"]["sql"] = "SELECT 'mine' AS value"
+    stale["visuals"]["v2"]["notes"] = "written by me"
+    updated, changed = semantic.refresh_drafts(stale, _DRAFTABLE_LAYOUT, _DRAFTABLE_MODEL, table_map)
+    assert changed == ["v1"], "only the tool's own out-of-date draft should be refreshed"
+    assert "SUM(t.amount)" in updated["visuals"]["v1"]["sql"]
+    assert updated["visuals"]["v2"]["sql"] == "SELECT 'mine' AS value", "hand-written SQL was replaced"
+
+
+def test_spec_from_raw_builds_the_same_spec_without_touching_the_file(tmp_path, monkeypatch):
+    """`convert` refreshes the drafts in memory, so it needs a spec built from a dict rather than
+    from the yaml on disk."""
+    table_map = semantic.detect_table_map_from_power_query(_DRAFTABLE_MODEL)
+    raw = semantic.scaffold(_DRAFTABLE_LAYOUT, _DRAFTABLE_MODEL, table_map=table_map)
+    spec = semantic.spec_from_raw(raw)
+    assert spec.report == "R" and set(spec.visuals) == {"v1", "v2"}
+    assert spec.visuals["v1"].kind == "card" and spec.visuals["v1"].sql.startswith("SELECT")
+
+
+def test_convert_can_be_told_to_leave_the_yaml_alone():
+    from pbix2html import cli
+    parser = cli.build_parser() if hasattr(cli, "build_parser") else None
+    if parser is None:
+        import inspect
+        assert "--no-redraft" in inspect.getsource(cli), "the opt-out flag is gone"
+        return
+    args = parser.parse_args(["convert", "r.pbix", "--no-redraft"])
+    assert args.no_redraft is True

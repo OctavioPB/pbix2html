@@ -139,6 +139,8 @@ def main() -> int:
         print(f"{'page':28} {'title':26} {'type':34} {'kind':10} stk pct  drafts")
         for page in layout["pages"]:
             pname = page.get("display_name") or ""
+            if a.page and a.page.lower() not in pname.lower():
+                continue
             for v in page["visuals"]:
                 if v.get("is_group"):
                     continue

@@ -16,6 +16,10 @@ class Settings:
     teradata_logmech: str = os.getenv("TERADATA_LOGMECH", "TD2")
     teradata_database: str = os.getenv("TERADATA_DATABASE", "")
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+    # A matrix grouped by several dimensions can return far more rows than a browser can draw —
+    # every row becomes a <tr>. Rows past this are not fetched, and the visual says so rather
+    # than quietly showing a partial table. 0 means no limit.
+    max_rows: int = int(os.getenv("MAX_ROWS", "20000"))
     echarts_cdn: str = os.getenv("ECHARTS_CDN", "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
     api_base: str = os.getenv("API_BASE", "http://localhost:8000")
     hah_base_dev: str = os.getenv("HAH_BASE_DEV", "https://transcend-k8s-dev.td.teradata.com/dev-html-app-host")

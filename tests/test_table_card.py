@@ -737,3 +737,33 @@ def test_a_header_full_of_controls_wraps_instead_of_overflowing():
         assert not r["overflowX"], f"the header pushed the page sideways at {w}px"
         assert r["fits"], f"the canvas did not fit at {w}px"
     assert seen[820]["headerH"] > seen[1600]["headerH"], "the header should wrap when it runs out of room"
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_page_tabs_make_the_active_page_obvious(mode):
+    """The active page reads as a raised white tab carrying the theme's accent; the rest sit flat
+    on the grey surround. The accent moves to whichever edge the strip is docked against."""
+    html = _two_page_report(mode)
+    accent = "var(--td-teal)" if mode == "hah" else "var(--accent)"
+    assert 'nav.tabs button[aria-selected="true"] { background: #FFFFFF; color: #111111; font-weight: 600;' in html
+    assert f"border-top-color: {accent}" in html
+    assert f'body[data-tabs="bottom"] nav.tabs button[aria-selected="true"] {{ border-bottom-color: {accent}' in html
+    assert f'body[data-tabs="left"] > nav.tabs button[aria-selected="true"] {{ border-left-color: {accent}' in html
+    assert "nav.tabs button:hover" in html                       # inactive tabs respond to the pointer
+
+
+def test_the_top_bar_keeps_its_own_light_palette_whatever_the_report_theme_is():
+    """The bar is the app's chrome, not the report's. A dark report theme would otherwise paint
+    `var(--fg)` (near-white) onto a white bar and make the title vanish."""
+    from pbix2html.semantic import ReportSpec
+    dark = {"custom_json": {"background": "#1A1A2E", "foreground": "#FFFFFF",
+                            "dataColors": ["#00C7B1"]}}
+    layout = {"theme": dark, "pages": [{"display_name": "P", "width": 1280, "height": 720,
+                                        "visuals": []}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={},
+                      roles={}, visuals={}, raw={})
+    html = render_html(layout, spec, {}, None, mode="snapshot")
+    assert "padding: .75rem 1.25rem; background: #FFFFFF; color: #1A1A1A;" in html
+    assert "header .meta { color: #666;" in html                 # not var(--muted) from the theme
+    # the canvas still follows the report's own theme
+    assert "background: var(--bg); outline: 2px solid #000;" in html

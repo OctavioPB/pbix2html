@@ -408,6 +408,75 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## Chrome: a white top bar and report-app page tabs, 2026-10-02
+
+- [x] The top bar is white with a hairline shadow, so it lifts off the grey surround. It carries
+  **its own palette** (`#1A1A1A` text, `#666` meta, white controls) rather than the theme's: a dark
+  report theme would otherwise put near-white `var(--fg)` text onto a white bar. The canvas still
+  follows the report's own theme — the bar is the app's chrome, not the report's.
+- [x] Page tabs now read the way a report app draws them: the active page is a **raised white tab**
+  with the theme's accent along one edge and bold near-black text; the others sit flat on the grey
+  with muted text and a hover state. The accent edge and the corner rounding follow wherever the
+  strip is docked — top, bottom or left — so all three positions stay legible. `hah` gets the same
+  treatment with its brand teal, keeping its navy branded header.
+
+## A result too big to draw is capped and says so, 2026-10-02
+
+Chasing "the matrix on one page is not loading". Its SQL turned out to be correct — it parses as
+Teradata, the quoted column survives the backend's repair, the grouping is right — but looking at
+it exposed an unbounded path that applies to every table and matrix.
+
+- [x] `TeradataBackend.execute` used `fetchall()` and the renderer builds one `<tr>` per row, so a
+  matrix grouped by several dimensions (here: product x model x three levels of an employee
+  hierarchy) can return far more rows than a browser will draw, and the visual simply never
+  appears. Rows past `MAX_ROWS` (`.env`, default 20000, 0 disables) are no longer fetched; one row
+  past the limit is read purely to know whether there were more.
+- A capped table must never read as the whole answer, so the block carries `truncated` and the
+  visual shows "first N rows" in its corner. The grand-total row is computed by the database over
+  the full query (ADR-010), so it stays correct even when the detail is cut.
+- **Not confirmed as the cause of that report's matrix.** The likelier explanation is the
+  `_sql_col` bug above: that matrix has `ELT-1` in its Rows well, so a yaml written before the fix
+  asks Teradata for `elt_1` and the visual errors. `tools/why_visual.py --yaml` says which.
+
+## `convert` re-drafts a stale query by itself, 2026-10-02
+
+The recurring failure of this project in one sentence: `convert` runs the SQL saved in the yaml, so
+a fix to the drafter never reaches a report whose yaml predates it. The 100 %-stacked column, the
+hyphenated hierarchy columns and the `IN (NULL)` regression all had the same second act — the code
+was right and the HTML was still wrong, until someone remembered `redraft`.
+
+- [x] `convert` now checks whether any of **its own** drafts are out of date and refreshes only
+  those (`semantic.refresh_drafts`, built on `autofill(redraft=True)`). It compares the saved SQL
+  against what the drafter produces today; SQL a person wrote is never compared or replaced, and a
+  visual the drafter can no longer draft keeps what it has. Nothing is written when everything
+  already matches, so a converged report pays only a few milliseconds of pure Python.
+- When something *has* changed it says so, backs the yaml up and saves, so `validate` and the panel
+  see the same SQL the HTML was rendered from. If the save fails the run still uses the refreshed
+  SQL and says so. `--no-redraft` pins the yaml exactly as it is.
+- `semantic.spec_from_raw` was split out of `load` so the refreshed drafts can become a spec
+  without a disk round-trip.
+- Verified on the real `TestReport9`: 59 auto-drafted visuals, one tampered back to its pre-fix
+  column name, and `convert` reported exactly that one, re-drafted it, wrote a backup, and found
+  nothing to do on the second run.
+
+## The leader hierarchy slicer filtered nothing, 2026-10-02
+
+Reported as "the leader filter isn't working". It is a five-level hierarchy slicer, and every link
+in the chain looked right: five parameters, a widget with five levels, an options query, and the
+predicates present in each visual's SQL. The names in that SQL were the problem.
+
+- [x] **A column name is not ours to invent.** `_sql_col` ran every name through `_ident`, which
+  rewrites each non-word character to `_`. The hierarchy's levels are spelled `ELT-1`, `ELT-2`,
+  `ELT-3`, and the mapped source exposes them quoted, exactly so. The drafter asked Teradata for
+  `elt_1` — a column that does not exist — so the options query returned nothing and every
+  predicate using it failed. `ELT-1` and `ELT 1` also collapsed onto the same name. A name that is
+  not already a plain identifier is now quoted **verbatim**, as the model spells it; a plain one is
+  still emitted bare and lower-case, so no existing report's SQL changes.
+- A *table alias* may still be rewritten (`_sql_alias`): we invent those, and an alias cannot be
+  quoted only where it is defined. The distinction is the whole point.
+- Exactly three columns in that model were affected, and all three are the levels of the slicer in
+  question. Worth re-running `redraft` on any report with a hyphen or a space in a column name.
+
 ## Viewer chrome: framed canvas, grey surround, one control row, 2026-10-02
 
 - [x] The canvas now reads as paper on a desk: `body` is `#E2E2E2`, `.page` keeps the theme's own

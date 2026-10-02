@@ -56,6 +56,15 @@ Relationships: `model.json → relationships` gives `FromTable/FromColumn/ToTabl
 and the filter direction. A visual that shows `Region.Name` alongside `Sales.Margin`
 implies `JOIN region r ON r.id = v.region_id` per that relationship.
 
+## Column names vs table aliases
+
+A **table alias** is ours to invent, so `_sql_alias` may rewrite it (and a reserved word gets a
+`_t` suffix, because an alias cannot be quoted only where it is defined). A **column name is
+not**: it has to match what the mapped source query exposes. `_sql_col` therefore quotes any name
+that is not a plain identifier *verbatim* — `ELT-1` becomes `"ELT-1"`, not `elt_1`. Rewriting it
+asks Teradata for a column that does not exist, which is how a five-level hierarchy slicer came to
+filter nothing at all (2026-10-02). Plain identifiers are still emitted bare and lower-case.
+
 ## Slicers → parameters
 
 Each slicer in the layout becomes a yaml parameter (`parameters:`), and every SQL that
