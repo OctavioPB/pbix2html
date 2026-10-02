@@ -116,7 +116,8 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
       synthetic `value`. Still left manual: mixing a composite total with a plain single-table
       measure in the same table, and two category fields that are only related to each other
       *through* a fact table (not directly) — see skill `dax-to-teradata-sql`.
-- [ ] DAX with `VAR`/`EOMONTH`/time intelligence (`Projected Monthly Avg Spend`) stays manual.
+- [x] DAX with `VAR` + `EOMONTH` now translates (2026-10-02, see the `TestReport9` review);
+      genuine time intelligence (TOTALYTD/SAMEPERIODLASTYEAR) still stays manual.
 - [ ] Two hidden pages are reachable from no button (drill-through? a bookmark?): listed nowhere yet.
 - [x] PBIR bookmarks (2026-09-30): `extract._parse_bookmarks_pbir` reads
       `Report/definition/bookmarks/*.bookmark.json` into the same shape `parse_bookmarks`
@@ -407,6 +408,110 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## Viewer chrome: framed canvas, grey surround, one control row, 2026-10-02
+
+- [x] The canvas now reads as paper on a desk: `body` is `#E2E2E2`, `.page` keeps the theme's own
+  background and gains a 2px black **outline** plus a soft shadow. An `outline`, not a `border` —
+  visuals are positioned in percentages of the content box, so a border takes 4px out of it and
+  shifts every visual. Caught by a card test the moment the border went in.
+- [x] The report's own parameters (the ones no slicer drives) moved out of their own row and into
+  the header beside View / Labels / Tabs. The header wraps on a narrow window instead of pushing
+  the page sideways (verified at 1600 and 820 px), and `chromeHeight()` skips `.params` while it
+  is nested in the header — otherwise Fit page counted that height twice.
+- Two pre-existing bugs surfaced while making the above pass, both worth more than the change:
+  **`.card .value` had `line-height: 1.1`**, tighter than the glyphs need, so the line box clipped
+  descenders and `scrollHeight` always exceeded `clientHeight`; it only looked fine because the
+  font was small enough for the test's 1px tolerance. Now 1.2. And **padding inside visuals never
+  scaled** — a card kept 8px of padding in a 55px box at 50 % zoom, so text overflowed and was
+  shrunk, breaking the proportionality the 2026-10-01 work established. Card, title, subtitle,
+  multicard, table cells, shape text and text boxes now scale their padding with `--scale` too.
+- A false start worth recording: making `fitText` shrink on *height* as well as width looked like
+  the fix, and it is wrong — in a flex column a child's `clientHeight` shrinks because of its
+  siblings, not because the text overflows, so it fired on cards that were perfectly fine.
+
+## Full mapping review of `TestReport9`, 2026-10-02
+
+Beyond the three features below, a pass over every visual. 11 pages, 65 data visuals, **55 → 59
+drafted**. Table, column and page names here are illustrative, not the report's real schema.
+
+- [x] **A pie/donut whose slices are several measures and no category field** — Values holds three
+  related count columns, Legend is empty, and Power BI draws one slice *per measure* labelled with
+  the measure's own name. The several-measures arms path refused every pie outright, so both
+  copies of the visual stayed manual (`shape`). Now one arm per measure with the label in
+  `category` (a pie reads `category`/`value`, never `series`) and no GROUP BY — each arm is one
+  row. A pie that *does* have a category plus several measures still stays manual, and a lone
+  measure with no category is still a card.
+- **Two of my own survey mistakes, worth more than the findings.** First run reported
+  `no_source:<calendar>` for a DAX `CALENDAR()` table that `detect_calendar_tables` rebuilds
+  perfectly — because the survey built its table map from Power Query only, exactly the bug I had
+  already fixed in `tools/why_visual.py` a day earlier. Second, a page-navigation button with an
+  **empty** target looked like a bug until I checked: those are the "you are here" buttons on the
+  page they point at, and rendering them inert is right. Build the table map the way
+  `sync_table_map` does, and check before fixing.
+- **Not bugs, correctly diagnosed**: the 6 remaining visuals all reference a table the model does
+  not contain — two cards point at a measure on a table that was deleted, and four sit on an
+  abandoned hidden page whose name is literally prefixed "DEP". `unknown_table:` is the right
+  answer, as it was on `TestReport6`.
+- **A "current vs historic" toggle is built as duplicate hidden pages**, not as bookmarks: each
+  visible page has a hidden twin, and a pair of buttons navigates between them. All 6 navigation
+  targets resolve, and the existing "hidden page reachable by a button" rule already renders the
+  twins. Worth knowing because the *bookmarks* on those pages were authored on the hidden twin and
+  reused on the visible one — `_bookmark_action` matches them across pages by group name, which is
+  what makes the view switchers work on both copies.
+- **Two date tables on one fact column**, both with active relationships: a DAX `CALENDAR()` table
+  (rebuilt on `sys_calendar.calendar`) and a real database date table. Nothing broke, but the
+  calendar relationship proposal should not be assumed to be the only date join on a model.
+- Filters are in good shape: 36 across report/page/visual, exactly **one** not applied — a
+  `DateSpan` comparison, on the abandoned page. Slicers: `list`/`dropdown`/`between`, no hierarchy
+  levels, no custom visuals anywhere.
+- [x] **Report-page tooltips** (ADR-011): 20 visuals bind to one of three small tooltip pages
+  (`visualContainerObjects.visualTooltip.section`; a page declares itself with `type: "Tooltip"`,
+  and `___AUTO___` means Power BI's own built-in tooltip, not a page). The binding and
+  `page.is_tooltip` are now extracted, and `pbix2html mapping` has a **Report-page tooltips**
+  section naming every visual that depends on one. **Deliberately not drawn**: those pages carry
+  data — three cards summing tokens and cost, a table by product — and Power BI filters them by
+  the point under the cursor. Drawing one unfiltered would put the report's own totals where a
+  reader expects that bar's number, on every bar. Honest gap over a confident wrong answer. What
+  it would take, and why `live` can do it while `snapshot` essentially cannot, is in ADR-011.
+
+## Three features from `TestReport9`, 2026-10-02
+
+A report shared specifically because the suite could not handle three things. All three are now
+done, and each turned out to be a smaller fix than the feature name suggests — because the `.pbix`
+was read first instead of reasoned about.
+
+- [x] **Show/hide visuals from bookmark buttons.** Not a missing feature: ADR-005's *group
+  visibility* model was already right, and the PBIR parser was reading the wrong key. It looked
+  for a per-visual `visualContainers[*].singleVisual.display.mode` — a guess made when no real
+  PBIR file with bookmarks existed, and its docstring said so. A real one carries the same
+  `visualContainerGroups[*].isHidden` the classic format uses, and sets `display` on nothing at
+  all, so `groups` came back `{}` and all 28 switcher buttons were inert. One-line fix; the
+  bookmarks now resolve 6 of their 7 groups to real containers ('Org map', 'Lvl 1/2/3 map',
+  'Spend by Model', 'Spend by Prod') and clicking swaps the view, verified in Chromium.
+- [x] **Shadows** (`dropShadow`), including the part that matters: **the shadow comes from the
+  theme**, not from the visuals. Every one of this report's 162 visuals that mentions a shadow
+  sets `show: false`; the theme sets one for `*`/`*` and individual visuals opt *out*. So
+  `container_style` records `False` for an explicit opt-out — distinct from saying nothing — and
+  `apply_theme_shadow` fills only the silent ones, which is why 22 cards stay flat while 12 cards
+  and all 12 charts get the shadow. Two vocabularies describe it: a theme says `preset`/`position`,
+  a customised visual says `angle`/`distance`/`blur`/`spread`; both reduce to CSS box-shadow
+  (`angle` 45 is down-right, as in CSS). Offsets are multiplied by `--scale` like every other size.
+  **Approximation worth knowing**: a `preset` has no distance of its own, so the file's own
+  defaults (distance 10, blur 10, spread 3) are used — direction, colour and subtlety are right,
+  the exact geometry of a preset is not verified against Power BI.
+- [x] **Complex DAX** — a projected-monthly-average measure, the shape of every projection measure:
+  `VAR` lines holding aggregates, then arithmetic over them. Two blockers, both narrow: a `VAR`
+  was parsed as a *scalar* only (so `VAR x = DIVIDE(SUM(…), DISTINCTCOUNT(…))` was refused), and
+  the value grammar could not resolve a variable at all, so `RETURN x * y` died on "bare
+  identifier". A variable is still read as a scalar **first**, which is what keeps `MIN/MAX(T[c])`
+  meaning "over the current selection" (ADR-007, `{CTX:…}`) rather than a plain aggregate; the
+  value reading is a fallback, and the parser state — tables included — is rewound before the
+  retry so a half-parsed scalar cannot drag a table into the join. Plus `EOMONTH(d, n)` →
+  `LAST_DAY(ADD_MONTHS(d, n))`. All four cards using that measure now draft.
+- Worth repeating as method: every one of these was found by reading the real file with
+  `tools/why_visual.py` and a few lines of zip-and-print, not by inference. The bookmark guess had
+  been sitting in the code for weeks with a docstring admitting it was a guess.
+
 ## Everything inside the canvas now scales with it, 2026-10-01
 
 A user asked why a scorecard's callout number stops being legible after resizing. Measured before
@@ -438,6 +543,18 @@ changing anything, on a card with no explicit size in the report:
   edge does not call `setOption` on every chart on every resize event.
 - **Page chrome deliberately does not scale** — the header, tabs and parameter bar belong to the
   viewer's browser, not to the report.
+- [x] **Audited rather than assumed.** Asked "are you sure *all* visuals follow the resizing?", the
+  answer was no: five more things were still pinned at their design size — a **gauge's callout**
+  (ECharts' `detail` has no `fontSize` of its own, so there was nothing to multiply; spelled out as
+  its own default, 30), a failed visual's **error** text, the **loading** text, the
+  `dynamicTooltip` **info icon** (box and glyph), and the whole **slicer widget** (`--sl-fs`). All
+  fixed. One page carrying every renderer kind is now rendered at 100 % and 150 % and *every* text
+  node plus every ECharts font is required to grow by the same factor
+  (`test_every_renderer_kind_scales_its_text_with_the_page`, 34 elements across 14 kinds). The test
+  also fails if it stops reaching at least 25 elements, so adding a renderer without covering it
+  is caught.
+- Known and deliberate: a slicer's **pop-up panel** is `position: fixed` on `<body>`, outside any
+  page, so `--scale` cannot reach it — it stays at browser size, like a native dropdown.
 - Two bugs the Python suite could not see, both caught by a browser smoke test: the `hah` template
   threw `Cannot access 'labelSel' before initialization` (its script defines `chart()` far later,
   so the helpers had to move above the canvas block), and lifting a block between templates

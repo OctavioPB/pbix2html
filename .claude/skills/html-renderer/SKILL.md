@@ -18,6 +18,16 @@ Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-
 visuals are absolutely positioned in **percentages** (`left = x/width*100`), which
 preserves the original layout and scales with width.
 
+**The canvas is framed, the surround is not the report.** `body` is `#E2E2E2` and `.page` carries
+`background: var(--bg)`, a 2px black **outline** and a soft shadow, so the report reads as paper on
+a desk. It must stay an `outline`, never a `border`: visuals are positioned in percentages of the
+content box, and a border would take 4px out of it and shift every one of them.
+
+**All the chrome controls share the header** — View, Labels, Tabs and the report's own parameters
+(the ones no slicer drives). The header wraps rather than overflowing. `chromeHeight()` must skip
+`.params` while it is inside the header, or Fit page counts that height twice and shrinks the
+canvas for space nothing is using.
+
 **How big the canvas is on screen is the viewer's choice** (2026-09-30). A fixed-proportion
 canvas plus `width: 100%` can only fit the *width*, so a wide-but-short monitor cut the bottom
 off and a narrow one squeezed everything. The header carries a `View` control — Fit page (the
@@ -37,6 +47,14 @@ move. `Left` makes the body `row wrap` and the strip an 11rem rail beside `<main
 attribute is `data-tabs`, **not** `data-nav` (that already means "this button navigates to page X"
 on a visual), and a left rail costs width rather than height, so `chromeHeight()` must not count
 it — otherwise Fit page reserves vertical space nothing is using.
+
+**Drop shadows** (`style.shadow` → `render._shadow_css` → `box-shadow`) usually come from the
+**theme**, not the visual: a real report sets one for `*`/`*` in `visualStyles` and individual
+visuals opt out. So `container_style` records `False` for an explicit opt-out, which is different
+from saying nothing, and `apply_theme_shadow` fills only the silent ones — re-applying the theme
+over an opt-out would put shadows back on every visual that removed one. A theme describes the
+shadow as `preset`/`position`, a customised visual as `angle`/`distance`/`blur`/`spread`; both
+reduce to CSS terms, with angle 45 meaning down-right as in CSS. Offsets scale with `--scale`.
 
 **Data labels** have a `Labels` control (As report / Show / Hide). The option a chart was built
 from is kept in `chartOptions[id]` and only `series[].label.show` is flipped, so toggling costs no
@@ -103,7 +121,7 @@ value.
 | multicard | `label`, `value` | |
 | bar / column / line | `category`, `value` | `series` (one row per category×series) |
 | combo | `category`, `value`, `series` | `axis` per series in the yaml |
-| pie | `category`, `value` | |
+| pie | `category`, `value` | several measures and no category → one slice per measure, the measure's name as `category` |
 | table / matrix | free-form | order = order of columns in the SELECT |
 | gauge | `value` | `min`, `max`, `target` |
 

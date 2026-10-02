@@ -123,3 +123,14 @@ Because each `HST` page is the same layout over a different source, the two page
 every visual in the yaml. Once the source difference is understood, a `period: current|historic`
 parameter (or a per-page `source` override) could let one set of SQL serve both; deliberately
 not done here — it changes how the yaml is written, so it needs its own ADR after the pilot.
+
+## PBIR group visibility, confirmed on a real file (2026-10-02)
+
+PBIR stores a bookmark's group visibility in `explorationState.sections[*].visualContainerGroups[*]
+.isHidden` — the *same* key the classic format uses. `_parse_bookmarks_pbir` originally read a
+per-visual `visualContainers[*].singleVisual.display.mode` instead, by analogy, because no real
+PBIR file with bookmarks had been seen; the docstring flagged that analogy as the unchecked part.
+It was wrong: a real file (`TestReport9`) sets `display` on no container at all, so `groups` came
+back empty and every view-switcher button did nothing. Both are now read, the group's own state
+winning. The per-visual form is kept only as a fallback for a file that does use it.
+

@@ -500,7 +500,7 @@ def test_text_inside_the_canvas_scales_with_the_page_but_the_chrome_does_not(mod
     html = _label_report(mode=mode)
     # a Power BI size is absolute at the design width, so every size inside the page is a
     # multiple of --scale; the fixed clamp ceilings used to stop a callout growing on a big screen
-    for rule in (".card .value { font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin,",
+    for rule in (".card .value { flex: none; font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin,",
                  ".visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin,",
                  "table { border-collapse: collapse; width: 100%; font-size: calc(.8rem * var(--scale, 1)); }"):
         assert rule in html, rule
@@ -563,3 +563,177 @@ def test_a_callout_keeps_its_proportion_at_every_zoom_and_chart_text_follows():
     assert not any(r["clipped"] for r in seen.values()), seen
     # chart text follows the page: bigger at 150 % than at 50 %, and never below the 6px floor
     assert seen["1.5"]["axis"] > seen["1"]["axis"] > seen["0.5"]["axis"] >= 6, seen
+
+
+_ALL_KINDS = [("card", "card"), ("kpi", "kpi"), ("multicard", "multiRowCard"),
+              ("table", "tableEx"), ("matrix", "matrix"), ("column", "columnChart"),
+              ("bar", "clusteredBarChart"), ("line", "lineChart"), ("pie", "pieChart"),
+              ("gauge", "gauge"), ("text", "textbox"), ("slicer", "slicer"),
+              ("tooltip", "dynamicTooltip"), ("static", "shape")]
+
+
+def _every_kind_report():
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    vis, specs, data = [], {}, {}
+    for i, (kind, vtype) in enumerate(_ALL_KINDS):
+        vid = f"x{i}"
+        vis.append({"id": vid, "type": vtype, "hidden": False, "is_group": False,
+                    "parent_group": None, "groups": [], "x": 20 + (i % 5) * 250,
+                    "y": 20 + (i // 5) * 220, "width": 230, "height": 200, "z": 1,
+                    "title": f"{kind} title", "style": {"labels": True}, "sort": None,
+                    "cond_formats": [], "n_fields": None, "col_align": [], "y_fields": [],
+                    "action": None,
+                    "text": "<p style='font-size:11pt'>a text box</p>" if kind == "text" else None,
+                    "fields": ["D.n"] if kind == "slicer" else [],
+                    "slicer": {"mode": "list", "fields": ["D.n"], "single": False,
+                               "select_all": True, "initial": {}, "style": {}} if kind == "slicer" else None,
+                    "texts": {"shape_text": "shape label"} if kind == "static" else {},
+                    "tooltip": "info" if kind == "tooltip" else None})
+        specs[vid] = VisualSpec(id=vid, kind=kind, title=None, sql="s")
+        data[vid] = ({"columns": ["value", "target", "min", "max"], "rows": [[70, 80, 0, 100]]}
+                     if kind in ("kpi", "gauge")
+                     else {"columns": ["label", "value"], "rows": [["a", 1], ["b", 2]]} if kind == "multicard"
+                     else {"columns": ["category", "value"], "rows": [["a", 1], ["b", 2], ["c", 3]]}
+                     if kind in ("column", "bar", "line", "pie")
+                     else {"columns": ["c1", "c2"], "rows": [["x", 1], ["y", 2]]} if kind in ("table", "matrix")
+                     else {"columns": ["value"], "rows": [[1234]]})
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02", "#0B2036"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": vis}]}
+    params = {"n": {"type": "string", "from_slicer": "D.n", "label": "n", "dtype": "text",
+                    "multi": True, "pages": ["P"], "default": None}}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters=params,
+                      roles={}, visuals=specs, raw={"slicers": {"x11": {}}})
+    return render_html(layout, spec, {}, data, mode="snapshot",
+                       slicer_data={"x11": {"columns": ["level1"], "rows": [["North"], ["South"]]}})
+
+
+def test_every_renderer_kind_scales_its_text_with_the_page():
+    """The claim "everything resizes" is only worth making if it is measured. One page carrying
+    every renderer kind is rendered at 100 % and at 150 %, and *every* piece of text in every
+    visual — DOM and inside the ECharts canvas — must grow by the same factor. Written after an
+    audit found the gauge's callout, a failed visual's error text, the loading text, the
+    dynamicTooltip icon and the slicer widget all pinned at their design size."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    f = Path(tempfile.mkdtemp()) / "r.html"
+    f.write_text(_every_kind_report(), encoding="utf-8")
+    probe = """() => { const out = {};
+      document.querySelectorAll('.visual').forEach(v => {
+        const got = {};
+        v.querySelectorAll('*').forEach(n => {
+          if (!n.children.length && (n.textContent || '').trim()) {
+            const cls = (typeof n.className === 'string' && n.className) ? n.className.split(' ')[0]
+                                                                        : n.tagName.toLowerCase();
+            got[cls] = parseFloat(getComputedStyle(n).fontSize); }});
+        const host = v.querySelector('.chart');
+        const inst = host && window.echarts ? echarts.getInstanceByDom(host) : null;
+        if (inst) { const o = inst.getOption(); const s = (o.series || [])[0] || {};
+          if (s.label && s.label.fontSize) got['~dataLabel'] = s.label.fontSize;
+          if (s.detail && s.detail.fontSize) got['~gaugeValue'] = s.detail.fontSize;
+          if (o.xAxis && o.xAxis[0] && o.xAxis[0].axisLabel && o.xAxis[0].axisLabel.fontSize)
+            got['~axis'] = o.xAxis[0].axisLabel.fontSize; }
+        out[v.dataset.kind + ':' + v.dataset.visual] = got; });
+      return out; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        pg = br.new_page(viewport={"width": 2000, "height": 1100})
+        pg.goto(f.as_uri())
+        pg.wait_for_timeout(2500)
+        pg.select_option("#view-mode", "1")
+        pg.wait_for_timeout(700)
+        at100 = pg.evaluate(probe)
+        pg.select_option("#view-mode", "1.5")
+        pg.wait_for_timeout(900)
+        at150 = pg.evaluate(probe)
+        br.close()
+    measured, pinned = 0, []
+    for key, elements in at100.items():
+        for el, small in elements.items():
+            big = (at150.get(key) or {}).get(el)
+            if not small or not big:
+                continue
+            measured += 1
+            if big / small <= 1.3:                      # 1.5x, with room for integer rounding
+                pinned.append(f"{key}/{el}: {small} -> {big}")
+    assert measured >= 25, f"the audit only reached {measured} elements; it has stopped covering the page"
+    assert not pinned, "text pinned at its design size:\n  " + "\n  ".join(pinned)
+
+
+@pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
+def test_the_canvas_is_framed_on_a_grey_surround_and_parameters_live_in_the_header(mode):
+    html = _label_report(mode=mode)
+    assert "html, body { margin: 0; background: #E2E2E2;" in html
+    # the frame is an outline, never a border: a border would eat 4px of the content box and
+    # shift every visual, because positions are percentages of it
+    assert "outline: 2px solid #000;" in html and "box-shadow: 0 6px 24px rgba(0, 0, 0, .18);" in html
+    assert "background: var(--bg); outline:" in html       # the canvas still looks like paper
+    assert "if (s === '.params' && el.closest('header')) return h;" in html   # not counted twice
+    # the parameter controls sit with View/Labels/Tabs instead of taking a row of their own
+    from pbix2html.semantic import ReportSpec
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": []}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="",
+                      parameters={"RunningMonth": {"type": "string", "label": "RunningMonth",
+                                                   "dtype": "text", "multi": False, "default": None}},
+                      roles={}, visuals={}, raw={})
+    with_param = render_html(layout, spec, {}, None, mode=mode, hah_base="https://h.example")
+    head = with_param.split("</header>")[0]
+    assert '<div class="params">' in head, "the parameter bar is not inside the header"
+    assert "RunningMonth" in head
+
+
+def test_a_header_full_of_controls_wraps_instead_of_overflowing():
+    """View, Labels, Tabs and one row of report parameters all share the header now, so it has to
+    wrap on a narrow window rather than push the page sideways — and Fit page has to notice that
+    the chrome got taller."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path
+    from pbix2html.semantic import ReportSpec, VisualSpec
+    card = {"id": "c1", "type": "card", "hidden": False, "is_group": False, "parent_group": None,
+            "groups": [], "x": 40, "y": 40, "width": 220, "height": 110, "z": 1, "title": "Spend",
+            "style": {}, "sort": None, "cond_formats": [], "n_fields": None, "col_align": [],
+            "y_fields": [], "action": None}
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "A", "width": 1280, "height": 720, "visuals": [card]},
+                        {"display_name": "B", "width": 1280, "height": 720, "visuals": [card]}]}
+    params = {f"Param{i}": {"type": "string", "label": f"Parameter {i}", "dtype": "text",
+                            "multi": False, "default": None} for i in range(3)}
+    spec = ReportSpec(report="A Long Report Name Here", source=None, connection="", delivery="",
+                      parameters=params, roles={},
+                      visuals={"c1": VisualSpec(id="c1", kind="card", title=None, sql="s")}, raw={})
+    f = Path(tempfile.mkdtemp()) / "r.html"
+    f.write_text(render_html(layout, spec, {}, {"c1": {"columns": ["value"], "rows": [[12]]}},
+                             mode="snapshot"), encoding="utf-8")
+    probe = """() => { const h = document.querySelector('header');
+        const p = document.querySelector('.page').getBoundingClientRect();
+        return {headerH: h.offsetHeight,
+                overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
+                fits: p.bottom <= window.innerHeight + 1}; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        seen = {}
+        for w in (1600, 820):
+            pg = br.new_page(viewport={"width": w, "height": 760})
+            pg.goto(f.as_uri())
+            pg.wait_for_timeout(800)
+            seen[w] = pg.evaluate(probe)
+            pg.close()
+        br.close()
+    for w, r in seen.items():
+        assert not r["overflowX"], f"the header pushed the page sideways at {w}px"
+        assert r["fits"], f"the canvas did not fit at {w}px"
+    assert seen[820]["headerH"] > seen[1600]["headerH"], "the header should wrap when it runs out of room"

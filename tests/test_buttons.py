@@ -69,3 +69,44 @@ def test_button_renders_with_state_rules_in_both_templates(fake_pbix):
     for mode in ("live", "hah"):
         html = render_html(layout2, spec, {"year": 2025}, None, mode=mode, hah_base="https://hah.example")
         assert "--bg0:#FFFFFF;--ol:none;--bg-h:#FF5F02" in html and " btn" in html, mode
+
+
+def _pbir_bookmark_zip(tmp_path, state):
+    """A minimal PBIR bookmark folder, as a .pbix-shaped zip."""
+    import json
+    import zipfile
+    path = tmp_path / "b.pbix"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Report/definition/bookmarks/bookmarks.json",
+                   json.dumps({"items": [{"name": "bm1"}]}))
+        z.writestr("Report/definition/bookmarks/bm1.bookmark.json", json.dumps({
+            "displayName": "By Org", "name": "bm1",
+            "options": {"applyOnlyToTargetVisuals": True, "targetVisualNames": ["g1", "g2"]},
+            "explorationState": {"activeSection": "sec1", "sections": {"sec1": state}}}))
+    return path
+
+
+def test_a_pbir_bookmark_reads_group_visibility_where_a_real_file_puts_it(tmp_path):
+    """PBIR carries a group's visibility in `visualContainerGroups[*].isHidden`, exactly as the
+    classic format does. The parser was written before any real PBIR file with bookmarks existed
+    and guessed the per-visual `display.mode` instead; a real one (TestReport9) has no `display`
+    on any container, so `groups` came back empty and every view-switcher button was inert."""
+    import zipfile
+    from pbix2html.extract import _parse_bookmarks_pbir
+    state = {"visualContainerGroups": {"g1": {"isHidden": False}, "g2": {"isHidden": True}},
+             "visualContainers": {"v1": {"singleVisual": {"visualType": "card", "objects": {}}}}}
+    path = _pbir_bookmark_zip(tmp_path, state)
+    with zipfile.ZipFile(path) as z:
+        got = _parse_bookmarks_pbir(z, z.namelist())
+    assert len(got) == 1
+    assert got[0]["groups"] == {"g1": False, "g2": True}
+    assert got[0]["name"] == "By Org" and got[0]["apply_only_to_targets"] is True
+    assert got[0]["targets"] == ["g1", "g2"]
+    # a file that *does* use the per-visual form is still honoured, and never overrides a group
+    state2 = {"visualContainerGroups": {"g1": {"isHidden": True}},
+              "visualContainers": {"g1": {"singleVisual": {"display": {"mode": "visible"}}},
+                                   "v9": {"singleVisual": {"display": {"mode": "hidden"}}}}}
+    path2 = _pbir_bookmark_zip(tmp_path / "b2", state2) if (tmp_path / "b2").mkdir() is None else None
+    with zipfile.ZipFile(path2) as z:
+        got2 = _parse_bookmarks_pbir(z, z.namelist())
+    assert got2[0]["groups"] == {"g1": True, "v9": True}, "the group's own state must win"
