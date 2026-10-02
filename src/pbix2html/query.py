@@ -135,11 +135,20 @@ class TeradataBackend:
                 # quoted it, hand-written SQL and the template still say it
                 cur.execute(fix_teradata_sql(sql), values)
                 columns = [d[0].lower() for d in cur.description]
-                rows = [[_jsonable(c) for c in r] for r in cur.fetchall()]
+                # One row becomes one <tr>, so a matrix grouped by several dimensions can return
+                # far more than a browser will draw and the visual simply never appears. Fetch one
+                # row past the limit purely to know whether there were more, and say so.
+                limit = max(0, int(settings.max_rows or 0))
+                raw = cur.fetchmany(limit + 1) if limit else cur.fetchall()
+                truncated = bool(limit) and len(raw) > limit
+                rows = [[_jsonable(c) for c in r] for r in (raw[:limit] if truncated else raw)]
                 if proxy:
                     cur.execute("SET QUERY_BAND = NONE FOR SESSION;")
             healthy = True
-            return {"columns": columns, "rows": rows}
+            block: DataBlock = {"columns": columns, "rows": rows}
+            if truncated:
+                block["truncated"] = limit
+            return block
         finally:
             self._checkin(con, healthy)
 

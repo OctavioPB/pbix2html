@@ -1266,11 +1266,26 @@ def _ident(name: str) -> str:
     return alias or "t"
 
 
+_PLAIN_IDENT = re.compile(r"[A-Za-z_]\w*$")
+
+
 def _sql_col(name: str) -> str:
-    """A Power BI column name as a Teradata identifier (see `_sql_alias`), quoted when it is
-    a reserved word."""
-    alias = _ident(name)
-    return f'"{alias}"' if alias in _TERADATA_RESERVED else alias
+    """A Power BI column name as a Teradata identifier, quoted when it is a reserved word *or*
+    when it is not a plain identifier.
+
+    A table alias is ours to invent, so `_sql_alias` may rewrite it. A **column name is not**: it
+    has to match what the mapped source query exposes. Running it through `_ident` rewrote every
+    non-word character to `_`, so a real hierarchy slicer over `ELT-1`/`ELT-2`/`ELT-3` asked
+    Teradata for `elt_1` while the source exposed `"ELT-1"` — the column does not exist, so the
+    whole filter failed. Worse, `ELT-1` and `ELT 1` both collapsed onto `elt_1`. A name that is
+    already a plain identifier is still emitted bare and lower-case, so nothing else changes."""
+    text = (name or "").strip()
+    if not text:
+        return "t"
+    if _PLAIN_IDENT.match(text):
+        alias = text.lower()
+        return f'"{alias}"' if alias in _TERADATA_RESERVED else alias
+    return '"' + text.replace('"', '""') + '"'      # exactly as the model spells it
 
 
 def _subquery(sql: str, alias: str) -> str:
@@ -3925,8 +3940,12 @@ def save_raw(report: str, raw: dict) -> Path:
 
 
 def load(report: str) -> ReportSpec:
-    path = yaml_path(report)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return spec_from_raw(yaml.safe_load(yaml_path(report).read_text(encoding="utf-8")))
+
+
+def spec_from_raw(raw: dict) -> ReportSpec:
+    """A yaml document as a `ReportSpec`, without reading the file — so a caller that has just
+    refreshed the drafts in memory can build a spec from them (see `refresh_drafts`)."""
     visuals = {}
     for vid, v in (raw.get("visuals") or {}).items():
         v = v or {}  # a visual written as "v3:" with nothing under it parses as None
@@ -3941,6 +3960,26 @@ def load(report: str) -> ReportSpec:
         delivery=raw.get("delivery", "snapshot"), parameters=raw.get("parameters") or {},
         roles=raw.get("roles") or {}, visuals=visuals, raw=raw,
     )
+
+
+def refresh_drafts(raw: dict, layout: dict, model: dict,
+                   table_map: dict[str, str] | None = None) -> tuple[dict, list[str]]:
+    """Re-draft the queries this tool wrote itself, and report which ones actually changed.
+
+    The yaml holds the SQL `convert` runs, so a fix to the drafter cannot reach a report whose
+    yaml predates it — that is how a corrected query kept rendering the old, wrong HTML until
+    someone remembered to run `redraft`. This answers "is any saved draft now out of date?" so
+    the caller can refresh only when it genuinely is.
+
+    Only the tool's own drafts are considered (`notes` containing the autofill note), exactly as
+    `redraft` does: SQL a person wrote is never compared or replaced. A visual the drafter can no
+    longer draft keeps what it has. Returns (updated raw, ids whose `sql` text changed)."""
+    before = {vid: (entry or {}).get("sql") for vid, entry in (raw.get("visuals") or {}).items()}
+    outcome = autofill(raw, layout, model, table_map, redraft=True)
+    updated = outcome["raw"]
+    changed = [vid for vid, entry in (updated.get("visuals") or {}).items()
+               if (entry or {}).get("sql") != before.get(vid)]
+    return updated, sorted(changed)
 
 
 def multi_values(val: Any) -> list:

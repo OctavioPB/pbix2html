@@ -18,6 +18,13 @@ Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-
 visuals are absolutely positioned in **percentages** (`left = x/width*100`), which
 preserves the original layout and scales with width.
 
+**The chrome has its own palette, deliberately.** The top bar is white with its own text
+colours, and the page tabs use fixed greys — none of it reads `var(--fg)`/`var(--muted)`, because a
+dark report theme would paint near-white text onto a white bar. Only the *accent* comes from the
+report (`var(--accent)`, the theme's first data colour). Page tabs read like a report app's: the
+active page is a raised white tab with the accent on whichever edge the strip is docked against
+(top / bottom / left, matching `data-tabs`), the rest sit flat on the grey with a hover state.
+
 **The canvas is framed, the surround is not the report.** `body` is `#E2E2E2` and `.page` carries
 `background: var(--bg)`, a 2px black **outline** and a soft shadow, so the report reads as paper on
 a desk. It must stay an `outline`, never a `border`: visuals are positioned in percentages of the

@@ -393,3 +393,30 @@ def test_a_slicer_with_no_widget_still_draws_nothing():
          "slicer": {"mode": "list", "fields": ["Other.col"], "single": False,
                     "select_all": True, "initial": {}, "style": {}}}
     assert _slicer_entry(v, "P", spec, False) is None
+
+
+def test_a_column_name_that_is_not_a_plain_identifier_is_quoted_not_rewritten():
+    """Found on a real 5-level "leader" hierarchy slicer over `ELT`, `ELT-1`, `ELT-2`, `ELT-3`.
+
+    A table *alias* is ours to invent, so it may be rewritten. A **column name is not**: it has to
+    match what the mapped source query exposes. Every non-word character used to become `_`, so the
+    drafter asked Teradata for `elt_1` while the source exposed `"ELT-1"` — the column does not
+    exist, so the options query and every predicate using it failed and the slicer did nothing.
+    `ELT-1` and `ELT 1` also collapsed onto the same name."""
+    assert semantic._sql_col("ELT-1") == '"ELT-1"'
+    assert semantic._sql_col("ELT 1") == '"ELT 1"'
+    assert semantic._sql_col("ELT-1") != semantic._sql_col("ELT 1")      # no longer collide
+    assert semantic._sql_col('a"b') == '"a""b"'                          # the quote is escaped
+    # a plain identifier is still emitted bare and lower-case: no churn for any existing report
+    assert semantic._sql_col("ELT") == "elt" and semantic._sql_col("preferred_name") == "preferred_name"
+    assert semantic._sql_col("date") == '"date"'                         # reserved words still quoted
+    # end to end: the predicate names the column the source actually has
+    v = {"type": "slicer", "fields": ["H.ELT-1"],
+         "slicer": {"mode": "list", "fields": ["H.ELT-1"], "single": False, "select_all": True,
+                    "initial": {}, "style": {}}}
+    layout = {"pages": [{"display_name": "P", "visuals": [v]}]}
+    params = semantic._slicer_parameters(layout, {"columns": []})
+    where, _ = semantic._draft_where(params, {"H": "h"}, {"H": 'SELECT x AS "ELT-1" FROM db.h'}, [], None)
+    assert any('h."ELT-1" IN (' in w for w in where), where
+    opts = semantic._slicer_options_sql(v, {"H": 'SELECT x AS "ELT-1" FROM db.h'}, {})
+    assert 'h."ELT-1" AS level1' in opts

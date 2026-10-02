@@ -23,22 +23,35 @@
   body { display: flex; flex-direction: column; min-height: 100vh; }
   main.content { flex: 1 1 auto; min-width: 0; }
   body[data-tabs="bottom"] main.content { order: 1; }
-  body[data-tabs="bottom"] nav.tabs { order: 2; padding: 0 1.25rem .5rem; border-top: 1px solid var(--border); }
+  body[data-tabs="bottom"] nav.tabs { order: 2; padding: .5rem 1.25rem; }
+  body[data-tabs="bottom"] nav.tabs button { border-radius: 0 0 7px 7px; border-top: 0; border-bottom: 3px solid transparent; }
+  body[data-tabs="bottom"] nav.tabs button[aria-selected="true"] { border-bottom-color: var(--accent); box-shadow: 0 1px 4px rgba(0, 0, 0, .10); }
   body[data-tabs="left"] { flex-flow: row wrap; align-items: flex-start; }
   body[data-tabs="left"] > header { flex: 1 0 100%; }
   body[data-tabs="left"] > nav.tabs { flex: 0 0 auto; flex-direction: column; align-items: stretch;
     width: 11rem; padding: .75rem .5rem; border-right: 1px solid var(--border); align-self: stretch; }
-  body[data-tabs="left"] > nav.tabs button { text-align: left; border-bottom: 0; border-left: 2px solid transparent; }
-  body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--accent); background: var(--bg-alt, transparent); }
+  body[data-tabs="left"] > nav.tabs button { text-align: left; border-top: 0; border-left: 3px solid transparent; border-radius: 0 7px 7px 0; }
+  body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--accent); background: #FFFFFF; box-shadow: 1px 0 4px rgba(0, 0, 0, .10); }
   body[data-tabs="left"] > main.content { flex: 1 1 0; min-width: 0; }
-  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1.25rem; padding: .75rem 1.25rem; border-bottom: 1px solid var(--border); }
-  header .view { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .8rem; }
-  header .view select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; padding: .15rem .3rem; }
+  /* The bar is the app's chrome, not the report's, so it keeps its own light palette rather than
+     the theme's: a dark report theme would otherwise paint white text onto a white bar. */
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1.25rem;
+           padding: .75rem 1.25rem; background: #FFFFFF; color: #1A1A1A;
+           border-bottom: 1px solid #D5D5D5; box-shadow: 0 1px 3px rgba(0, 0, 0, .07); }
+  header .view { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; color: #555; font-size: .8rem; }
+  header .view select { font: inherit; color: #1A1A1A; background: #FFFFFF; border: 1px solid #C9C9C9; border-radius: 3px; padding: .15rem .3rem; }
   header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
-  header .meta { color: var(--muted); font-size: .8rem; }
+  header .meta { color: #666; font-size: .8rem; }
+  header .params input, header .params select { color: #1A1A1A; background: #FFFFFF; border: 1px solid #C9C9C9; border-radius: 3px; }
+  /* Page tabs read like a report app's: the active page is a raised white tab carrying the
+     theme's accent, the others sit flat on the grey surround. Colours are the chrome's own. */
   nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
-  nav.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .4rem .6rem; cursor: pointer; color: var(--muted); font: inherit; }
-  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  nav.tabs button { background: transparent; border: 0; border-top: 3px solid transparent;
+                    border-radius: 7px 7px 0 0; padding: .45rem .95rem; cursor: pointer;
+                    color: #5A5A5A; font: inherit; line-height: 1.3; }
+  nav.tabs button:hover { background: rgba(255, 255, 255, .6); color: #1A1A1A; }
+  nav.tabs button[aria-selected="true"] { background: #FFFFFF; color: #111111; font-weight: 600;
+                    border-top-color: var(--accent); box-shadow: 0 -1px 4px rgba(0, 0, 0, .10); }
   .params { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; font-size: .8rem; }
   header .params { color: inherit; }
   .params label { display: inline-flex; gap: .4rem; align-items: center; }
@@ -93,6 +106,8 @@
   .clickable:hover { opacity: .8; }
   .error { color: #b00020; font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
   .loading { color: var(--muted); font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
+  .truncated { position: absolute; right: 0; bottom: 0; padding: 0 .3rem; font-size: calc(.65rem * var(--scale, 1));
+               color: var(--muted); background: var(--bg); border-top-left-radius: 3px; pointer-events: auto; }
   .visual.sl-box { overflow: visible; }
   .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: calc(.85rem * var(--scale, 1)); color: var(--sl-fg); font-size: var(--sl-fs); }
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; min-height: calc(28px * var(--scale, 1)); }
@@ -682,6 +697,15 @@
       return;
     }
     try { fn(el, v, block); } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+    // A capped result must never read as the whole answer: say so on the visual itself. The
+    // grand-total row is computed by the database over the full query, so it stays correct.
+    if (block.truncated) {
+      const note = document.createElement('div');
+      note.className = 'truncated';
+      note.textContent = `first ${Number(block.truncated).toLocaleString()} rows`;
+      note.title = 'The query returned more rows than are drawn (MAX_ROWS). Filter the report to see the rest.';
+      el.appendChild(note);
+    }
     fitText(el.closest('.visual'));
   }
   function currentParams(names) {
