@@ -29,6 +29,7 @@ import base64
 import csv
 import html
 import json
+import math
 import re
 import sys
 import zipfile
@@ -408,7 +409,57 @@ def container_style(vc_objects: dict, theme_colors: list[str] | None = None) -> 
     if border_colour:
         style["border_color"] = border_colour
         style.setdefault("border", True)
+    shadow = _drop_shadow(vc_objects, theme_colors)
+    if shadow is not None:
+        style["shadow"] = shadow
     return style
+
+
+# Power BI's angle for a shadow: 45 is down-right, counter-clockwise from "due right".
+_SHADOW_PRESET_ANGLE = {"bottomright": 45, "bottom": 90, "bottomleft": 135, "left": 180,
+                        "topleft": 225, "top": 270, "topright": 315, "right": 0, "centered": None}
+# What Power BI writes into the file the moment a shadow is customised, i.e. its own defaults.
+_SHADOW_DEFAULTS = {"angle": 45.0, "shadowDistance": 10.0, "shadowBlur": 10.0, "shadowSpread": 3.0}
+
+
+def _drop_shadow(objects: dict, theme_colors: list[str] | None = None) -> dict | bool | None:
+    """A visual's drop shadow (`dropShadow`), as {color, x, y, blur, spread, inset} — or False
+    when the visual switches it off, or None when it says nothing at all.
+
+    Two vocabularies describe the same thing. A **theme** says `preset` ("BottomRight") and
+    `position` ("Outer"/"Inner"); a visual that has been customised says `angle`,
+    `shadowDistance`, `shadowBlur` and `shadowSpread`. Both are reduced here to CSS box-shadow
+    terms. False and None are different on purpose: a visual that explicitly disables its shadow
+    must keep the theme's from coming back (see `apply_theme_shadow`), which is exactly the case
+    in a real report where most visuals opt out of a theme-wide shadow."""
+    entries = (objects or {}).get("dropShadow")
+    if not entries:
+        return None
+    if _object_flag(objects, "dropShadow") is False:
+        return False
+    colour = _object_color(objects, "dropShadow", theme_colors=theme_colors) or "#000000"
+    transparency = _lit_number(_object_text(objects, "dropShadow", "transparency"))
+    alpha = round(max(0.0, min(1.0, 1 - (transparency if transparency is not None else 0) / 100)), 3)
+    preset = (_object_text(objects, "dropShadow", "preset") or "").strip("'\" ").lower()
+    angle = _lit_number(_object_text(objects, "dropShadow", "angle"))
+    if angle is None:
+        if preset and preset not in _SHADOW_PRESET_ANGLE:
+            return None                                   # an unknown preset: better nothing than a guess
+        angle = _SHADOW_PRESET_ANGLE.get(preset, _SHADOW_DEFAULTS["angle"])
+    distance = _lit_number(_object_text(objects, "dropShadow", "shadowDistance"))
+    if distance is None:
+        distance = 0.0 if angle is None else _SHADOW_DEFAULTS["shadowDistance"]
+    blur = _lit_number(_object_text(objects, "dropShadow", "shadowBlur"))
+    spread = _lit_number(_object_text(objects, "dropShadow", "shadowSpread"))
+    rad = math.radians(angle or 0)
+    return {
+        "color": colour, "alpha": alpha,
+        "x": round(distance * math.cos(rad), 2),
+        "y": round(distance * math.sin(rad), 2),          # CSS +y is down, like Power BI's 45 = down-right
+        "blur": _SHADOW_DEFAULTS["shadowBlur"] if blur is None else blur,
+        "spread": _SHADOW_DEFAULTS["shadowSpread"] if spread is None else spread,
+        "inset": (_object_text(objects, "dropShadow", "position") or "").strip("'\" ").lower() == "inner",
+    }
 
 
 def _lit_number(raw: str | None) -> float | None:
@@ -773,6 +824,44 @@ def apply_theme_visual_styles(layout: dict) -> None:
             derived.pop("background_off", None)
             for key, val in derived.items():
                 own.setdefault(key, val)
+
+
+def apply_theme_shadow(layout: dict) -> None:
+    """A visual that says nothing about a shadow inherits the theme's `visualStyles` `dropShadow`.
+
+    This is how a real report gets its shadows: the theme sets one for `*`/`*` and individual
+    visuals opt *out*. A visual that switched its own shadow off carries `shadow: False` from
+    `container_style`, and that must survive — re-applying the theme over it would put a shadow
+    on the 22 cards that explicitly removed theirs. The theme's vocabulary is the plain-JSON
+    `preset`/`position` form, not the `{expr: {Literal}}` one a visual uses."""
+    vs = ((layout.get("theme") or {}).get("custom_json") or {}).get("visualStyles") or {}
+    palette = theme_palette(layout.get("theme"))
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            style = v.get("style")
+            if not isinstance(style, dict) or "shadow" in style:
+                continue                       # its own choice wins, including an explicit "off"
+            entry = ((vs.get(v.get("type")) or vs.get("*") or {}).get("*") or {})
+            for card in entry.get("dropShadow") or []:
+                if not isinstance(card, dict) or card.get("show") is False:
+                    continue
+                colour = ((card.get("color") or {}).get("solid") or {}).get("color")
+                colour = literal_color(colour, palette) if isinstance(colour, dict) else colour
+                preset = str(card.get("preset") or "BottomRight").strip().lower()
+                if preset not in _SHADOW_PRESET_ANGLE:
+                    break                      # an unknown preset: better nothing than a guess
+                angle = _SHADOW_PRESET_ANGLE[preset]
+                distance = 0.0 if angle is None else _SHADOW_DEFAULTS["shadowDistance"]
+                transparency = card.get("transparency")
+                rad = math.radians(angle or 0)
+                style["shadow"] = {
+                    "color": colour if isinstance(colour, str) and colour.startswith("#") else "#000000",
+                    "alpha": round(max(0.0, min(1.0, 1 - (transparency if isinstance(transparency, (int, float)) else 0) / 100)), 3),
+                    "x": round(distance * math.cos(rad), 2), "y": round(distance * math.sin(rad), 2),
+                    "blur": _SHADOW_DEFAULTS["shadowBlur"], "spread": _SHADOW_DEFAULTS["shadowSpread"],
+                    "inset": str(card.get("position") or "").strip().lower() == "inner",
+                }
+                break
 
 
 def apply_theme_table_styles(layout: dict) -> None:
@@ -1573,11 +1662,17 @@ def _parse_bookmarks_pbir(z: zipfile.ZipFile, names: list[str]) -> list[dict]:
         sections = es.get("sections") or {}
         sid = es.get("activeSection") if es.get("activeSection") in sections else next(iter(sections), None)
         sec = sections.get(sid) or {}
-        groups: dict[str, bool] = {}
+        # Confirmed against a real PBIR file (TestReport9, 2026-10-02): PBIR carries a group's
+        # visibility in `visualContainerGroups[*].isHidden`, exactly as classic does — not in the
+        # per-visual `display.mode` this used to read, which is absent from every container in a
+        # real bookmark. Reading only that gave `groups: {}`, so every view-switcher button was
+        # inert. The per-visual mode is still honoured where a file does set it.
+        groups: dict[str, bool] = {gid: bool((st or {}).get("isHidden"))
+                                   for gid, st in (sec.get("visualContainerGroups") or {}).items()}
         for vid, vc in (sec.get("visualContainers") or {}).items():
             mode = (((vc or {}).get("singleVisual") or {}).get("display") or {}).get("mode")
             if mode is not None:
-                groups[vid] = mode == "hidden"
+                groups.setdefault(vid, mode == "hidden")
         opts = data.get("options") or {}
         out.append({"id": data["name"], "name": data.get("displayName"), "page": sid, "groups": groups,
                     "targets": list(opts.get("targetVisualNames") or []),
@@ -1603,6 +1698,8 @@ def parse_page(section: dict) -> dict:
         "width": section.get("width"),
         "height": section.get("height"),
         "hidden": cfg.get("visibility") == 1,
+        # classic marks a report-page tooltip with `type: 2` on the section's own config
+        "is_tooltip": cfg.get("type") == 2 or (cfg.get("pageType") or "") == "Tooltip",
         "background": page_background,
         "background_image": _page_background_image(objects),
         "filters": parse_filters(section.get("filters")),
@@ -1670,6 +1767,7 @@ def extract_layout(pbix: Path) -> dict:
         }
         resolve_theme_markers(result)
         apply_theme_table_styles(result)
+        apply_theme_shadow(result)
         apply_theme_visual_styles(result)
         embed_image_resources(z, result)   # needs the zip still open
     return result
@@ -1841,6 +1939,18 @@ def _pbir_title(container_objects: dict) -> str | None:
     return _pbir_texts(container_objects, {}).get("title")
 
 
+def _tooltip_page(container_objects: dict) -> str | None:
+    """The report page a visual shows as its tooltip on hover
+    (`visualContainerObjects.visualTooltip[].properties.section`), or None.
+
+    Power BI filters that page by whatever point you are hovering, so the page is **not**
+    reproduced yet — see ADR-011. The binding is extracted so the mapping report can say which
+    visuals depend on one instead of the tooltip silently going missing."""
+    name = (_object_text(container_objects, "visualTooltip", "section") or "").strip()
+    # `___AUTO___` is Power BI's own built-in data tooltip, not a page of the report
+    return name if name and name != "___AUTO___" else None
+
+
 def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
     try:
         pos = vdata.get("position") or {}
@@ -1880,6 +1990,7 @@ def _parse_visual_pbir(vdata: dict, vid: str) -> dict:
             "title": _pbir_texts(vco, vis).get("title"),
             "hidden": bool(vdata.get("isHidden")) or vis.get("visible") is False,
             "projections": projections,
+            "tooltip_page": _tooltip_page(vco),
             "fields": sorted({f["queryRef"] for f in fields if f["queryRef"]}),
             "filters": parse_filters((vdata.get("filterConfig") or {}).get("filters")),
             "has_drill_other_visuals": bool(vis.get("drillFilterOtherVisuals")),
@@ -1932,6 +2043,8 @@ def _parse_page_pbir(z: zipfile.ZipFile, names: list[str], page_id: str) -> dict
         "width": page_data.get("width", 1280),
         "height": page_data.get("height", 720),
         "hidden": page_data.get("visibility") == "HiddenInViewMode",
+        # a report-page tooltip: shown on hover over a visual that binds to it, never as a page
+        "is_tooltip": page_data.get("type") == "Tooltip",
         "background": _object_color(objects, "background") or _object_color(objects, "outspace"),
         "background_image": _page_background_image(objects),
         "filters": parse_filters((page_data.get("filterConfig") or {}).get("filters")),
@@ -2000,6 +2113,7 @@ def _extract_layout_pbir(z: zipfile.ZipFile, names: list[str], pbix: Path, has_d
     }
     resolve_theme_markers(result)
     apply_theme_table_styles(result)
+    apply_theme_shadow(result)
     apply_theme_visual_styles(result)
     embed_image_resources(z, result)
     return result

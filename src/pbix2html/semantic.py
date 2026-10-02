@@ -1488,16 +1488,27 @@ class _DaxTranslator:
 
     # -- grammar -------------------------------------------------------------
     def _body(self, filters: list[str]) -> str:
-        """A measure body: optional `VAR name = <scalar>` lines, `RETURN`, then the expression.
-        A variable holds a scalar (a column, MIN/MAX of a column over the selection, a date part);
-        it is substituted where used, since SQL has no variables."""
+        """A measure body: optional `VAR name = …` lines, `RETURN`, then the expression. SQL has
+        no variables, so each one is substituted where it is used.
+
+        A variable is read as a *scalar* first, because that is what keeps `MIN/MAX(T[c])` meaning
+        "over the report's current selection" (a `{CTX:…}` marker, ADR-007) rather than a plain
+        aggregate. Only if that fails is it re-read as a value expression, which is how a real
+        measure's `VAR x = DIVIDE(SUM(…), DISTINCTCOUNT(…))` resolves. The parser state is rewound
+        on the retry — including the tables collected so far, since a half-parsed scalar would
+        otherwise leave a table behind and drag it into the join."""
         while (tok := self._peek()) and tok[0] == "ident" and tok[1].upper() == "VAR":
             self._take()
             kind, name = self._take()
             if kind != "ident":
                 raise _DaxUnsupported("VAR needs a name")
             self._expect("=")
-            self._vars[name.lower()] = self._scalar()
+            start, tables, ctxs, selmins = self.pos, set(self.tables), set(self.ctxs), set(self.selmins)
+            try:
+                self._vars[name.lower()] = self._scalar()
+            except _DaxUnsupported:
+                self.pos, self.tables, self.ctxs, self.selmins = start, tables, ctxs, selmins
+                self._vars[name.lower()] = f"({self._expression(filters)})"
         if self._vars:
             tok = self._take()
             if tok[1].upper() != "RETURN":
@@ -1571,6 +1582,9 @@ class _DaxTranslator:
         self._expect(")")
         if name in ("MONTH", "YEAR", "DAY") and len(args) == 1:
             return f"EXTRACT({name} FROM {args[0]})"
+        if name == "EOMONTH" and len(args) == 2:
+            # the last day of the month `n` months away — Teradata says it directly
+            return f"LAST_DAY(ADD_MONTHS({args[0]}, {args[1]}))"
         if name == "CONCATENATE" and len(args) == 2:
             return f"({_as_text(args[0])} || {_as_text(args[1])})"
         raise _DaxUnsupported(f"{name}() isn't translated in a filter")
@@ -1629,6 +1643,11 @@ class _DaxTranslator:
                 return f"{_sql_alias(table)}.{_sql_col(column)}"
             if nxt and nxt[1] == "(":               # a function call
                 return self._function(text.upper(), filters)
+            if kind == "ident" and text.lower() in self._vars:
+                # a VAR used in the RETURN expression. `_scalar_primary` already resolved these,
+                # but the value grammar did not, so `VAR x = … RETURN x * 2` — the shape of every
+                # real projection measure — died on "bare identifier".
+                return self._vars[text.lower()]
             raise _DaxUnsupported(f"bare identifier {text!r}")
         raise _DaxUnsupported(f"unexpected token {text!r}")
 
@@ -1766,6 +1785,9 @@ class _DaxTranslator:
             return f"COALESCE({', '.join(self._one_or_two(name, filters, 2))})"
         if name in ("YEAR", "MONTH", "DAY"):
             return f"EXTRACT({name} FROM {self._one_or_two(name, filters, 1)[0]})"
+        if name == "EOMONTH":
+            args = self._one_or_two(name, filters, 2)
+            return f"LAST_DAY(ADD_MONTHS({args[0]}, {args[1]}))"
         if name in _DAX_SCALAR_1:
             return f"{_DAX_SCALAR_1[name]}({self._one_or_two(name, filters, 1)[0]})"
         if name == "INT":      # DAX truncates toward zero, which is what a CAST to integer does
@@ -2999,9 +3021,14 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         # Only the several-measures arms below can draw it (each measure is a series), so a
         # lone measure with no category is still a card, not a chart. Combo stays out: with two
         # axes and one x slot there is nothing sensible to draw, and line/area would be a point.
-        if not categories and not (len(values) > 1 and kind in ("bar", "column")):
+        # A pie/donut with several measures and no category draws one slice *per measure* — the
+        # measure's own name is the slice label. Seen on a real "token mix" donut whose three
+        # values are three token-count columns; it used to be refused as `shape`.
+        if not categories and not (len(values) > 1 and kind in ("bar", "column", "pie")):
             return None
-        if kind == "pie" and len(categories) != 1:
+        if kind == "pie" and len(categories) not in (1, 0):
+            return None
+        if kind == "pie" and not categories and len(values) < 2:
             return None
         if len(categories) > 2:
             return None
@@ -3015,8 +3042,9 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             pos = {c.key: i for i, c in enumerate(categories, start=1)}
             pos.setdefault(values[0].key, len(parts))
             return assemble(parts, list(range(1, len(categories) + 1)), _order_by(sort, pos)), params_used
-        # Several measures: one arm per measure, the measure's own name as the series.
-        if len(categories) > 1 or kind == "pie":
+        # Several measures: one arm per measure, the measure's own name as the series — or, for a
+        # pie with no category, as the slice's own label (a pie reads `category`, not `series`).
+        if len(categories) > 1 or (kind == "pie" and categories):
             return None
         if categories and (categories[0].role or "").lower() in ("series", "legend"):
             return None
@@ -3044,10 +3072,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
             f = arm_field
             name = f"{next(iter(f.tables))}: {f.label}" if f.label in dup and f.tables else f.label
             label = name.replace("'", "''")
-            arms.append(assemble([category_sql,
-                                  f"'{label}' AS series",
-                                  f'{f.expr} AS "value"'], [1, 2] if categories else [2],
-                                 "", arm_sources, arm_where, arm_extra))
+            if kind == "pie":
+                # the slice label is the measure itself; nothing to group by, each arm is one row
+                arms.append(assemble([f"'{label}' AS category", f'{f.expr} AS "value"'], [],
+                                     "", arm_sources, arm_where, arm_extra))
+            else:
+                arms.append(assemble([category_sql,
+                                      f"'{label}' AS series",
+                                      f'{f.expr} AS "value"'], [1, 2] if categories else [2],
+                                     "", arm_sources, arm_where, arm_extra))
         # a sort on the category applies to the whole union (column 1)
         order = _order_by(sort, {categories[0].key: 1}) if categories else ""
         return "\nUNION ALL\n".join(arms) + order, all_params
@@ -3252,6 +3285,20 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
                                             for f in p.get("filters") or [] if f.get("how_created") == 5]
                     for p in pages}
     drillthrough = {k: v for k, v in drillthrough.items() if v}
+    # Report-page tooltips: which visuals hover-show which page. Power BI filters that page by
+    # the hovered point, which the HTML cannot do yet (ADR-011), so they are reported rather than
+    # drawn — a tooltip showing the report's totals on every point would be a confident wrong number.
+    tooltip_names = {p.get("name"): p.get("display_name") or p.get("name")
+                     for p in layout.get("pages", []) if p.get("is_tooltip")}
+    tooltip_pages: dict[str, list[str]] = {}
+    for page in layout.get("pages", []):
+        for v in page.get("visuals", []):
+            target = v.get("tooltip_page")
+            if not target:
+                continue
+            label = f"{page.get('display_name')} / {v.get('title') or v.get('type')}"
+            tooltip_pages.setdefault(tooltip_names.get(target, target), []).append(label)
+
     measure_names = {n for (_, n) in measures}
     composite = sorted(n for (_, n), dax in measures.items()
                        if any(ref in measure_names for ref in re.findall(r"(?<![\w'\]])\[([^\]]+)\]", dax or "")))
@@ -3267,6 +3314,7 @@ def mapping_report(layout: dict, model: dict, table_map: dict[str, str] | None =
             "relationships": len(rels),
             "storage_modes": table_modes,
             "drillthrough_pages": drillthrough,
+            "tooltip_pages": tooltip_pages,
             "hidden_pages": hidden_pages,
             "many_to_many": [f"{e[0]} → {e[2]}" for r in rels if r.get("Cardinality") == "M:M"
                              and (e := _rel_ends(r))],
@@ -3303,6 +3351,15 @@ def render_mapping_report(rep: dict) -> str:
               "field below. The HTML has no such navigation yet, so these pages render for all values "
               "(a saved value in the file is not applied: it was just the last one the author tried).", ""]
         L += [f"- `{p}`: " + ", ".join(f"`{x}`" for x in fs) for p, fs in m["drillthrough_pages"].items()]
+        L += [""]
+    if m.get("tooltip_pages"):
+        L += ["## Report-page tooltips", "",
+              "These visuals show a *page* as their tooltip on hover. Power BI filters that page by "
+              "the point under the cursor; the HTML has no way to do that yet (ADR-011), so the page "
+              "is not drawn. Showing it unfiltered would repeat the report's own totals on every "
+              "point, which reads as a per-point number and is not one.", ""]
+        for page, who in sorted(m["tooltip_pages"].items()):
+            L += [f"- `{page}` <- " + ", ".join(f"`{x}`" for x in who)]
         L += [""]
     kinds = sorted(set(m["storage_modes"].values()))
     if len(kinds) > 1:

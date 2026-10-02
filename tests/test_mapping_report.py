@@ -73,3 +73,27 @@ def test_hundred_percent_charts_are_flagged_for_rescaling(fake_pbix):
     page = build_spec(layout, semantic.load("Executive_Dashboard"), {"year": 2025})["pages"][0]
     e = next(x for x in page["visuals"] if x["id"] == v["id"])
     assert e["stacked"] and e["percent"]
+
+
+def test_report_page_tooltips_are_detected_and_reported_not_drawn():
+    """A visual can use a whole report page as its tooltip (ADR-011). Those pages carry data, and
+    Power BI filters them by the hovered point — which the HTML cannot do — so they are reported
+    rather than drawn. The binding is extracted so the gap is visible to a reviewer."""
+    from pbix2html import extract as ex, semantic
+    lit = lambda v: {"expr": {"Literal": {"Value": v}}}                       # noqa: E731
+    assert ex._tooltip_page({"visualTooltip": [{"properties": {"section": lit("'tip1'")}}]}) == "tip1"
+    # Power BI's own built-in data tooltip is not a page of the report
+    assert ex._tooltip_page({"visualTooltip": [{"properties": {"section": lit("'___AUTO___'")}}]}) is None
+    assert ex._tooltip_page({}) is None
+
+    host = {"id": "v1", "type": "columnChart", "title": "Spend by Org", "is_group": False,
+            "tooltip_page": "tip1", "projections": {}, "filters": []}
+    pages = [{"name": "p1", "display_name": "Main", "hidden": False, "visuals": [host], "filters": []},
+             {"name": "tip1", "display_name": "Tooltip-scr", "hidden": True, "is_tooltip": True,
+              "visuals": [], "filters": []}]
+    layout = {"report": "R", "pages": pages}
+    rep = semantic.mapping_report(layout, {"tables": []}, {})
+    assert rep["model"]["tooltip_pages"] == {"Tooltip-scr": ["Main / Spend by Org"]}
+    md = semantic.render_mapping_report(rep)
+    assert "## Report-page tooltips" in md and "`Tooltip-scr` <- `Main / Spend by Org`" in md
+    assert "ADR-011" in md

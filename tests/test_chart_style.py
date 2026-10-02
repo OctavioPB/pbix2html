@@ -252,3 +252,70 @@ def test_a_tall_thin_line_is_drawn_vertically(fake_pbix):
     rule = {**base["visuals"][0], "id": "r", "type": "basicShape", "x": 100, "y": 50, "width": 6, "height": 270, "style": {"shape_kind": "line", "line_color": "#FF5F02"}}
     html = render_html({**layout, "pages": [{**base, "visuals": [rule]}]}, semantic.load("Executive_Dashboard"), {}, None, mode="live")
     assert '"line_vertical": true' in html
+
+
+def test_a_visual_drop_shadow_becomes_css_box_shadow_terms():
+    """Power BI describes a shadow two ways: a *theme* says `preset`/`position`, a visual that has
+    been customised says `angle`/`distance`/`blur`/`spread`. Both reduce to CSS box-shadow."""
+    from pbix2html.render import _shadow_css
+    custom = {"dropShadow": [{"properties": {
+        "show": _lit("true"), "angle": _lit("45L"), "shadowDistance": _lit("10L"),
+        "shadowBlur": _lit("10L"), "shadowSpread": _lit("3L"), "transparency": _lit("70L"),
+        "color": {"solid": {"color": _lit("'#00233C'")}}}}]}
+    sh = ex.container_style(custom)["shadow"]
+    assert sh["x"] == 7.07 and sh["y"] == 7.07            # 45 degrees is down-right, as in CSS
+    assert sh["blur"] == 10 and sh["spread"] == 3 and sh["inset"] is False
+    assert sh["alpha"] == 0.3 and sh["color"] == "#00233C"
+    css = _shadow_css(sh)
+    assert css.startswith("calc(7.07px * var(--scale, 1)) calc(7.07px * var(--scale, 1))")
+    assert css.endswith("rgba(0,35,60,0.30)")             # the offsets scale with the page
+    # switched off is not the same as unsaid: it has to survive the theme being applied over it
+    off = {"dropShadow": [{"properties": {"show": _lit("false"), "angle": _lit("45L")}}]}
+    assert ex.container_style(off)["shadow"] is False
+    assert _shadow_css(False) == "" and _shadow_css(None) == ""
+    assert "shadow" not in ex.container_style({})
+
+
+def test_the_theme_puts_a_shadow_on_visuals_that_do_not_opt_out():
+    """How a real report actually gets its shadows: the theme sets one for `*`/`*` and individual
+    visuals opt out. Re-applying the theme over an opt-out would put the shadow back."""
+    theme = {"custom_json": {"dataColors": ["#FF5F02"], "visualStyles": {"*": {"*": {
+        "dropShadow": [{"show": True, "color": {"solid": {"color": "#00233C"}},
+                        "position": "Outer", "preset": "BottomRight", "transparency": 90}]}}}}}
+    inherits = {"type": "card", "style": {}}
+    opted_out = {"type": "card", "style": {"shadow": False}}
+    own = {"type": "card", "style": {"shadow": {"color": "#112233", "alpha": 1, "x": 1, "y": 2,
+                                                "blur": 3, "spread": 0, "inset": False}}}
+    layout = {"theme": theme, "pages": [{"visuals": [inherits, opted_out, own]}]}
+    ex.apply_theme_shadow(layout)
+    assert inherits["style"]["shadow"]["color"] == "#00233C"
+    assert inherits["style"]["shadow"]["alpha"] == 0.1          # transparency 90
+    assert inherits["style"]["shadow"]["x"] == 7.07             # BottomRight
+    assert opted_out["style"]["shadow"] is False, "a visual that switched its shadow off kept it off"
+    assert own["style"]["shadow"]["color"] == "#112233", "a visual's own shadow wins over the theme"
+    # an unrecognised preset draws nothing rather than a guess
+    odd = {"type": "card", "style": {}}
+    ex.apply_theme_shadow({"theme": {"custom_json": {"visualStyles": {"*": {"*": {
+        "dropShadow": [{"show": True, "preset": "Swoosh"}]}}}}},
+        "pages": [{"visuals": [odd]}]})
+    assert "shadow" not in odd["style"]
+
+
+def test_a_pie_with_several_measures_and_no_category_is_one_slice_per_measure():
+    """Seen on a real "token mix" donut: three token-count columns in the Values well and nothing
+    in Legend. Power BI draws one slice per *measure*, labelled with the measure's own name. The
+    arms path refused every pie outright, so the visual stayed manual (`shape`). A pie reads
+    `category`/`value`, never `series`, so the label goes in `category`."""
+    from pbix2html import semantic
+    tm = {"T": "SELECT a, b, c FROM db.t"}
+    v = {"projections": {"Y": ["Sum(T.a)", "Sum(T.b)", "Sum(T.c)"]}}
+    sql, _ = semantic._draft_visual_sql(v, "pie", {}, tm, [], {})
+    assert sql.count("UNION ALL") == 2
+    for col in ("a", "b", "c"):
+        assert f"'{col}' AS category" in sql and f"SUM(t.{col})" in sql
+    assert " AS series" not in sql and "GROUP BY" not in sql    # one row per arm, nothing to group
+    # a pie that *does* have a category keeps its old meaning and stays manual with several measures
+    with_cat = {"projections": {"Category": ["T.a"], "Y": ["Sum(T.b)", "Sum(T.c)"]}}
+    assert semantic._draft_visual_sql(with_cat, "pie", {}, tm, [], {}) is None
+    # and a single measure with no category is a card, not a pie
+    assert semantic._draft_visual_sql({"projections": {"Y": ["Sum(T.a)"]}}, "pie", {}, tm, [], {}) is None

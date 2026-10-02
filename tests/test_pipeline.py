@@ -725,3 +725,32 @@ def test_pbir_bookmarks_fall_back_to_the_files_present_without_an_index(tmp_path
     bms = extract_layout(pbix)["bookmarks"]
     assert bms == [{"id": "b1", "name": "Solo", "page": "p1", "groups": {}, "targets": [],
                     "apply_only_to_targets": False}]
+
+
+def test_a_var_can_hold_an_aggregate_and_be_used_in_the_return():
+    """The shape of a real projection measure (TestReport9):
+
+        VAR DaysWithData = DAY(MAX(T[log_dt]))
+        VAR ActualAvg    = DIVIDE(SUM(T[cost]), DISTINCTCOUNTNOBLANK(T[actor]))
+        VAR Factor       = IF(DaysWithData >= DaysInMonth, 1, DIVIDE(DaysInMonth, DaysWithData))
+        RETURN ActualAvg * Factor
+
+    Two things blocked it. A `VAR` was read as a *scalar* only, so one holding an aggregate was
+    refused; and the value grammar could not resolve a variable at all, so `RETURN x * y` died on
+    "bare identifier". A variable is still read as a scalar first, because that is what keeps
+    `MIN/MAX(T[c])` meaning "over the current selection" (ADR-007) rather than a plain aggregate."""
+    dax = ("VAR DaysWithData = DAY(MAX(T[log_dt]))\n"
+           "VAR DaysInMonth = DAY(EOMONTH(MAX(T[log_dt]), 0))\n"
+           "VAR ActualAvg = DIVIDE(SUM(T[cost]), DISTINCTCOUNTNOBLANK(T[actor]))\n"
+           "VAR Factor = IF(DaysWithData >= DaysInMonth, 1, DIVIDE(DaysInMonth, DaysWithData))\n"
+           "RETURN ActualAvg * Factor")
+    out = semantic.translate_dax(dax, {})
+    assert out is not None
+    assert "SUM(t.cost)" in out.text and "COUNT(DISTINCT t.actor)" in out.text
+    assert "LAST_DAY(ADD_MONTHS(" in out.text                       # EOMONTH
+    # MAX over the selection stays a {CTX:...} marker, not a bare MAX aggregate
+    assert ("MAX", "T", "log_dt") in out.ctxs and out.tables == {"T"}
+    # a variable that is a plain scalar still resolves the old way
+    assert semantic.translate_dax("VAR d = MAX(T[log_dt]) RETURN SUM(T[x]) * DAY(d)", {}) is not None
+    # and a VAR whose expression is genuinely untranslatable still refuses the whole measure
+    assert semantic.translate_dax("VAR x = TOTALYTD([M], C[Date]) RETURN x", {}) is None

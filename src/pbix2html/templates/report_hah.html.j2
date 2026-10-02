@@ -35,8 +35,8 @@
   body[data-tabs="left"] > nav.tabs button { text-align: left; border-bottom: 0; border-left: 2px solid transparent; }
   body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--accent); background: var(--bg-alt, transparent); }
   body[data-tabs="left"] > main.content { flex: 1 1 0; min-width: 0; }
-  html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
-  header { display: flex; align-items: baseline; gap: 1.5rem; padding: .9rem 1.25rem;
+  html, body { margin: 0; background: #E2E2E2; color: var(--fg); font-family: var(--font); font-size: 14px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1.25rem; padding: .9rem 1.25rem;
            color: #fff; background: linear-gradient(135deg, var(--td-navy) 0%, #2d2d5e 100%);
            border-bottom: 3px solid var(--td-teal); }
   header .view { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: #fff; }
@@ -47,25 +47,33 @@
   nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
   nav.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .4rem .6rem; cursor: pointer; color: var(--muted); font: inherit; }
   nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--td-teal); }
-  .params { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; padding: .5rem 1.25rem; font-size: .85rem; color: var(--muted); }
+  .params { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; font-size: .8rem; }
+  header .params { color: inherit; }
   .params label { display: inline-flex; gap: .4rem; align-items: center; }
   .params input { font: inherit; padding: .15rem .3rem; }
-  .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem; max-width: 1400px; }
+  /* The canvas sits on a grey surround, so it needs its own edge: a 2px frame and a soft
+     shadow. `background` is the theme's, not the surround's — a page that sets its own in
+     the .pbix overrides it inline, and one that does not must still look like paper. The frame
+     is an `outline`, not a `border`: a border would eat 4px of the content box and shift every
+     visual, since positions are percentages of it. An outline is drawn outside and costs nothing. */
+  .page { position: relative; width: 100%; aspect-ratio: var(--ratio); margin: .5rem auto 2rem;
+          max-width: 1400px; background: var(--bg); outline: 2px solid #000;
+          box-shadow: 0 6px 24px rgba(0, 0, 0, .18); }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
   .visual.card, .visual.kpi { border-top: 4px solid var(--td-teal); }
-  .visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin, calc(.9rem * var(--scale, 1))); font-weight: 400; padding: .35rem .6rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin, calc(.9rem * var(--scale, 1))); font-weight: 400; padding: calc(.35rem * var(--scale, 1)) calc(.6rem * var(--scale, 1)) 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
   .chart { position: absolute; inset: 0; bottom: 1.2rem; }
-  .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: .5rem; }
-  .card .value { font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin, calc(2.4rem * var(--scale, 1))); font-weight: 600; line-height: 1.1; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .card .label { color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 7cqmin, calc(.8rem * var(--scale, 1))); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .kpi .target { color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 6cqmin, calc(.8rem * var(--scale, 1))); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .multicard { display: grid; grid-template-columns: 1fr auto; gap: .2rem .8rem; padding: .5rem .6rem; font-size: calc(.85rem * var(--scale, 1)); align-content: start; }
+  .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: calc(.5rem * var(--scale, 1)); }
+  .card .value { flex: none; font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin, calc(2.4rem * var(--scale, 1))); font-weight: 600; line-height: 1.2; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .label { flex: none; color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 7cqmin, calc(.8rem * var(--scale, 1))); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .target { flex: none; color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 6cqmin, calc(.8rem * var(--scale, 1))); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .multicard { display: grid; grid-template-columns: 1fr auto; gap: calc(.2rem * var(--scale, 1)) calc(.8rem * var(--scale, 1)); padding: calc(.5rem * var(--scale, 1)) calc(.6rem * var(--scale, 1)); font-size: calc(.85rem * var(--scale, 1)); align-content: start; }
   .multicard .v { text-align: right; font-weight: 600; }
   .tablewrap { overflow: auto; height: 100%; }
   table { border-collapse: collapse; width: 100%; font-size: calc(.8rem * var(--scale, 1)); }
-  th, td { padding: .25rem .5rem; border-bottom: var(--gh, 1px solid var(--border)); text-align: left; white-space: nowrap; }
+  th, td { padding: calc(.25rem * var(--scale, 1)) calc(.5rem * var(--scale, 1)); border-bottom: var(--gh, 1px solid var(--border)); text-align: left; white-space: nowrap; }
   th { position: sticky; top: 0; background: var(--th-bg, var(--bg)); color: var(--th-fg, var(--fg)); font-weight: var(--th-fw, 600); font-size: var(--th-fs, inherit); }
   td { font-size: var(--tr-fs, inherit); }
   tbody tr { background: var(--tr-bg, transparent); color: var(--tr-fg, inherit); }
@@ -75,10 +83,10 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   th + th, td + td { border-left: var(--gv, none); }
   th { text-align: var(--th-ta, left); } th.num { text-align: var(--th-ta, right); }
-  .text { padding: .15rem .3rem; line-height: 1.2; font-size: calc(.85rem * var(--scale, 1)); overflow: auto; }
+  .text { padding: calc(.15rem * var(--scale, 1)) calc(.3rem * var(--scale, 1)); line-height: 1.2; font-size: calc(.85rem * var(--scale, 1)); overflow: auto; }
   .static { border-style: dashed; opacity: .5; }
   .visual[hidden] { display: none; }
-  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: calc(.8rem * var(--scale, 1)); padding: .3rem; }
+  .visual .shape-text { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; font-size: calc(.8rem * var(--scale, 1)); padding: calc(.3rem * var(--scale, 1)); }
   .visual.btn { background: linear-gradient(var(--bg0, transparent), var(--bg0, transparent)), var(--cbg, transparent); border-radius: var(--rad, 0); box-shadow: var(--ol, none); }
   .visual.btn .shape-text { color: var(--fg, inherit); font-size: var(--fs, calc(9.5pt * var(--scale, 1))); font-family: var(--ff, inherit); font-weight: var(--fw, 600); font-style: var(--fi, normal); text-decoration: var(--td, none); justify-content: var(--jc, center); align-items: var(--ai, center); text-align: var(--ta, center); }
   .visual.btn:hover { background: linear-gradient(var(--bg-h, var(--bg0, transparent)), var(--bg-h, var(--bg0, transparent))), var(--cbg, transparent); box-shadow: var(--ol-h, var(--ol, none)); }
@@ -88,7 +96,7 @@
   .visual.btn.off, .visual.btn.off:hover { background: linear-gradient(var(--bg-d, var(--bg0, transparent)), var(--bg-d, var(--bg0, transparent))), var(--cbg, transparent); box-shadow: var(--ol-d, var(--ol, none)); cursor: default; }
   .visual.btn.off .shape-text { color: var(--fg-d, var(--fg, inherit)); }
   .visual.sl-box { overflow: visible; }
-  .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: .85rem; color: var(--sl-fg); font-size: var(--sl-fs); }
+  .sl { --sl-fg: var(--fg); --sl-bg: var(--bg); --sl-fs: calc(.85rem * var(--scale, 1)); color: var(--sl-fg); font-size: var(--sl-fs); }
   .sl-btn, .sl-text, .sl-range input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 2px; padding: .3rem .5rem; min-height: calc(28px * var(--scale, 1)); }
   .ic { display: inline-flex; align-items: center; justify-content: center; width: 1.35em; height: 1.35em; border-radius: 50%; border: 1.5px solid; font-size: .85em; font-weight: 700; line-height: 1; }
   .ic-ok { color: #2E7D32; border-color: #4C9A6A; background: #E3F2E8; } .ic-bad { color: #C62828; border-color: #C0392B; background: #FBE3E4; } .ic-warn { color: #8A6D00; border-color: #D9B300; background: #FFF5CC; }
@@ -109,11 +117,11 @@
   .sl-tile { font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 999px; padding: .2rem .7rem; cursor: pointer; }
   .sl-tile:disabled { cursor: default; opacity: .8; }
   .sl-tile.on { background: var(--td-teal); color: #fff; border-color: var(--td-teal); }
-  .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.3rem; height: 1.3rem; margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 .8rem serif; color: var(--accent, #666); cursor: help; }
+  .info-icon { display: inline-flex; align-items: center; justify-content: center; width: calc(1.3rem * var(--scale, 1)); height: calc(1.3rem * var(--scale, 1)); margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 calc(.8rem * var(--scale, 1)) serif; color: var(--accent, #666); cursor: help; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
-  .error-state { color: #b00020; font-size: .75rem; padding: .5rem .6rem; }
-  .loading { color: var(--muted); font-size: .75rem; padding: .5rem .6rem; }
+  .error-state { color: #b00020; font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
+  .loading { color: var(--muted); font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
   .card-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 1.2rem; line-height: 1.2rem;
                  padding: 0 .6rem; font-size: .68rem; color: var(--muted); border-top: 1px solid var(--border); }
   .spinner { width: 1.1rem; height: 1.1rem; margin: .8rem; border: 2px solid var(--border);
@@ -158,6 +166,16 @@
     </select>
   </label>
   {% endif %}
+  {% set bar_params = spec.parameters.items()|rejectattr('1.widget')|list %}
+  {% if bar_params %}
+  <div class="params">
+    {% for name, p in bar_params %}
+    <label>{{ p.label }}
+      {% if mode == "live" %}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}">{% else %}<strong>{{ p.value if p.value is not none else '—' }}</strong>{% endif %}
+    </label>
+    {% endfor %}
+  </div>
+  {% endif %}
 </header>
 
 {% if tab_pages_count > 1 %}
@@ -167,20 +185,11 @@
 {% endif %}
 
 <main class="content">
-{% set bar_params = spec.parameters.items()|rejectattr('1.widget')|list %}
-{% if bar_params %}
-<div class="params">
-  {% for name, p in bar_params %}
-  <label>{{ p.label }}<input data-param="{{ name }}" value="{{ p.value if p.value is not none else '' }}"></label>
-  {% endfor %}
-</div>
-{% endif %}
-
 {% for p in spec.pages %}
 <section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-h="{{ p.height }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
   <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.style.border and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
-       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: {{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}{% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}{% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
+       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: {{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}{% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}{% if v.shadow_css %}; box-shadow: {{ v.shadow_css }}{% endif %}{% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
     {% if v.title %}<div class="title"{% if v.title_css %} style="{{ v.title_css }}"{% endif %}>{{ v.title }}</div>{% endif %}
     <div class="body"></div>
   </div>
@@ -487,6 +496,9 @@
   const chromeHeight = () => ['header', 'nav.tabs', '.params'].reduce((h, s) => {
     const el = document.querySelector(s);
     if (!el || (s === 'nav.tabs' && document.body.dataset.tabs === 'left')) return h;
+    // the parameter controls live inside the header now, so the header's own height already
+    // counts them; adding them again stole that much room from the canvas
+    if (s === '.params' && el.closest('header')) return h;
     return h + (el.offsetHeight || 0);
   }, 0);
 
@@ -626,7 +638,7 @@
     gauge(el, v, b) {
       const r = b.rows[0] || []; const g = n => { const i = col(b, n); return i >= 0 ? r[i] : null; };
       chart(el, v, { ...base, series: [{ type: 'gauge', min: g('min') ?? 0, max: g('max') ?? (g('target') ?? g('value')) * 1.2,
-        progress: { show: true }, detail: { formatter: x => fmt(x, v.format.value), color: theme.foreground },
+        progress: { show: true }, detail: { formatter: x => fmt(x, v.format.value), color: theme.foreground, fontSize: 30 },
         axisLabel: { show: false }, data: [{ value: g('value') }] }] });
     },
     waterfall(el, v, b) {

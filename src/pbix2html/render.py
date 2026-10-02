@@ -107,6 +107,23 @@ def _rgba(color: str | None, transparency: float | None) -> str | None:
     return f"rgba({r},{g},{b},{alpha:.2f})"
 
 
+def _shadow_css(shadow: Any) -> str:
+    """`style.shadow` (see `extract._drop_shadow`) → a CSS `box-shadow`, or '' for no shadow.
+
+    The offsets are multiplied by `--scale` like every other size inside the page, so a shadow
+    keeps its proportions when the canvas is zoomed instead of growing coarse as the report shrinks.
+    """
+    if not isinstance(shadow, dict):
+        return ""                          # False (the visual switched it off) or nothing said
+    colour = _rgba(shadow.get("color"), (1 - float(shadow.get("alpha", 1))) * 100)
+    if not colour:
+        return ""
+    def px(value: Any) -> str:
+        return f"calc({round(float(value or 0), 2)}px * var(--scale, 1))"
+    parts = " ".join(px(shadow.get(k)) for k in ("x", "y", "blur", "spread"))
+    return f"{'inset ' if shadow.get('inset') else ''}{parts} {colour}"
+
+
 def _rgb(color: str | None) -> tuple[int, int, int, float] | None:
     """'#RRGGBB' / 'rgba(r,g,b,a)' → (r, g, b, alpha); None for anything else."""
     if not color:
@@ -528,6 +545,7 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
             vsize = (v.get("style") or {}).get("value_size")
             if isinstance(vsize, (int, float)) and 1 <= vsize <= 200:       # pt → px, scaled with the page like everything else
                 entry["value_css"] += (";" if entry["value_css"] else "") + f"font-size:calc({round(vsize * 4 / 3, 1)}px * var(--scale, 1))"
+            entry["shadow_css"] = _shadow_css((v.get("style") or {}).get("shadow"))
             entry["fg"] = readable                      # default text colour of the visual's own content (slicer widget)
             entry["start_hidden"] = any(g in hidden_groups for g in entry["groups"])
             entry["params"] = list(vs.params) if vs else []      # the parameters this visual's SQL uses
