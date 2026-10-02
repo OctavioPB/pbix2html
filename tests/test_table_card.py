@@ -1,5 +1,6 @@
 """Table header/banding colours (visual objects and theme), card text that must fit, and the default font."""
 import re
+from pathlib import Path
 
 import pytest
 
@@ -744,7 +745,7 @@ def test_page_tabs_make_the_active_page_obvious(mode):
     """The active page reads as a raised white tab carrying the theme's accent; the rest sit flat
     on the grey surround. The accent moves to whichever edge the strip is docked against."""
     html = _two_page_report(mode)
-    accent = "var(--td-teal)" if mode == "hah" else "var(--accent)"
+    accent = "var(--accent)"            # the theme's, in every mode: hah brands only the top bar
     assert 'nav.tabs button[aria-selected="true"] { background: #FFFFFF; color: #111111; font-weight: 600;' in html
     assert f"border-top-color: {accent}" in html
     assert f'body[data-tabs="bottom"] nav.tabs button[aria-selected="true"] {{ border-bottom-color: {accent}' in html
@@ -767,3 +768,59 @@ def test_the_top_bar_keeps_its_own_light_palette_whatever_the_report_theme_is():
     assert "header .meta { color: #666;" in html                 # not var(--muted) from the theme
     # the canvas still follows the report's own theme
     assert "background: var(--bg); outline: 2px solid #000;" in html
+
+
+# Rules that dress the viewer's chrome (the bar, the tab strip, the parameter menu) or the page
+# surround, not the report: hah is allowed its own branding there and nowhere else.
+_CHROME = ("header", "nav.tabs", "data-tabs", ".params", ".view", ":root", "html", "body",
+           "*", "button,", ".spinner", "keyframes")
+
+
+def _canvas_css(name):
+    """{selector: declarations} for every rule that paints something inside the canvas."""
+    src = (Path(__file__).resolve().parents[1] / "src/pbix2html/templates" / name).read_text(encoding="utf-8")
+    block = re.sub(r"/\*.*?\*/", "", src.split("<style>")[1].split("</style>")[0], flags=re.S)
+    rules = {}
+    for sel, body in re.findall(r"(?m)^\s*([^@{}][^{]*)\{([^}]*)\}", block):
+        sel = " ".join(sel.split())
+        if any(c in sel for c in _CHROME):
+            continue
+        # fixv1 §3 wants `.error-state`; the shared renderers emit `.error`. Same rule, one name here.
+        rules.setdefault(sel.replace(", .error-state", ""), " ".join(body.split()))
+    return rules
+
+
+def test_hah_mode_does_not_alter_the_canvas_design():
+    """hah fetches its own data; it does not restyle the report. Every rule that reaches inside the
+    canvas must be the one snapshot mode uses, or a visual silently looks different depending on
+    how it was delivered — hah used to add a teal stripe to every card and shorten every chart by
+    1.2rem to make room for a row count."""
+    main, hah = _canvas_css("report.html.j2"), _canvas_css("report_hah.html.j2")
+    extra = {"card-footer"}                 # hah-only, and an overlay: it reserves no space
+    for sel, body in main.items():
+        assert sel in hah, f"{sel} is missing from the hah canvas"
+        assert hah[sel] == body, f"{sel} differs:\n  snapshot: {body}\n  hah:      {hah[sel]}"
+    for sel in hah:
+        assert sel in main or sel.strip(".") in extra, f"{sel} styles the canvas in hah only"
+    # "Fit page" sizes the canvas with the height the chrome leaves over, so the bar's box is a
+    # canvas concern even though its colours are not: hah may be branded, not taller.
+    for name in ("report.html.j2", "report_hah.html.j2"):
+        css = (Path(__file__).resolve().parents[1] / "src/pbix2html/templates" / name).read_text(encoding="utf-8")
+        header = re.search(r"(?m)^\s*header \{(.*?)\}", css, re.S).group(1)
+        assert "padding: .75rem 1.25rem" in " ".join(header.split()), name
+        assert "border-bottom: 1px solid" in " ".join(header.split()), name
+
+
+def _visual_tag(name):
+    """The `<div class="visual …">` opening tag as the template writes it, comments stripped."""
+    src = (Path(__file__).resolve().parents[1] / "src/pbix2html/templates" / name).read_text(encoding="utf-8")
+    start = src.index('<div class="visual')
+    end = src.index('<div class="body"></div>', start)
+    return " ".join(re.sub(r"\{#.*?#\}", "", src[start:end], flags=re.S).split())
+
+
+def test_hah_builds_each_visual_from_the_same_markup_as_snapshot_mode():
+    """The frame is the .pbix's in both modes. hah used to emit `border`/`background` only when the
+    report set them, which left the template's own 1px grey box and opaque fill in place: every
+    visual came out boxed in hah and unboxed in snapshot, from the same file."""
+    assert _visual_tag("report_hah.html.j2") == _visual_tag("report.html.j2")

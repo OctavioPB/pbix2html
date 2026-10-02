@@ -408,6 +408,35 @@ after the fixes below). By far the richest of the three: 21 tables, 33 relations
 - No custom visuals. Slicer modes: `dropdown`/`between` only (86 slicers total — most pages repeat
   the same set). 4 more "Red/Green/Yellow/White" bookmarks, same pattern as the other two reports.
 
+## A summary table over unrelated dimensions, 2026-10-02
+
+"Why can't you render Unit Consumption Details?" — a table with month from a calendar, org and
+site from an org dimension, and one total from each of **six** fact tables, refused as `shape`.
+
+- The six facts were never the problem; each joins to both dimensions. The row set was.
+  `_multi_value_table` forms it by joining the *dimension* tables together, and a calendar has no
+  relationship to an org dimension — they meet only **through** a fact. There is no such join, so
+  the visual was refused. Removing the facts' columns did not help; removing the org columns did,
+  which is what pinned it down.
+- [x] New fallback `_spine_value_table`, used only when the existing split cannot proceed, so no
+  report that already drafts changes. The rows come from a **UNION of the arms** — Power BI's own
+  answer, "the combinations that actually have data". Each arm is still grouped by its whole key,
+  so it holds one row per key and the LEFT JOIN onto it cannot multiply rows: the same fan-out
+  argument as before, and the tests assert it.
+- [x] An arm is grouped by the categories **it** can reach. That is what let `Sum(Calendar.Year)`
+  (a value field on a *dimension* table, which cannot reach the org columns) sit in the same
+  table: it groups by the calendar's own category and joins on that key alone — exactly the filter
+  context Power BI gives it, since an unrelated dimension does not filter a calendar. A value that
+  reaches **no** category is still refused; that is the unrelated-table fan-out guard.
+- Six facts all calling their measure the same thing would have produced six identically named
+  output columns, so a duplicated name is qualified with its table. The report's own captions still
+  drive the headers.
+- Known limit: the query is a `WITH`, and `table_total_sql` cannot wrap one in a derived table, so
+  this shape gets no grand-total row. Better than a wrong one; worth revisiting.
+- `TestReport2`: 70 of 71 data visuals now draft, the last being two hourly fact tables with no
+  relationship between them. **Numbers unverified against Teradata** — the SQL parses and the join
+  structure is argued above, but nothing has been run.
+
 ## Chrome: a white top bar and report-app page tabs, 2026-10-02
 
 - [x] The top bar is white with a hairline shadow, so it lifts off the grey surround. It carries
@@ -879,3 +908,15 @@ them lines, the dominant real-world use).
   Implemented per spec in `pbix2html-fixv1.md` #10, but **not validated against a real HAH
   environment or the teradata-report MCP tools** in this session — treat generated `hah`
   HTML as unverified until someone with HAH access tries an actual upload/view.
+  - **First real HAH feedback (2026-10-02): "Failed to fetch" on every visual.** The endpoint was
+    frozen at build time from `--hah-base` while HAH serves the report from its own origin, so the
+    POST was cross-origin and answered without CORS headers. The page now resolves the endpoint
+    from its own URL (`?sqlApi=` overrides; the build-time base is the last resort), and the same
+    fallback covers `static/echarts.min.js`. Errors name the URL and say whether the call was
+    cross-origin. See ADR-004 and `tests/test_hah_endpoint.py`.
+    *Still unconfirmed on a real HAH:* whether `/api/execute` is the right path at all, and whether
+    HAH serves an ECharts UMD build under `/static/`. If the next attempt fails, the message in the
+    visual now names the URL it used — that is the one fact needed to settle both.
+  - Also from that round: hah mode was restyling the report (teal stripes on cards, every chart
+    1.2rem short, a grey frame around every visual, a 5px-taller bar shrinking the canvas). The
+    canvas is now identical to a snapshot render and two tests keep it that way.

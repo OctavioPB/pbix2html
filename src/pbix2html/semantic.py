@@ -2781,6 +2781,97 @@ def _multi_value_table(categories: list["_Field"], values: list["_Field"], kind:
     return sql + _order_by(sort, pos), used
 
 
+def _spine_value_table(categories: list["_Field"], values: list["_Field"], sort: list[dict] | None, *,
+                       expand_fn, table_map: dict[str, str], relationships: list[dict],
+                       parameters: dict[str, dict], filters: list[dict] | None = None) -> tuple[str, list[str]] | None:
+    """`_multi_value_table` for a table whose *dimension* columns come from tables that are not
+    related to each other.
+
+    The usual split joins the category tables together to form the row set. A real summary table
+    breaks that: date columns from a calendar and customer columns from an org dimension, with a
+    total from each of six fact tables. Calendar and the org table have no relationship — they meet
+    only *through* a fact — so there is no such join, and the whole visual was refused as `shape`.
+
+    Power BI's row set there is "the combinations that actually have data", so that is what this
+    builds: every value's arm is grouped by the categories **it** can reach, and the rows come from
+    a UNION of the arms that reach all of them. An arm is grouped by its whole key, so it holds one
+    row per key and a LEFT JOIN onto it cannot multiply rows — the same fan-out argument as
+    `_multi_value_table`. An arm that reaches only some of the categories (an aggregate over a
+    dimension table itself, say) joins on the keys it has, which is the filter context Power BI
+    gives it: an unrelated dimension does not filter it. A value that reaches *no* category is
+    still refused — that is the unrelated-table case, and it would repeat one number down the
+    column as though it meant something."""
+    if any(vf.selmins or vf.ctxs for vf in values) or not categories:
+        return None
+    by_table: dict[str, list[_Field]] = {}
+    for vf in values:
+        by_table.setdefault(next(iter(vf.tables)), []).append(vf)
+
+    arms: list[tuple[str, str, list[int]]] = []          # alias, sql, the category positions it carries
+    col_ref: dict[int, str] = {}
+    used: list[str] = []
+    for i, (table, vfs) in enumerate(by_table.items(), start=1):
+        reach: list[tuple[int, _Field]] = []
+        for j, c in enumerate(categories, start=1):
+            need = list(dict.fromkeys([t for _, cc in reach for t in cc.tables] + list(c.tables) + [table]))
+            if _draft_from_clause(need, table_map, relationships):
+                reach.append((j, c))
+        if not reach:
+            return None                                  # unrelated to every dimension: stays manual
+        built = _draft_from_clause(list(dict.fromkeys([t for _, c in reach for t in c.tables] + [table])),
+                                   table_map, relationships)
+        if built is None:
+            return None
+        srcs, als = built
+        where, ps = _draft_where(parameters, als, table_map, relationships, filters)
+        used += [p for p in ps if p not in used]
+        done = expand_fn(vfs, srcs, als, where, [c for _, c in reach])
+        if done is None:
+            return None
+        srcs, ps, extra = done
+        used += [p for p in ps if p not in used]
+        keys = [f"{c.expr} AS k{j}" for j, c in reach]
+        aggs = [f"{vf.expr} AS a{n}" for n, vf in enumerate(vfs)]
+        sql = "SELECT " + ", ".join(keys + aggs) + "\nFROM " + "\n".join(srcs)
+        if where:
+            sql += "\nWHERE " + " AND ".join(where)
+        sql += "\nGROUP BY " + ", ".join([str(n) for n in range(1, len(keys) + 1)] + extra)
+        alias = f"arm{i}"
+        arms.append((alias, sql, [j for j, _ in reach]))
+        for n, vf in enumerate(vfs):
+            col_ref[id(vf)] = f"{alias}.a{n}"
+
+    everything = list(range(1, len(categories) + 1))
+    full = [a for a in arms if a[2] == everything]
+    if not full:
+        return None            # nothing carries the whole row key: the row set is unknowable
+    spine_keys = ", ".join(f"k{j}" for j in everything)
+    spine = "\nUNION\n".join(f"SELECT {spine_keys} FROM {alias}" for alias, _, _ in full)
+    joins = []
+    for alias, _, positions in arms:
+        on = " AND ".join(f"(spine.k{j} = {alias}.k{j} OR (spine.k{j} IS NULL AND {alias}.k{j} IS NULL))"
+                          for j in positions)
+        joins.append(f"LEFT JOIN {alias} ON {on}")
+    cte = ",\n".join(f"{alias} AS (\n{sql}\n)" for alias, sql, _ in arms)
+    # Six facts can all call their measure `ttl_unit_cnsmptn_nbr`; six output columns of the same
+    # name are legal but ambiguous to anything that later refers to one by name. The report's own
+    # captions still drive the headers (`header_names`).
+    seen = [vf.out_name for vf in values]
+    def out_name(vf: "_Field") -> str:
+        if seen.count(vf.out_name) == 1:
+            return vf.out_name
+        # an output alias is ours to invent, unlike a source column: a plain identifier
+        return _sql_col(_ident(f"{next(iter(vf.tables))} {vf.label}"))
+    cols = ([f"spine.k{j} AS {c.out_name}" for j, c in enumerate(categories, start=1)]
+            + [f"{col_ref[id(vf)]} AS {out_name(vf)}" for vf in values])
+    pos: dict[tuple[str, str], int] = {}
+    for i, x in enumerate(categories + values, start=1):
+        pos.setdefault(x.key, i)
+    sql = (f"WITH {cte},\nspine AS (\n{spine}\n)\n"
+           + "SELECT " + ", ".join(cols) + "\nFROM spine\n" + "\n".join(joins))
+    return sql + _order_by(sort, pos), used
+
+
 _CONST_CATEGORY = "CAST(' ' AS VARCHAR(1)) AS category"
 
 
@@ -2974,9 +3065,15 @@ def _draft_visual_sql(v: dict, kind: str, measures: dict[tuple[str, str], str], 
         # JOIN split as multi_fact, just carrying several independent output columns instead
         # of one formula built from {AGG:n} markers.
         if kind in ("table", "matrix", "multicard") and len(values) > 1 and all(len(f.tables) == 1 for f in values):
-            return _multi_value_table(categories, values, kind, sort, expand_fn=expand,
-                                      table_map=table_map, relationships=relationships,
-                                      parameters=parameters, filters=filters)
+            drafted = _multi_value_table(categories, values, kind, sort, expand_fn=expand,
+                                         table_map=table_map, relationships=relationships,
+                                         parameters=parameters, filters=filters)
+            # the split above needs the dimension tables to be joinable to each other; when they
+            # are not (a calendar beside an org dimension, meeting only through the facts) the row
+            # set comes from the data instead
+            return drafted or _spine_value_table(categories, values, sort, expand_fn=expand,
+                                                 table_map=table_map, relationships=relationships,
+                                                 parameters=parameters, filters=filters)
         if not (kind in _UNION_ARM_KINDS and len(values) > 1 and all(len(f.tables) == 1 for f in values)):
             return multi_fact(values, categories, kind, sort, expand_fn=expand,
                               table_map=table_map, relationships=relationships, parameters=parameters,

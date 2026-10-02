@@ -191,6 +191,24 @@ screenshots. Rules: `overlap`, `outside_page`, `too_small`, `no_renderer`, `no_d
 Fixes it led to: theme colour ids for a report without a custom theme, textbox paragraph alignment, default shape
 fill (the theme's first colour), card number colour, readable default text on dark panels and translucent buttons.
 
+## The two templates: same canvas, different chrome
+
+`report.html.j2` and `report_hah.html.j2` must draw the canvas identically — the delivery mode is how the
+data arrives, not what the report looks like. Anything that reaches inside `.page` (the `.visual` box and
+its frame, titles, charts, tables, cards, slicer widgets) has to be the same rule and the same markup in
+both; only `header`, `nav.tabs`, `.params` and the hah spinner may differ. The bar's *box* counts as
+canvas too: "Fit page" sizes the canvas from the height the chrome leaves, so a taller bar shrinks the
+report. HAH's brand palette (`--td-teal`, fixv1 §4) therefore dresses the bar only, with the teal accent
+as an inset shadow inside its padding.
+
+Two tests enforce this (`tests/test_table_card.py`): `test_hah_mode_does_not_alter_the_canvas_design`
+compares the canvas CSS rule by rule, `test_hah_builds_each_visual_from_the_same_markup_as_snapshot_mode`
+compares the `<div class="visual">` tag. Add a rule to one template and they fail until it is in the other.
+What they caught: a teal stripe on every card and KPI, teal slicer tiles, `.chart { bottom: 1.2rem }`
+shortening every chart for a row-count strip, a missing subtitle, and `border`/`background` emitted only
+when set — which left the template's own grey frame and opaque fill on every visual in hah mode. See
+ADR-004.
+
 ## 100 % stacked charts
 
 `hundredPercentStacked*` visuals are drawn with `v.percent`: each category's series are rescaled to sum to

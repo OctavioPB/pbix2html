@@ -6,7 +6,18 @@
 <title>{{ spec.report }}</title>
 <!-- ADR-004: self-hosted from HAH, no CDN. Assumes HAH's static path serves an ECharts
      UMD build under this name — unverified, see ADR-004. -->
-<script src="{{ static_base }}/echarts.min.js"></script>
+<script src="{{ static_base }}/echarts.min.js" onerror="window.__ECHARTS_SRC_FAILED__ = this.src"></script>
+<script>
+  // Same reasoning as the SQL endpoint below: `--hah-base` is a build-time guess, and a report
+  // built for one HAH and opened on another loads its charts from a host that is not there. If the
+  // configured copy did not load, try the origin actually serving this page. `document.write` runs
+  // during parsing and blocks it, so echarts is defined before any renderer can ask for it.
+  if (!window.echarts && (location.protocol === 'http:' || location.protocol === 'https:')) {
+    var cut = location.pathname.indexOf('/api/');     // …/dev-html-app-host/api/reports/42/view
+    var alt = cut >= 0 ? location.origin + location.pathname.slice(0, cut) + '/static/echarts.min.js' : null;
+    if (alt && alt !== window.__ECHARTS_SRC_FAILED__) document.write('<script src="' + alt + '"><\/script>');
+  }
+</script>
 <style>
   :root {
     --bg: {{ theme.background }};
@@ -15,6 +26,10 @@
     --border: {{ theme.border }};
     --accent: {{ theme.data_colors[0] }};
     --font: {{ theme.font_family|safe }};
+    /* HAH's own palette (fixv1 §4). It dresses the *chrome* — the top bar — and nothing else:
+       inside the canvas the report's theme rules, exactly as in snapshot mode. A brand colour
+       on a visual (the teal stripe this template used to put on every card and KPI) is a change
+       to the report's design that the .pbix never asked for. */
     --td-teal: #00C7B1;
     --td-orange: #FF6D00;
     --td-navy: #1A1A2E;
@@ -29,36 +44,43 @@
   body[data-tabs="bottom"] main.content { order: 1; }
   body[data-tabs="bottom"] nav.tabs { order: 2; padding: .5rem 1.25rem; }
   body[data-tabs="bottom"] nav.tabs button { border-radius: 0 0 7px 7px; border-top: 0; border-bottom: 3px solid transparent; }
-  body[data-tabs="bottom"] nav.tabs button[aria-selected="true"] { border-bottom-color: var(--td-teal); box-shadow: 0 1px 4px rgba(0, 0, 0, .10); }
+  body[data-tabs="bottom"] nav.tabs button[aria-selected="true"] { border-bottom-color: var(--accent); box-shadow: 0 1px 4px rgba(0, 0, 0, .10); }
   body[data-tabs="left"] { flex-flow: row wrap; align-items: flex-start; }
   body[data-tabs="left"] > header { flex: 1 0 100%; }
   body[data-tabs="left"] > nav.tabs { flex: 0 0 auto; flex-direction: column; align-items: stretch;
     width: 11rem; padding: .75rem .5rem; border-right: 1px solid var(--border); align-self: stretch; }
   body[data-tabs="left"] > nav.tabs button { text-align: left; border-top: 0; border-left: 3px solid transparent; border-radius: 0 7px 7px 0; }
-  body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--td-teal); background: #FFFFFF; box-shadow: 1px 0 4px rgba(0, 0, 0, .10); }
+  body[data-tabs="left"] > nav.tabs button[aria-selected="true"] { border-left-color: var(--accent); background: #FFFFFF; box-shadow: 1px 0 4px rgba(0, 0, 0, .10); }
   body[data-tabs="left"] > main.content { flex: 1 1 0; min-width: 0; }
   html, body { margin: 0; background: #E2E2E2; color: var(--fg); font-family: var(--font); font-size: 14px; }
-  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1.25rem; padding: .9rem 1.25rem;
-           color: #fff; background: linear-gradient(135deg, var(--td-navy) 0%, #2d2d5e 100%);
-           border-bottom: 3px solid var(--td-teal); }
+  /* HAH's branded bar (fixv1 §4), and the only thing in this file that looks different from a
+     snapshot render. Its *box* is the snapshot bar's to the pixel — same padding, same 1px
+     bottom edge — because "Fit page" sizes the canvas with whatever height the chrome leaves:
+     a bar 5px taller shrank the whole report. The teal accent is therefore drawn inside the
+     bar's own padding (inset shadow), where it costs no height. */
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem 1.25rem;
+           padding: .75rem 1.25rem; color: #fff;
+           background: linear-gradient(135deg, var(--td-navy) 0%, #2d2d5e 100%);
+           border-bottom: 1px solid var(--td-navy); box-shadow: inset 0 -3px 0 var(--td-teal); }
   header .view { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: #fff; }
   header .view select { font: inherit; color: inherit; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35); border-radius: 2px; padding: .15rem .3rem; }
   header .view option { color: #111; }
   header h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
   header .meta { color: #c8c8e0; font-size: .8rem; }
   /* Page tabs read like a report app's: the active page is a raised white tab carrying the
-     brand accent, the others sit flat on the grey surround. The header keeps its own branding. */
+     theme's accent, the others sit flat on the grey surround — the same strip as snapshot mode.
+     Only the bar above it carries HAH's branding. */
   nav.tabs { display: flex; gap: .25rem; padding: .5rem 1.25rem 0; }
   nav.tabs button { background: transparent; border: 0; border-top: 3px solid transparent;
                     border-radius: 7px 7px 0 0; padding: .45rem .95rem; cursor: pointer;
                     color: #5A5A5A; font: inherit; line-height: 1.3; }
   nav.tabs button:hover { background: rgba(255, 255, 255, .6); color: #1A1A1A; }
   nav.tabs button[aria-selected="true"] { background: #FFFFFF; color: #111111; font-weight: 600;
-                    border-top-color: var(--td-teal); box-shadow: 0 -1px 4px rgba(0, 0, 0, .10); }
+                    border-top-color: var(--accent); box-shadow: 0 -1px 4px rgba(0, 0, 0, .10); }
   .params { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; font-size: .8rem; }
   header .params { color: inherit; }
   .params label { display: inline-flex; gap: .4rem; align-items: center; }
-  .params input { font: inherit; padding: .15rem .3rem; }
+  .params input, .params select { font: inherit; padding: .15rem .3rem; }
   /* The canvas sits on a grey surround, so it needs its own edge: a 2px frame and a soft
      shadow. `background` is the theme's, not the surround's — a page that sets its own in
      the .pbix overrides it inline, and one that does not must still look like paper. The frame
@@ -69,10 +91,13 @@
           box-shadow: 0 6px 24px rgba(0, 0, 0, .18); }
   .page[hidden] { display: none; }
   .visual { position: absolute; overflow: hidden; background: var(--bg); border: 1px solid var(--border); border-radius: 2px; display: flex; flex-direction: column; container-type: size; }
-  .visual.card, .visual.kpi { border-top: 4px solid var(--td-teal); }
   .visual .title { font-size: clamp(calc(.65rem * var(--scale, 1)), 8cqmin, calc(.9rem * var(--scale, 1))); font-weight: 400; padding: calc(.35rem * var(--scale, 1)) calc(.6rem * var(--scale, 1)) 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .visual .title.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
+  .visual .subtitle { font-size: calc(.72rem * var(--scale, 1)); color: var(--muted); padding: 0 calc(.6rem * var(--scale, 1)) calc(.1rem * var(--scale, 1)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .visual .body { flex: 1; min-height: 0; position: relative; }
-  .chart { position: absolute; inset: 0; bottom: 1.2rem; }
+  /* `inset: 0`, with no strip reserved at the bottom: a chart here must occupy exactly the box
+     Power BI gives it, the same box snapshot mode draws. The row count is an overlay instead. */
+  .chart { position: absolute; inset: 0; }
   .card { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; padding: calc(.5rem * var(--scale, 1)); }
   .card .value { flex: none; font-size: clamp(calc(1rem * var(--scale, 1)), 20cqmin, calc(2.4rem * var(--scale, 1))); font-weight: 600; line-height: 1.2; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card .label { flex: none; color: var(--muted); font-size: clamp(calc(.6rem * var(--scale, 1)), 7cqmin, calc(.8rem * var(--scale, 1))); margin-top: .3rem; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -124,18 +149,22 @@
   .sl-tiles { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; height: 100%; overflow: auto; }
   .sl-tile { font: inherit; color: inherit; background: var(--sl-bg); border: 1px solid var(--border); border-radius: 999px; padding: .2rem .7rem; cursor: pointer; }
   .sl-tile:disabled { cursor: default; opacity: .8; }
-  .sl-tile.on { background: var(--td-teal); color: #fff; border-color: var(--td-teal); }
+  .sl-tile.on { background: var(--accent); color: var(--accent-text, #fff); border-color: var(--accent); }
   .info-icon { display: inline-flex; align-items: center; justify-content: center; width: calc(1.3rem * var(--scale, 1)); height: calc(1.3rem * var(--scale, 1)); margin: .2rem; border: 1.5px solid var(--accent, #666); border-radius: 50%; font: italic 700 calc(.8rem * var(--scale, 1)) serif; color: var(--accent, #666); cursor: help; }
   .clickable { cursor: pointer; }
   .clickable:hover { opacity: .8; }
-  .error-state { color: #b00020; font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
+  /* `.error` is what the shared renderers emit; `.error-state` is the name fixv1 §3 asks for. */
+  .error, .error-state { color: #b00020; font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
   .loading { color: var(--muted); font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
   .truncated { position: absolute; right: 0; bottom: 0; padding: 0 .3rem; font-size: calc(.65rem * var(--scale, 1));
                color: var(--muted); background: var(--bg); border-top-left-radius: 3px; pointer-events: auto; }
-  .card-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 1.2rem; line-height: 1.2rem;
-                 padding: 0 .6rem; font-size: .68rem; color: var(--muted); border-top: 1px solid var(--border); }
+  /* The row count (fixv1 §3) is a corner overlay, like `.truncated` next to it, and not a strip
+     across the bottom of the visual: a reserved strip shortened every chart by 1.2rem and made
+     the canvas differ from the same report rendered as a snapshot. */
+  .card-footer { position: absolute; left: 0; bottom: 0; padding: 0 .3rem; font-size: calc(.65rem * var(--scale, 1));
+                 color: var(--muted); background: var(--bg); border-top-right-radius: 3px; pointer-events: none; }
   .spinner { width: 1.1rem; height: 1.1rem; margin: .8rem; border: 2px solid var(--border);
-             border-top-color: var(--td-teal); border-radius: 50%; animation: spin .7s linear infinite; }
+             border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
   @media print { nav.tabs, .params, header .view { display: none; } .page[hidden] { display: block; page-break-after: always; } .page.navonly[hidden] { display: none; }
@@ -198,9 +227,22 @@
 {% for p in spec.pages %}
 <section class="page{{ ' navonly' if p.nav_only }}" id="{{ p.id }}" data-w="{{ p.width }}" data-h="{{ p.height }}" data-hidden-groups='{{ p.hidden_groups|tojson }}' style="--ratio: {{ p.width }} / {{ p.height }}{% if p.background_image %}; background: {{ p.background_image }}{% if p.background %} {{ p.background }}{% endif %}{% elif p.background %}; background: {{ p.background }}{% endif %}" {% if not p.initial %}hidden{% endif %}>
   {% for v in p.visuals %}
-  <div class="visual {{ v.kind }}{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.style.border and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
-       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}{% if v.btn_css %}; {{ v.btn_css }}{% elif v.style.background %}; background: {{ v.style.background }}{% endif %}{% if v.style.border %}; border: {{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% endif %}{% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}{% if v.shadow_css %}; box-shadow: {{ v.shadow_css }}{% endif %}{% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
+  {# The frame is the .pbix's, exactly as in report.html.j2: Power BI's own default is no border
+     and no fill, so a visual that says nothing gets neither. Emitting these only when set left
+     the template's own 1px grey box and opaque background in place, which drew a frame around
+     every visual in hah mode and around none in snapshot mode. #}
+  <div class="visual{{ ' static' if v.kind == 'static' and not v.action and not v.style.background and not v.style.line_color and not v.style.border and not v.image and not v.texts.shape_text }}{{ ' clickable' if v.action }}{{ ' btn' if v.btn_css }}{{ ' off' if v.btn_off }}" id="v-{{ v.id }}" data-visual="{{ v.id }}" data-kind="{{ v.kind }}"{% if v.groups %} data-groups="{{ v.groups|join(' ') }}"{% endif %}{% if v.start_hidden %} hidden{% endif %}{% if v.action %}{% if v.action.type == "page" %} data-nav="{{ v.action.target }}"{% else %} data-set='{{ v.action.set|tojson }}'{% endif %} role="button" tabindex="0"{% endif %}
+       style="left:{{ v.left }}%; top:{{ v.top }}%; width:{{ v.w }}%; height:{{ v.h }}%; z-index:{{ v.z }}
+              {% if v.btn_css %}; {{ v.btn_css }}{% else %}; background: {{ v.style.background or 'transparent' }}{% endif %}
+              ; border: {% if v.style.border %}{{ v.style.border_weight or 1 }}px solid {{ v.style.border_color or 'var(--border)' }}{% else %}none{% endif %}
+              {% if v.shadow_css %}; box-shadow: {{ v.shadow_css }}{% endif %}
+              {% if v.style.round_edge %}; border-radius: {{ v.style.round_edge }}px{% elif v.style.border_radius %}; border-radius: {{ v.style.border_radius }}px{% elif v.style.shape_kind == 'oval' %}; border-radius: 50%{% endif %}
+              {# a line shape's rotation is Power BI's way of drawing a *vertical* line, not a
+                 rotated box, so it is applied to any other shape but not to a line — same as
+                 report.html.j2, where the reasoning is written out in full. #}
+              {% if v.style.rotation and v.style.shape_kind != 'line' %}; transform: rotate({{ v.style.rotation }}deg){% endif %}">
     {% if v.title %}<div class="title"{% if v.title_css %} style="{{ v.title_css }}"{% endif %}>{{ v.title }}</div>{% endif %}
+    {% if v.texts.subtitle %}<div class="subtitle">{{ v.texts.subtitle }}</div>{% endif %}
     <div class="body"></div>
   </div>
   {% endfor %}
@@ -246,12 +288,54 @@
   };
   {{ slicer_js|safe }}
 
-  // ---------- HAH SQL contract (ADR-004; unverified against a real HAH) ----------
-  // HAH returns HTTP 200 even for SQL errors — always check j.error before j.data.
+  // ---------- HAH SQL contract (ADR-004) ----------
+  // The endpoint is resolved when the call is made, not frozen at build time. `--hah-base` is a
+  // guess about where the report will end up: built for dev and uploaded to uat, or served
+  // through a different ingress host, it becomes a cross-origin POST that HAH answers without
+  // CORS headers — and the browser reports only "Failed to fetch", with nothing saying why.
+  // HAH serves the report from its own origin ({base}/api/reports/{id}/view), so the page's URL
+  // carries the real mount point; that beats anything known at build time. `?sqlApi=…` overrides
+  // it, so a wrong endpoint can be tested on HAH without rebuilding the report.
+  let apiLogged = false;
+  function sqlEndpoint() {
+    const configured = window.__PBIX2HTML_SQL_API__ || SQL_API;
+    const forced = new URLSearchParams(location.search).get('sqlApi');
+    if (forced) return forced;
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      const cut = location.pathname.indexOf('/api/');       // …/dev-html-app-host/api/reports/42/view
+      if (cut >= 0) return location.origin + location.pathname.slice(0, cut) + '/api/execute';
+      try {
+        const u = new URL(configured, location.href);
+        if (u.origin === location.origin) return u.href;
+      } catch (e) { /* not a URL: use it as given */ }
+    }
+    return configured;            // a file:// preview, or a base on another host: nothing better
+  }
   async function fetchSQL(sql) {
-    const resp = await fetch(SQL_API, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
-    });
+    const url = sqlEndpoint();
+    if (!apiLogged) {
+      apiLogged = true;
+      console.info('pbix2html: HAH SQL endpoint', url, '— page origin', location.origin);
+    }
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
+      });
+    } catch (e) {        // a TypeError here means the request never completed: not a SQL error
+      let sameOrigin = false;
+      try { sameOrigin = new URL(url, location.href).origin === location.origin; } catch (_) { /* keep false */ }
+      throw new Error(`Could not reach the HAH SQL API at ${url} (${e.message}). ` + (sameOrigin
+        ? 'It is on this page\'s own origin, so the path is the suspect — try ?sqlApi=<path>.'
+        : 'This is a cross-origin request and HAH sends no CORS headers for it: open the report '
+          + 'from HAH itself rather than from a file or another host, or pass ?sqlApi=<url>.'));
+    }
+    if (!resp.ok) {      // a 404 used to surface as an opaque JSON parse error
+      const body = (await resp.text().catch(() => '')).trim().slice(0, 200);
+      throw new Error(`HAH answered ${resp.status} ${resp.statusText || ''} for ${url}`
+        + (body ? `: ${body}` : ''));
+    }
+    // HAH returns HTTP 200 even for SQL errors — always check j.error before j.data.
     const j = await resp.json();
     if (j.error) throw new Error(j.error_message || 'SQL error on HAH');
     return j.data || [];
@@ -462,6 +546,11 @@
   const applyLabels = () => Object.keys(charts).forEach(id => applyChart(id, false));
 
   function chart(el, v, option) {
+    if (!window.echarts) {        // "echarts is not defined" on every chart explains nothing
+      throw new Error('The chart library did not load from '
+        + (window.__ECHARTS_SRC_FAILED__ || 'the HAH static path')
+        + ' — HAH must serve an ECharts UMD build as /static/echarts.min.js (ADR-004).');
+    }
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
     // The tooltip lives in <body>, above every visual: inside the chart's own box it is clipped by the visual
@@ -736,17 +825,6 @@
     return { ...base, grid, legend,
              xAxis: horizontal ? valAxis : catAxis, yAxis: horizontal ? { ...catAxis, inverse: true } : valAxis, series: ser };
   }
-  function chart(el, v, option) {
-    el.innerHTML = '<div class="chart"></div>';
-    const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
-    // The tooltip lives in <body>, above every visual: inside the chart's own box it is clipped by the visual
-    // (`overflow: hidden`) and loses to any visual stacked higher, which is what hid it behind other charts.
-    option.tooltip = { ...(option.tooltip || {}), appendToBody: true, confine: false, extraCssText: 'z-index:2147483600;' };
-    chartOptions[v.id] = option;          // a chart painted later still honours the current choice
-    charts[v.id] = c;
-    applyChart(v.id, true);
-  }
-
   // ---------- per-visual load: spinner → fetchSQL → paint → footer/error ----------
   function paint(id, block) {
     const v = visualsById[id]; const el = document.querySelector(`#v-${CSS.escape(id)} .body`);

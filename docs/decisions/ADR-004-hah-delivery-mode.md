@@ -45,6 +45,61 @@ uploading and opening a report on HAH. Specifically unverified:
   materially different trust model per visual query and is only as safe as `safeSql()`'s
   escaping.
 
+### HAH's branding stops at the top bar (2026-10-02)
+
+`pbix2html-fixv1.md` §4 lists HAH design tokens (`--td-teal/-orange/-navy`), a gradient
+top bar and `.kpi-card { border-top: 4px solid teal }`, and §3 a per-visual row-count
+footer. Taken literally, that restyles the report: the same `.pbix` rendered as `hah`
+came out with a teal stripe on every card and KPI, teal slicer tiles, every chart 1.2rem
+shorter to leave room for the row count, and — because the template emitted `border`/
+`background` only when the report set them — a 1px grey frame and an opaque fill around
+every visual that snapshot mode draws without either. The branded bar was also 5px
+taller, and "Fit page" sizes the canvas from the height the chrome leaves, so the whole
+report rendered smaller.
+
+The delivery mode is **how the data arrives, not what the report looks like**. So the
+tokens now dress the top bar only; the canvas is the report's, identical to a snapshot
+render. The teal accent is an inset shadow inside the bar's own padding, so the bar's box
+matches snapshot's to the pixel. The row count stays (fixv1 §3) as a corner overlay next
+to `.truncated`, reserving no space. `.error-state` keeps its fixv1 name, sharing the
+rule with the `.error` the shared renderers emit.
+
+Guarded by `test_hah_mode_does_not_alter_the_canvas_design` and
+`test_hah_builds_each_visual_from_the_same_markup_as_snapshot_mode`: the two templates'
+canvas CSS and `<div class="visual">` markup must stay identical, so the next change to
+one of them cannot quietly diverge again. Only chrome selectors (`header`, `nav.tabs`,
+`.params`, the spinner) are exempt.
+
+### The endpoint is resolved at run time, not frozen at build time (2026-10-02)
+
+First real report from a HAH environment: **"Failed to fetch"** on every visual. That message is a
+`fetch()` `TypeError` — the request never completed — so it is not a 404 and not a SQL error (the
+contract above answers those with HTTP 200). It means cross-origin, a blocked scheme, or a host
+that is not there.
+
+The cause is structural: `--hah-base` is a guess made when the HTML is generated, baked into
+`sql_api` and `static_base`, while HAH serves the report from its own origin at
+`{base}/api/reports/{id}/view`. Build for dev and upload to uat (`dev-html-app-host` vs
+`html-app-host`), reach the platform through a different ingress host, or just open the file
+locally, and every POST is cross-origin — answered without CORS headers, reported as those three
+words, with nothing naming the URL it tried.
+
+So the page now works it out for itself, in this order: `?sqlApi=<url>` in the address bar; else
+the mount point in its own URL (`…/<app>/api/reports/42/view` → `…/<app>/api/execute`) whenever it
+is served over http(s); else the build-time base, which is all a `file://` preview has. The same
+fallback covers `static/echarts.min.js`, whose `<script src>` carried the identical assumption —
+a wrong base killed the chart library too, with "echarts is not defined" on every chart. Failures
+now name the URL they used, say whether the call was cross-origin, and report a non-200 with its
+status and body instead of dying inside `resp.json()`; the resolved endpoint is logged once to the
+console.
+
+`tests/test_hah_endpoint.py` serves a report the way HAH does, from a wrong build-time base, and
+asserts it posts to the origin that served it, falls back when there is no mount point to read,
+honours `?sqlApi=`, loads ECharts from the serving origin, and explains a dead endpoint.
+
+This also removed a duplicate `function chart()` in the hah template — two identical copies, the
+second winning, so a fix applied to the first would have done nothing.
+
 ## Consequences
 
 - A `hah`-mode HTML must be manually verified against a real HAH environment (upload,
