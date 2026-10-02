@@ -56,6 +56,18 @@ Relationships: `model.json → relationships` gives `FromTable/FromColumn/ToTabl
 and the filter direction. A visual that shows `Region.Name` alongside `Sales.Margin`
 implies `JOIN region r ON r.id = v.region_id` per that relationship.
 
+## A table whose dimensions are not related to each other
+
+`_multi_value_table` forms a summary table's row set by joining the *dimension* tables together.
+When they are unrelated — a calendar beside an org dimension, meeting only through the facts —
+there is no such join, and `_spine_value_table` takes over: each value's arm is grouped by the
+categories it can reach, and the rows come from a UNION of the arms that reach all of them
+("the combinations that actually have data", which is what Power BI shows). An arm is always
+grouped by its whole key, so a LEFT JOIN onto it cannot multiply rows. An arm reaching only some
+categories joins on those alone — the filter context Power BI gives it. A value reaching **no**
+category is refused: that is the unrelated-table fan-out guard, not an oversight. The result is a
+`WITH`, so it carries no grand-total row (`table_total_sql` cannot wrap one).
+
 ## Column names vs table aliases
 
 A **table alias** is ours to invent, so `_sql_alias` may rewrite it (and a reserved word gets a
