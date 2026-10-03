@@ -12,6 +12,16 @@ point to an internal copy), data in `<script id="data" type="application/json">`
 (snapshot) or `window.API_BASE` (live). No build step, no framework. Must open from disk
 (file://) in snapshot mode.
 
+**Where ECharts comes from is a per-mode decision** (`render.echarts_source`, ADR-004).
+`--echarts <file>` or `download` inlines the library in the HTML (`download` caches it in
+`ECHARTS_CACHE`, default `~/.pbix2html/echarts.min.js`); a URL becomes the `<script src>`.
+`--mode hah` **inlines it by default**: HAH's `/static/` serves Chart.js, Plotly and Mermaid,
+not ECharts, so a hah report that loads the library from the platform draws no charts at all —
+confirmed against a real HAH, not a guess. `--echarts hah-static` restores the old behaviour.
+A hah HTML is then ~1 MB bigger. When it is not inlined, the hah template tries the configured
+path, three variants under the origin serving the page, and the CDN, records every URL in
+`window.__ECHARTS_TRIED`, and a chart that cannot be drawn names them all.
+
 ## Canvas
 
 Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-ratio`, and

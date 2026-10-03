@@ -193,7 +193,7 @@
     <div class="radios">
       <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true;"> Snapshot (embedded data)</label>
       <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true;"> Live (needs the service running)</label>
-      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false;"> HAH (HTML App Host — see ADR-004, untested against a real HAH)</label>
+      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false;"> HAH (HTML App Host — see ADR-004; the data still has to be validated)</label>
     </div>
     <div id="hah-options" hidden>
       <label for="hah_env">HAH environment</label>

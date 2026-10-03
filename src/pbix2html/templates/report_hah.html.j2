@@ -4,20 +4,48 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ spec.report }}</title>
-<!-- ADR-004: self-hosted from HAH, no CDN. Assumes HAH's static path serves an ECharts
-     UMD build under this name — unverified, see ADR-004. -->
-<script src="{{ static_base }}/echarts.min.js" onerror="window.__ECHARTS_SRC_FAILED__ = this.src"></script>
+{% if echarts_inline %}
+<!-- ADR-004: the library travels with the report (`--echarts download`). HAH serves Chart.js,
+     Plotly and Mermaid under /static/ — not ECharts — so nothing here depends on the platform. -->
+<script>{{ echarts_inline|safe }}</script>
+{% else %}
+<!-- ADR-004: loaded from HAH's static path, which a real HAH answered with 404 — if these all
+     fail, rebuild with `--echarts download` and the library is embedded in the file instead. -->
+<script src="{{ echarts_url or static_base + '/echarts.min.js' }}"
+        onerror="window.__ECHARTS_SRC_FAILED__ = this.src"></script>
 <script>
-  // Same reasoning as the SQL endpoint below: `--hah-base` is a build-time guess, and a report
-  // built for one HAH and opened on another loads its charts from a host that is not there. If the
-  // configured copy did not load, try the origin actually serving this page. `document.write` runs
-  // during parsing and blocks it, so echarts is defined before any renderer can ask for it.
-  if (!window.echarts && (location.protocol === 'http:' || location.protocol === 'https:')) {
-    var cut = location.pathname.indexOf('/api/');     // …/dev-html-app-host/api/reports/42/view
-    var alt = cut >= 0 ? location.origin + location.pathname.slice(0, cut) + '/static/echarts.min.js' : null;
-    if (alt && alt !== window.__ECHARTS_SRC_FAILED__) document.write('<script src="' + alt + '"><\/script>');
-  }
+  // Nothing in this file can know where the library lives on a given HAH, so the page tries, in
+  // order: the configured path above, then the same names under the origin that is actually
+  // serving the report (`--hah-base` is a build-time guess; see sqlEndpoint() for the same
+  // problem with the SQL API), then the CDN in case this environment has egress. Every URL tried
+  // is recorded, so a chart that cannot be drawn can name all of them instead of saying
+  // "echarts is not defined".
+  window.__ECHARTS_TRIED = window.__ECHARTS_SRC_FAILED__ ? [window.__ECHARTS_SRC_FAILED__] : [];
+  window.__ECHARTS_READY = (function () {
+    if (window.echarts) return Promise.resolve();
+    const urls = [];
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      const cut = location.pathname.indexOf('/api/');   // …/dev-html-app-host/api/reports/42/view
+      const mount = location.origin + (cut >= 0 ? location.pathname.slice(0, cut) : '');
+      ['/static/echarts.min.js', '/static/js/echarts.min.js', '/static/echarts/echarts.min.js',
+       '/static/libs/echarts.min.js'].forEach(p => urls.push(mount + p));
+    }
+    urls.push({{ echarts_cdn|tojson }});
+    const load = src => new Promise((ok, fail) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = ok; s.onerror = () => fail(new Error(src));
+      document.head.appendChild(s);
+    });
+    return urls.reduce((chain, src) => chain.catch(async () => {
+      if (window.echarts) return;
+      if (window.__ECHARTS_TRIED.includes(src)) throw new Error('already tried');
+      window.__ECHARTS_TRIED.push(src);
+      await load(src);
+      if (!window.echarts) throw new Error(src + ' loaded but defined no echarts');
+    }), Promise.reject(new Error('start')));
+  })();
 </script>
+{% endif %}
 <style>
   :root {
     --bg: {{ theme.background }};
@@ -547,9 +575,11 @@
 
   function chart(el, v, option) {
     if (!window.echarts) {        // "echarts is not defined" on every chart explains nothing
-      throw new Error('The chart library did not load from '
-        + (window.__ECHARTS_SRC_FAILED__ || 'the HAH static path')
-        + ' — HAH must serve an ECharts UMD build as /static/echarts.min.js (ADR-004).');
+      throw new Error('No ECharts build loaded. Tried: '
+        + ((window.__ECHARTS_TRIED || []).join(', ') || 'nothing')
+        + '. HAH does not serve ECharts under /static/ — rebuild the report with '
+        + '`pbix2html convert … --mode hah --echarts download` and the library travels with it '
+        + '(ADR-004).');
     }
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
@@ -865,6 +895,9 @@
           if (tb.rows.length && tb.columns.length === block.columns.length) block.total = tb.rows[0];
         } catch (e) { console.warn('total row skipped:', e.message); }
       }
+      // the chart library may still be coming from one of the fallback URLs; a few microseconds
+      // here beats every chart failing because the first query came back first
+      await (window.__ECHARTS_READY || Promise.resolve()).catch(() => {});
       paint(v.id, block);
       const footer = document.createElement('div');
       footer.className = 'card-footer';

@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ spec.report }}</title>
-<script src="{{ echarts_cdn }}"></script>
+{% if echarts_inline %}<script>{{ echarts_inline|safe }}</script>
+{% else %}<script src="{{ echarts_cdn }}"></script>{% endif %}
 <style>
   :root {
     --bg: {{ theme.background }};

@@ -889,9 +889,11 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
             detail.append(f"{n_err} visual(s) had an error fetching data (shown inside the HTML).")
         if mode == "hah":
             detail.append(
-                f"HTML generated for HAH ({hah_env}, {hah_base}); not tested against a real HAH "
-                f"yet (see ADR-004). Upload it with the teradata-report skill's create_report "
-                f"tool before trusting it for production."
+                f"HTML generated for HAH ({hah_env}, {hah_base}); upload it with the "
+                f"teradata-report skill's create_report tool. The SQL endpoint is worked out from "
+                f"the URL HAH serves it from, so this environment choice only matters as a "
+                f"fallback, and the chart library is embedded in the file because HAH does not "
+                f"serve ECharts — which makes it about 1 MB bigger (ADR-004)."
             )
         if mode == "live":
             live_status = _live_status(settings.api_base, name)

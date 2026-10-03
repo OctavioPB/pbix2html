@@ -914,9 +914,14 @@ them lines, the dominant real-world use).
     from its own URL (`?sqlApi=` overrides; the build-time base is the last resort), and the same
     fallback covers `static/echarts.min.js`. Errors name the URL and say whether the call was
     cross-origin. See ADR-004 and `tests/test_hah_endpoint.py`.
-    *Still unconfirmed on a real HAH:* whether `/api/execute` is the right path at all, and whether
-    HAH serves an ECharts UMD build under `/static/`. If the next attempt fails, the message in the
-    visual now names the URL it used — that is the one fact needed to settle both.
+  - **Second round: `/api/execute` works, and HAH serves no ECharts.** Every chart failed after
+    four candidate URLs, which settles what ADR-004 had always listed as unverified: `/static/`
+    carries Chart.js, Plotly and Mermaid. The library now travels inside the report
+    (`--echarts download`, **the default for `--mode hah`**), so charts no longer depend on the
+    platform hosting it; a hah HTML grows by ~1 MB (a real report: 2.4 MB). `--echarts hah-static`
+    keeps the old behaviour.
+    *Still unconfirmed on a real HAH:* whether a 2.4 MB upload is accepted, and whether the numbers
+    the visuals now draw are right — that is `validate.py`'s gap, not HAH's.
   - Also from that round: hah mode was restyling the report (teal stripes on cards, every chart
     1.2rem short, a grey frame around every visual, a 5px-taller bar shrinking the canvas). The
     canvas is now identical to a snapshot render and two tests keep it that way.

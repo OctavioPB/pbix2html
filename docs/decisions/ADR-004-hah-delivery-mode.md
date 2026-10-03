@@ -100,6 +100,30 @@ honours `?sqlApi=`, loads ECharts from the serving origin, and explains a dead e
 This also removed a duplicate `function chart()` in the hah template — two identical copies, the
 second winning, so a fix applied to the first would have done nothing.
 
+### HAH does not serve ECharts, so the report carries it (2026-10-02)
+
+Second round from the real HAH: the SQL endpoint resolved, and every chart then failed with *"No
+ECharts build loaded"*. Four URLs had been tried — the configured `/static/echarts.min.js` and
+three plausible variants under the serving origin — so this settles the question this ADR opened
+on 2026-09-28: **HAH's `/static/` has Chart.js, Plotly and Mermaid, not ECharts.** The fix log said
+as much (§10: "Chart.js, Plotly, or Mermaid served from `{base}/static/`"); the implementation hoped
+otherwise and the hope was never tested.
+
+Rewriting ten renderers against Chart.js to match what HAH happens to host is the wrong trade, so
+the library travels with the report instead: `--echarts download` fetches the configured build once
+into `echarts_cache` (`~/.pbix2html/echarts.min.js`) and inlines it. **For `--mode hah` this is the
+default** — the panel's users cannot pass flags, and a report whose charts silently do not draw is
+worse than a 1 MB file. If the build cannot be had (no network, no cache) the report is still
+written and falls back to HAH's copy at run time, with a warning. `--echarts hah-static` asks for
+that path on purpose; `--echarts <file|url>` points somewhere specific.
+
+Cost: a hah HTML grows by ~1 MB (a real report came out at 2.4 MB). If HAH rejects an upload that
+size, the alternatives are `--echarts <url>` pointing at a library HAH does allow, or `hah-static`
+once someone runs the teradata-report skill's `list_libraries()` and finds a real ECharts path.
+
+`tests/test_hah_endpoint.py` renders a chart from the embedded build with **every** request outside
+the HAH origin aborted, and asserts the page never asks HAH for a library it already carries.
+
 ## Consequences
 
 - A `hah`-mode HTML must be manually verified against a real HAH environment (upload,
