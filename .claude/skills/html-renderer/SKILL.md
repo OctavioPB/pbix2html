@@ -12,6 +12,24 @@ point to an internal copy), data in `<script id="data" type="application/json">`
 (snapshot) or `window.API_BASE` (live). No build step, no framework. Must open from disk
 (file://) in snapshot mode.
 
+**Where ECharts comes from is a per-mode decision** (`render.echarts_source`, ADR-004).
+`--echarts <file>` or `download` inlines the library in the HTML (`download` caches it in
+`ECHARTS_CACHE`, default `~/.pbix2html/echarts.min.js`); a URL becomes the `<script src>`.
+`--mode hah` **inlines it by default**: HAH's `/static/` serves Chart.js, Plotly and Mermaid,
+not ECharts, so a hah report that loads the library from the platform draws no charts at all —
+confirmed against a real HAH, not a guess. `--echarts hah-static` restores the old behaviour.
+A hah HTML is then ~1 MB bigger. When it is not inlined, the hah template tries the configured
+path, three variants under the origin serving the page, and the CDN, records every URL in
+`window.__ECHARTS_TRIED`, and a chart that cannot be drawn names them all.
+
+**HAH validates what you upload, and fixes it silently.** The dynamic `Function()` constructor is
+disallowed, and scripts it does not recognise are *removed* (it rewrites Chart.js, Plotly and
+Mermaid to its own copies). So: never emit `eval`/`new Function`/`document.write` in these
+templates, and never leave an external `<script src>` in a hah build. `render.no_dynamic_code()`
+patches the one `Function()` in ECharts (a dead pre-JSON branch in the GeoJSON loader) and refuses
+to embed if anything dynamic remains. `verify.hah_upload_checks()` runs on every hah HTML at
+convert time and reports what the validator would object to before anyone uploads it.
+
 ## Canvas
 
 Each .pbix page (typically 1280×720) renders as a `.page` section with `aspect-ratio`, and
