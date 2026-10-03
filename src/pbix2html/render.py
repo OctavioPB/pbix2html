@@ -582,6 +582,30 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     return {"report": spec.report, "theme": theme, "pages": pages, "parameters": parameters}
 
 
+# HAH's upload validator rejects the dynamic `Function()` constructor and strips scripts it does
+# not recognise, so a library that uses it would be removed from the file after upload and every
+# chart would die. ECharts 5 has exactly one occurrence: a JSON.parse fallback for browsers
+# without JSON, inside the GeoJSON map loader. It is unreachable in any browser that can run
+# ECharts at all (the ternary prefers JSON.parse), and nothing here draws geo maps, so rewriting
+# it to the branch that is actually taken changes no behaviour.
+_JSON_VIA_FUNCTION = re.compile(r'new Function\("return \("\+(\w+)\+"\);"\)\(\)')
+_DYNAMIC_CODE = re.compile(r"(?<![\w$.])(?:new\s+Function|Function|eval)\s*\(")
+
+
+def no_dynamic_code(js: str, where: str) -> str:
+    """The library with `Function()`/`eval()` removed, or a refusal to ship it (ADR-004)."""
+    js = _JSON_VIA_FUNCTION.sub(r"JSON.parse(\1)", js)
+    left = {m.group(0).strip() for m in _DYNAMIC_CODE.finditer(js)}
+    if left:
+        raise ValueError(
+            f"{where} still uses {', '.join(sorted(left))} after patching. HAH's upload validator "
+            f"rejects dynamic code and removes the script, which would leave every chart blank, so "
+            f"this build is not embedded. Use a build without it, or --echarts hah-static / "
+            f"--echarts <url> and have HAH serve a library itself (ADR-004)."
+        )
+    return js
+
+
 def echarts_source(value: str | None, *, mode: str = "snapshot") -> tuple[str | None, str | None]:
     """`--echarts` → (library source to embed, url to point a <script src> at).
 
@@ -622,7 +646,7 @@ def echarts_source(value: str | None, *, mode: str = "snapshot") -> tuple[str | 
             raise ValueError(f"{path} does not look like an ECharts build")
         # `</script` anywhere in the source would end the tag early; the sequence cannot occur
         # in valid JS outside a string, so escaping it is safe.
-        return js.replace("</script", "<\\/script"), None
+        return no_dynamic_code(js, str(path)).replace("</script", "<\\/script"), None
     if value.startswith(("http://", "https://", "/")):
         return None, value
     raise FileNotFoundError(f"--echarts: no such file {value!r} (nor a url, nor 'download')")

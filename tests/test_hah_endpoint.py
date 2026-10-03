@@ -7,12 +7,14 @@ reported. So the endpoint is resolved from the page's own URL at call time, and 
 that down with a server that actually serves the report the way HAH does.
 """
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
+from pbix2html import render, verify
 from pbix2html.config import settings
 from pbix2html.render import render_html
 from pbix2html.semantic import ReportSpec, VisualSpec
@@ -221,6 +223,50 @@ def test_the_library_can_travel_with_the_report_so_hah_need_not_serve_it(hah_ser
     assert not outside, f"the report reached outside HAH for {outside}"
     assert STATIC_ECHARTS not in _Hah.gets, "it asked HAH for the library it already carries"
     assert drew, f"the chart did not draw: {err}"
+
+
+def test_what_hah_uploads_reject_is_not_in_the_file():
+    """HAH's upload validator rejects the dynamic `Function()` constructor and *removes* scripts it
+    does not recognise (it only rewrites Chart.js, Plotly and Mermaid to its own copies). Either
+    verdict silently guts the report, so the file it produces must be clean before upload."""
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js (run once with network: --echarts download)")
+    html = _hah_html(chart=True)
+    assert not re.search(r"(?<![\w$.])(?:new\s+Function|Function|eval)\s*\(", html)
+    assert not re.search(r"<script[^>]*\bsrc=", html)        # nothing external left to remove
+    assert not verify.hah_upload_checks(html)
+    # the ECharts build on its own is not clean: it is patched on the way in, and refused if that
+    # is not enough, because a stripped library means a report with no charts at all
+    raw = Path(settings.echarts_cache).read_text(encoding="utf-8")
+    assert re.search(r"(?<![\w$.])new\s+Function\s*\(", raw), "upstream changed; re-check the patch"
+    with pytest.raises(ValueError, match="dynamic code"):
+        render.no_dynamic_code("var x = eval('1');", "fake.js")
+
+
+def test_the_patched_library_still_draws(hah_server):
+    """The patch edits a minified third-party file, so "it still works" is a browser question, not a
+    grep: the rewritten branch is ECharts' GeoJSON JSON.parse fallback, dead on any modern engine."""
+    if not _browser():
+        pytest.skip("no Chromium available")
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js")
+    sync = pytest.importorskip("playwright.sync_api")
+    _Hah.html = _hah_html(chart=True)
+    port = hah_server.server_address[1]
+    with sync.sync_playwright() as pw:
+        br = pw.chromium.launch()
+        pg = br.new_page()
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"http://127.0.0.1:{port}{VIEW_PATH}")
+        pg.wait_for_timeout(1500)
+        drew = pg.evaluate("() => { const c = document.querySelector('.visual[data-kind=column] "
+                           ".chart canvas'); return !!c && c.width > 50 && c.height > 50; }")
+        version = pg.evaluate("() => window.echarts && window.echarts.version")
+        br.close()
+    assert not errors, errors
+    assert version, "the patched build defined no echarts"
+    assert drew, "the chart canvas was not painted"
 
 
 def test_a_dead_endpoint_says_where_it_tried_and_why(hah_server):

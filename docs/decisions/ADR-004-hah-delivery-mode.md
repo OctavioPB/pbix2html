@@ -124,6 +124,40 @@ once someone runs the teradata-report skill's `list_libraries()` and finds a rea
 `tests/test_hah_endpoint.py` renders a chart from the embedded build with **every** request outside
 the HAH origin aborted, and asserts the page never asks HAH for a library it already carries.
 
+### HAH validates the upload: no dynamic code, no unknown scripts (2026-10-02)
+
+Third round. HAH's upload validator reports two rules:
+
+- **the dynamic `Function()` constructor is disallowed**, and
+- **"auto fix" rewrites known CDN libraries (Chart.js, Plotly, Mermaid) to self-hosted URLs;
+  unrecognised scripts are removed.**
+
+Both verdicts are silent mutilations rather than errors: the file uploads and the code that draws
+it is gone. This also rules out the `hah-static` path on its own merits — a `<script src>` pointing
+at HAH's `/static/echarts.min.js` is an unrecognised script and gets removed.
+
+ECharts 5 contains exactly **one** `Function()` use: `new Function("return ("+i+");")()`, the
+pre-JSON fallback in the GeoJSON map loader, in a ternary whose other branch is `JSON.parse` and
+which no engine capable of running ECharts ever reaches. `render.no_dynamic_code()` rewrites that
+one expression to `JSON.parse(i)` when the library is embedded, then **refuses to embed at all** if
+any `Function(`/`eval(` survives — a stripped library is a report with no charts, so failing at
+build time is the only honest outcome. The patch edits a minified third-party file, so a browser
+test asserts the patched build still defines `echarts.version` and paints a canvas.
+
+The emitted report now contains no external `<script src>` at all and no dynamic code of its own
+(the runtime library fallback that injected a `<script>` element only exists on the `hah-static`
+path; `document.write` was removed from this template earlier the same day).
+
+`verify.hah_upload_checks()` runs on any HTML carrying `__PBIX2HTML_SQL_API__`, so
+`convert --mode hah` now says before upload whether HAH would reject or rewrite the file. A
+default build reports nothing; `--echarts hah-static` reports the removable script as an error.
+
+**If the embedded library ever has to go** (an upload size limit, or a validator that also strips
+inline scripts), the escape hatch is the validator's own list: reference **Plotly** from a CDN and
+HAH rewrites it to its self-hosted copy. Plotly covers the chart kinds drawn here (bar, line, pie,
+funnel, waterfall, treemap, gauge) where Chart.js would need plugins — which would themselves be
+unrecognised scripts. That is a port of every chart renderer, so it is the fallback, not the plan.
+
 ## Consequences
 
 - A `hah`-mode HTML must be manually verified against a real HAH environment (upload,
