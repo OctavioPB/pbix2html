@@ -611,6 +611,32 @@
       for (let i = 0; i < 60 && px > (title ? 11 : 9) && over(); i++) { px -= 1; n.style.fontSize = px + 'px'; }
       if (title && over()) n.classList.add('wrap');          // still too long: two lines, then "…"
     });
+    // A card's number is sized by the report in points (`value_css`), and that inline font-size
+    // overrides the container-relative clamp(): a 40pt callout asks for 108px of a 79px card and
+    // `overflow: hidden` cuts off the very number the card exists to show. The loop above cannot
+    // see it - nothing is too *wide* - so the stack is shrunk until it fits the height it has.
+    // Measured with getBoundingClientRect, not clientHeight: in a flex column a child's own
+    // clientHeight is already squeezed by its siblings and never reports the overflow.
+    const card = vis.querySelector('.card');
+    if (card) {
+      const nodes = [vis.querySelector('.title'), ...card.children].filter(Boolean);
+      const cs = getComputedStyle(card);
+      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const fs = n => parseFloat(getComputedStyle(n).fontSize);
+      // 10, not the width pass's 9: when space runs out the number is the last thing to
+      // become unreadable. Above 9 so the two passes can never both refuse to act.
+      const floor = n => n.classList.contains('value') ? 10 : 8;
+      const need = () => pad + nodes.reduce((h, n) => {
+        const b = n.getBoundingClientRect(), s = getComputedStyle(n);
+        return h + b.height + parseFloat(s.marginTop) + parseFloat(s.marginBottom);
+      }, 0);
+      for (let i = 0; i < 60 && need() > vis.clientHeight; i++) {
+        // the largest line first, so a 10px title is not shrunk to make room for a 60px number
+        const worst = nodes.filter(n => fs(n) > floor(n)).sort((a, b) => fs(b) - fs(a))[0];
+        if (!worst) break;
+        worst.style.fontSize = (fs(worst) - 1) + 'px';
+      }
+    }
   }
   // Power BI sizes are px at the page's design width: --scale is how much the page is shrunk or grown here
   const scalePage = pg => { if (pg && pg.clientWidth) pg.style.setProperty('--scale', (pg.clientWidth / (parseFloat(pg.dataset.w) || pg.clientWidth)).toFixed(4)); };

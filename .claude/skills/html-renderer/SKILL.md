@@ -209,6 +209,26 @@ screenshots. Rules: `overlap`, `outside_page`, `too_small`, `no_renderer`, `no_d
 Fixes it led to: theme colour ids for a report without a custom theme, textbox paragraph alignment, default shape
 fill (the theme's first colour), card number colour, readable default text on dark panels and translucent buttons.
 
+## Text that has to fit its box: `fitText` is two passes
+
+Power BI font sizes are absolute (points, from the .pbix) while the canvas here scales with the
+window, so text that fit at design size has to be re-fitted. `fitText(visual)` does it in two
+passes, and **both templates carry the same copy** (guarded by `test_both_templates_share_one_fitText`):
+
+1. **width** — each of `.title`, `.subtitle`, `.card .value`, `.card .label`, `.kpi .target`
+   shrinks while `scrollWidth > clientWidth` (floor 11px for a title, 9px otherwise); a title that
+   still does not fit gets `.wrap` (two lines, then `…`).
+2. **height**, for cards and KPIs only — a card's number carries an inline `font-size` from the
+   report (`value_css`, pt → px), which *overrides* the container-relative `clamp()`, so a 40pt
+   callout asks for 108px of a 79px card and `overflow: hidden` eats the number the card exists to
+   show. Nothing is too wide, so pass 1 never fires. Pass 2 shrinks the largest line first (so a
+   10px title is not sacrificed for a 60px number) until the stack fits, floor 10px for the value
+   and 8px for everything else.
+
+Heights are measured with `getBoundingClientRect` plus margins and the card's padding, **never**
+`clientHeight` on the children: in a flex column a child's `clientHeight` is already squeezed by
+its siblings and never reports the overflow. That mistake is why this bug survived a first attempt.
+
 ## The two templates: same canvas, different chrome
 
 `report.html.j2` and `report_hah.html.j2` must draw the canvas identically — the delivery mode is how the

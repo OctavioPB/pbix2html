@@ -1,25 +1,55 @@
 {% extends "base.html" %}
+
+{#  One step per card. The card's summary row IS the step when it is folded up: number,
+    name, and the one number that says how it went. Only the step the flow points at is
+    open (`s.open`, decided in gui.flow_steps — never here), a blocked step is a row with
+    no body because there is nothing to open, and every explanation that used to shout at
+    full volume now sits behind "What this does" inside the step it belongs to. #}
+
+{% macro step_head(s) %}
+  <span class="s-n {% if s.state == 'done' %}done{% elif s.state == 'next' %}now{% endif %}">
+    {%- if s.state == 'done' -%}
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    {%- else -%}{{ s.n }}{%- endif -%}
+  </span>
+  <span class="s-what">
+    <span class="s-title">{{ s.title }}</span>
+    {% if s.metric %}<span class="s-metric">{{ s.metric }}</span>{% endif %}
+    {% if s.blocked %}<span class="s-metric">{{ s.blocked }}</span>{% endif %}
+  </span>
+  {% if s.state == 'next' %}<span class="badge now">next</span>
+  {% elif s.state == 'blocked' %}<span class="badge blocked">waiting</span>{% endif %}
+{% endmacro %}
+
+{#  Called as {% call warn() %}…markup…{% endcall %}: the body is written as markup, not passed
+    as a string, so <strong> inside a warning is a tag and not four escaped characters. #}
+{% macro warn() %}
+  <div class="notice warn">
+    <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+      d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path
+      d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+    <p>{{ caller() }}</p>
+  </div>
+{% endmacro %}
+
 {% block content %}
 <p><a class="link" href="/">&larr; All reports</a></p>
 <h1>{{ name }}</h1>
 <p class="muted">{{ pbix }}</p>
 
-{% if readiness %}
-<div class="card" style="padding:14px 18px">
-  <strong>{{ readiness.ready }} of {{ readiness.needs_sql }} visuals ready</strong>
-  <span class="muted">({{ readiness.percent }}%)</span>
-  <div style="height:8px;background:var(--border);border-radius:4px;margin:8px 0 10px;overflow:hidden">
-    <div style="height:100%;width:{{ readiness.percent }}%;background:var(--ok, #2e7d32)"></div>
-  </div>
-  <p class="muted" style="margin:0">
-    {% if readiness.todo %}<strong>{{ readiness.todo }}</strong> still need SQL written by hand — that part
-      needs someone who writes Teradata SQL.{% else %}Every visual that needs a query has one.{% endif %}
-    {% if readiness.drafted %} <strong>{{ readiness.drafted }}</strong> were drafted automatically and
-      haven't been reviewed yet.{% endif %}
-    {% if readiness.decorative %} {{ readiness.decorative }} more are text/images and need no query.{% endif %}
-  </p>
-</div>
-{% endif %}
+<ul class="chips">
+  {% for s in steps %}
+  <li class="chip {% if s.state == 'done' %}done{% elif s.state == 'next' %}now{% endif %}">
+    {%- if s.state == 'done' -%}
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+    {%- endif -%}
+    {{ s.chip }}
+  </li>
+  {% endfor %}
+</ul>
 
 {% if result %}
 <div class="banner {{ 'ok' if result.ok else 'err' }}">
@@ -38,242 +68,299 @@
 <div class="banner err"><strong>The metrics template has a problem</strong><br>{{ yaml_error }}</div>
 {% endif %}
 
-<div class="card">
-  <div class="step"><span class="n">1</span><h2>Extract the report's structure</h2></div>
-  <p class="muted">Reads the .pbix and saves its pages, visuals, and measures under <code>out/</code>.
-     This is the first step and doesn't touch Teradata.</p>
-  <form method="post" action="/reports/{{ name }}/extract">
-    <button type="submit">Extract</button>
-  </form>
+{% for s in steps %}
+{% if s.state == 'blocked' %}
+<div class="step-card"><div class="step-row">{{ step_head(s) }}</div></div>
+{% else %}
+<details class="step-card {% if s.state == 'next' %}now{% endif %}"{% if s.open %} open{% endif %}>
+  <summary>{{ step_head(s) }}<span class="fold"></span></summary>
+  <div class="body">
 
-  {% if has_extract %}
-  <p class="muted" style="margin-top:14px">Download what it found — the measures and their DAX, how
-     the tables relate, the row-level security rules, and each table's original Power Query source:</p>
-  <div style="display:flex; gap:8px; flex-wrap:wrap">
-    <a class="btn secondary" href="/reports/{{ name }}/model.md">Data model (readable)</a>
-    <a class="btn secondary" href="/reports/{{ name }}/model.json">Data model (JSON)</a>
-    <a class="btn secondary" href="/reports/{{ name }}/layout.json">Report layout (JSON)</a>
-  </div>
-  <p class="muted" style="margin-top:6px; font-size:.85em">The readable one is for sending to a
-     person or reading next to Power BI; the JSON is the same thing for tools.</p>
-
-  <p class="muted" style="margin-top:14px">Then read the mapping report — which visuals could or
-     couldn't be drafted and why, which filters weren't applied, and which pages are drill-through
-     or hidden. Worth reading before reviewing what step 2 drafts: a visual with an unapplied
-     filter won't match Power BI.</p>
-  <a class="btn secondary" href="/reports/{{ name }}/mapping.md">Read the mapping report</a>
-  {% endif %}
-</div>
-
-<div class="card">
-  <div class="step"><span class="n">2</span><h2>Metrics template (SQL per visual)</h2></div>
-  {% if has_yaml %}
-    <p class="muted"><code>metrics/{{ name }}.yaml</code> already exists. That's where each visual's
-       SQL lives — fill it in automatically below, then check the result, all in the panel.</p>
-
-    <form method="post" action="/reports/{{ name }}/autofill" style="margin-bottom:10px">
-      <button type="submit">Auto-detect queries &amp; parameters</button>
-      <label class="muted" style="margin-left:10px"><input type="checkbox" name="redraft"> also redo queries the tool
-         drafted earlier (keeps a backup; queries you wrote yourself are never touched)</label>
-      <p class="muted" style="margin:6px 0 0">Works out each visual's query from the report's own
-         measures and table relationships, and turns slicers into parameters. <strong>Only fills
-         what's still empty</strong> — anything already written is left exactly as it is, so this is
-         safe to run again (for example after mapping more tables in step 2b).</p>
+  {#  ---- 1. extract ---------------------------------------------------------- #}
+  {% if s.id == 'extract' %}
+    <form method="post" action="/reports/{{ name }}/extract" style="margin:0">
+      <button type="submit" {% if has_extract %}class="secondary"{% endif %} style="margin-top:0">
+        {{ 'Extract again' if has_extract else 'Extract' }}</button>
+      <span class="muted" style="margin-left:10px; font-size:13px">Reads the .pbix into
+        <code>out/</code>. Doesn't touch Teradata.</span>
     </form>
 
-    <a class="btn" href="/reports/{{ name }}/edit">Edit SQL, parameters &amp; roles</a>
-    <p class="muted" style="margin:6px 0 0">Where you check what auto-detect produced and change
-       anything it got wrong or left blank. Drafted visuals are marked <code>Auto-drafted</code>.</p>
-    <form method="post" action="/reports/{{ name }}/scaffold" onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml from the .pbix and any SQL already written is replaced.\n\nA copy of the current version is saved first, and you can put it back with “Restore a previous version” on this page.\n\nContinue?');">
-      <div class="checkbox-row">
-        <input type="checkbox" id="regenerate" name="regenerate">
-        <label for="regenerate" style="margin:0">Regenerate from scratch (replaces the SQL already written — a backup is saved first)</label>
+    {% if has_extract %}
+    <details class="more">
+      <summary>Downloads &amp; the mapping report</summary>
+      <p class="muted" style="margin:10px 0 6px">The measures and their DAX, how the tables relate, the
+         row-level security rules, and each table's original Power Query source. The readable one is for
+         sending to a person; the JSON is the same thing for tools.</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <a class="btn secondary" href="/reports/{{ name }}/model.md">Data model (readable)</a>
+        <a class="btn secondary" href="/reports/{{ name }}/model.json">Data model (JSON)</a>
+        <a class="btn secondary" href="/reports/{{ name }}/layout.json">Report layout (JSON)</a>
       </div>
-      <button type="submit" class="secondary">Regenerate template</button>
-    </form>
+      <p class="muted" style="margin:14px 0 6px">The mapping report says which visuals could or couldn't be
+         drafted and why, which filters weren't applied, and which pages are drill-through or hidden. Worth
+         reading before you review step 2: a visual with an unapplied filter won't match Power BI.</p>
+      <a class="btn secondary" href="/reports/{{ name }}/mapping.md">Read the mapping report</a>
+    </details>
+    {% endif %}
 
-    {% if backups %}
-    <details style="margin-top:12px">
-      <summary style="cursor:pointer">Restore a previous version ({{ backups|length }} saved)</summary>
-      <p class="muted" style="margin:8px 0">Every time this file gets overwritten, the version before it is
-         kept here. Restoring is itself undoable — the current version gets saved too.</p>
-      <form method="post" action="/reports/{{ name }}/restore">
-        <select name="backup" aria-label="Version to restore">
-          {% for b in backups %}<option value="{{ b.name }}">{{ b.when }}</option>{% endfor %}
-        </select>
-        <button type="submit" class="secondary">Restore this version</button>
+  {#  ---- 2. queries ---------------------------------------------------------- #}
+  {% elif s.id == 'queries' %}
+    {% if not has_yaml %}
+      <p class="muted" style="margin-top:0">Generates <code>metrics/{{ name }}.yaml</code> with a
+         <code>TODO</code> per visual for someone to fill in the Teradata SQL.</p>
+      <form method="post" action="/reports/{{ name }}/scaffold" style="margin:0">
+        <button type="submit" style="margin-top:0">Generate template</button>
       </form>
-    </details>
-    {% endif %}
-  {% else %}
-    <p class="muted">Generates <code>metrics/{{ name }}.yaml</code> with a <code>TODO</code> per
-       visual for someone to fill in the Teradata SQL.</p>
-    <form method="post" action="/reports/{{ name }}/scaffold">
-      <button type="submit">Generate template</button>
-    </form>
-  {% endif %}
-</div>
-
-<div class="card">
-  <div class="step"><span class="n">2b</span><h2>Map Power BI tables to Teradata</h2><span class="badge optional">Optional</span></div>
-  <p class="muted">Power BI uses logical table names that don't exist as such in Teradata. Give each
-     one a read-only Teradata query once here and step 2 will pre-fill the SQL's <code>FROM</code>
-     instead of leaving it empty.</p>
-  <a class="btn secondary" href="/reports/{{ name }}/table-map">Map tables</a>
-</div>
-
-<div class="card">
-  <div class="step"><span class="n">2c</span><h2>Custom theme</h2><span class="badge optional">Optional</span></div>
-  <p class="muted">Many reports' extracted theme is just a built-in Power BI theme name with no
-     actual color values in it — colors, background, and font then fall back to a generic
-     default instead of matching the original. Set them by hand here if that's the case.</p>
-  <a class="btn secondary" href="/reports/{{ name }}/theme">Set theme</a>
-</div>
-
-<div class="card">
-  <div class="step"><span class="n">3</span><h2>Convert to HTML</h2></div>
-  {% if not spec %}
-    <p class="muted">Finish step 2 first and write the SQL for each visual in the yaml.</p>
-  {% else %}
-  <div id="live-options" hidden style="margin-bottom:12px">
-    <p class="muted" id="live-status-text">Checking…</p>
-    <form method="post" action="/live/start" id="live-start-form" hidden>
-      <input type="hidden" name="name" value="{{ name }}">
-      <button type="submit">Start live service</button>
-    </form>
-    <form method="post" action="/live/stop" id="live-stop-form" hidden>
-      <input type="hidden" name="name" value="{{ name }}">
-      <button type="submit" class="secondary">Stop live service</button>
-    </form>
-  </div>
-  <script>
-  (function () {
-    var checked = false;
-    function checkLiveStatus() {
-      if (checked) return;
-      checked = true;
-      var textEl = document.getElementById('live-status-text');
-      var startForm = document.getElementById('live-start-form');
-      var stopForm = document.getElementById('live-stop-form');
-      fetch('/live/status?name=' + encodeURIComponent({{ name|tojson }}))
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
-          if (j.status === 'ok') {
-            textEl.textContent = '✓ Live service reachable at ' + j.api_base + '.';
-            startForm.hidden = true;
-            stopForm.hidden = !j.owned;
-            if (!j.owned) { textEl.textContent += ' (started outside the panel — nothing to stop from here.)'; }
-          } else if (j.status === 'not_found') {
-            textEl.textContent = '⚠ Something is answering at ' + j.api_base + ' but can\'t see this report ' +
-              '— it is almost certainly running from the wrong folder. Stop it (however it was started) and ' +
-              'use this button instead, so the panel starts it from the right place.';
-            startForm.hidden = false; stopForm.hidden = true;
-          } else {
-            textEl.textContent = 'Not running yet.';
-            startForm.hidden = false; stopForm.hidden = true;
-          }
-        })
-        .catch(function () { textEl.textContent = "Couldn't check — see the browser console."; });
-    }
-    // Delegated on document (not the radios directly): this script runs before the
-    // <form> below it exists in the DOM, so attaching listeners to
-    // document.querySelectorAll('input[name="mode"]') here would find nothing —
-    // delegation works regardless of parse order since document always exists.
-    document.addEventListener('change', function (e) {
-      if (!e.target || e.target.name !== 'mode') return;
-      var box = document.getElementById('live-options');
-      if (e.target.value === 'live') { box.hidden = false; checkLiveStatus(); }
-      else { box.hidden = true; }
-    });
-  })();
-  </script>
-
-  <form method="post" action="/reports/{{ name }}/convert">
-    <label>Delivery mode</label>
-    <div class="radios">
-      <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true;"> Snapshot (embedded data)</label>
-      <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true;"> Live (needs the service running)</label>
-      <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false;"> HAH (HTML App Host — see ADR-004; the data still has to be validated)</label>
-    </div>
-    <div id="hah-options" hidden>
-      <label for="hah_env">HAH environment</label>
-      <select id="hah_env" name="hah_env">
-        <option value="dev">dev</option>
-        <option value="uat">uat</option>
-        <option value="prd">prd</option>
-      </select>
-    </div>
-
-    {% if roles %}
-    <label for="role">Role / permission</label>
-    <select id="role" name="role">
-      <option value="">— pick a role —</option>
-      {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-    </select>
-    {% endif %}
-
-    {% if spec.parameters %}
-    <details style="margin:10px 0">
-      <summary style="cursor:pointer">Filter parameters ({{ spec.parameters|length }}) — leave closed to use the defaults</summary>
-      <div style="margin-top:4px">
-      {% for pname, p in spec.parameters.items() %}
-      <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separate multiple values with commas){% endif %}</label>
-      <input type="{{ 'number' if p.get('type') == 'int' else 'text' }}" id="param__{{ pname }}"
-             name="param__{{ pname }}" value="{{ p.get('default') if p.get('default') is not none else '' }}">
-      {% endfor %}
+    {% else %}
+      {% if readiness %}
+      <div style="background:var(--bg); border-radius:8px; padding:14px 16px; margin:0 0 16px">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap">
+          <strong>{{ readiness.ready }} of {{ readiness.needs_sql }} visuals ready</strong>
+          <span class="muted" style="font-size:13px">{{ readiness.percent }}%</span>
+        </div>
+        <div style="height:8px;background:var(--border);border-radius:4px;margin:8px 0 8px;overflow:hidden">
+          <div style="height:100%;width:{{ readiness.percent }}%;background:var(--ok-text)"></div>
+        </div>
+        <p class="muted" style="margin:0; font-size:13px">
+          {%- if readiness.drafted %}{{ readiness.drafted }} drafted automatically and not reviewed yet{% endif -%}
+          {%- if readiness.drafted and readiness.decorative %} · {% endif -%}
+          {%- if readiness.decorative %}{{ readiness.decorative }} text or images, no query needed{% endif -%}
+          {%- if not readiness.drafted and not readiness.decorative %}Every visual that needs a query has one.{% endif -%}
+        </p>
       </div>
-    </details>
+      {% endif %}
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <form method="post" action="/reports/{{ name }}/autofill" style="margin:0">
+          <button type="submit" style="margin-top:0">Auto-detect queries &amp; parameters</button>
+        </form>
+        <a class="btn secondary" href="/reports/{{ name }}/edit" style="margin-top:0">Edit SQL, parameters &amp; roles</a>
+      </div>
+
+      {% if readiness and readiness.todo %}
+        {% call warn() %}<strong>{{ readiness.todo }} visual(s) still need Teradata SQL written by
+          hand.</strong> That part needs someone who writes SQL — the panel can't work these out from
+          the report alone.{% endcall %}
+      {% endif %}
+
+      <details class="more">
+        <summary>What auto-detect does, and other actions</summary>
+        <p class="muted" style="margin:10px 0 0">It works out each visual's query from the report's own
+           measures and table relationships, and turns slicers into parameters. <strong>It only fills what
+           is still empty</strong>, so anything already written is left exactly as it is and it is safe to
+           run again — for example after mapping more tables below. Drafted visuals are marked
+           <code>Auto-drafted</code> on the edit page, which is where you check them.</p>
+
+        <form method="post" action="/reports/{{ name }}/autofill" style="margin:14px 0 0">
+          <input type="hidden" name="redraft" value="on">
+          <button type="submit" class="secondary" style="margin-top:0">Re-draft queries the tool wrote earlier</button>
+          <p class="muted" style="margin:6px 0 0; font-size:13px">Redoes its own drafts with the current
+             rules. Keeps a backup; queries you wrote yourself are never touched.</p>
+        </form>
+
+        <form method="post" action="/reports/{{ name }}/scaffold" style="margin:14px 0 0"
+              onsubmit="return confirm('This rewrites metrics/{{ name }}.yaml from the .pbix and any SQL already written is replaced.\n\nA copy of the current version is saved first, and you can put it back with “Restore a previous version”.\n\nContinue?');">
+          <input type="hidden" name="regenerate" value="on">
+          <button type="submit" class="secondary" style="margin-top:0">Regenerate template from scratch</button>
+          <p class="muted" style="margin:6px 0 0; font-size:13px">Replaces the SQL already written. A backup
+             is saved first.</p>
+        </form>
+
+        {% if backups %}
+        <form method="post" action="/reports/{{ name }}/restore" style="margin:14px 0 0">
+          <label for="backup">Restore a previous version ({{ backups|length }} saved)</label>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <select id="backup" name="backup" style="width:auto; min-width:220px">
+              {% for b in backups %}<option value="{{ b.name }}">{{ b.when }}</option>{% endfor %}
+            </select>
+            <button type="submit" class="secondary" style="margin-top:0">Restore this version</button>
+          </div>
+          <p class="muted" style="margin:6px 0 0; font-size:13px">Restoring is itself undoable — the current
+             version gets saved too.</p>
+        </form>
+        {% endif %}
+      </details>
     {% endif %}
 
-    {% if not has_teradata and demo_available %}
-    <div class="checkbox-row">
-      <input type="checkbox" id="use_demo" name="use_demo">
-      <label for="use_demo" style="margin:0">Use test data (no Teradata configured; this is just to preview the design)</label>
+  {#  ---- 3. convert ---------------------------------------------------------- #}
+  {% elif s.id == 'html' %}
+    <div id="live-options" hidden style="margin-bottom:12px">
+      <p class="muted" id="live-status-text">Checking…</p>
+      <form method="post" action="/live/start" id="live-start-form" hidden>
+        <input type="hidden" name="name" value="{{ name }}">
+        <button type="submit">Start live service</button>
+      </form>
+      <form method="post" action="/live/stop" id="live-stop-form" hidden>
+        <input type="hidden" name="name" value="{{ name }}">
+        <button type="submit" class="secondary">Stop live service</button>
+      </form>
     </div>
-    {% elif not has_teradata %}
-    <p class="muted">⚠ No Teradata configured in <code>.env</code>; snapshot mode won't be able to fetch real data.</p>
-    {% endif %}
+    <script>
+    (function () {
+      var checked = false;
+      function checkLiveStatus() {
+        if (checked) return;
+        checked = true;
+        var textEl = document.getElementById('live-status-text');
+        var startForm = document.getElementById('live-start-form');
+        var stopForm = document.getElementById('live-stop-form');
+        fetch('/live/status?name=' + encodeURIComponent({{ name|tojson }}))
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j.status === 'ok') {
+              textEl.textContent = '✓ Live service reachable at ' + j.api_base + '.';
+              startForm.hidden = true;
+              stopForm.hidden = !j.owned;
+              if (!j.owned) { textEl.textContent += ' (started outside the panel — nothing to stop from here.)'; }
+            } else if (j.status === 'not_found') {
+              textEl.textContent = '⚠ Something is answering at ' + j.api_base + ' but can\'t see this report ' +
+                '— it is almost certainly running from the wrong folder. Stop it (however it was started) and ' +
+                'use this button instead, so the panel starts it from the right place.';
+              startForm.hidden = false; stopForm.hidden = true;
+            } else {
+              textEl.textContent = 'Not running yet.';
+              startForm.hidden = false; stopForm.hidden = true;
+            }
+          })
+          .catch(function () { textEl.textContent = "Couldn't check — see the browser console."; });
+      }
+      // Delegated on document (not the radios directly): this script runs before the
+      // <form> below it exists in the DOM, so attaching listeners to
+      // document.querySelectorAll('input[name="mode"]') here would find nothing —
+      // delegation works regardless of parse order since document always exists.
+      document.addEventListener('change', function (e) {
+        if (!e.target || e.target.name !== 'mode') return;
+        var box = document.getElementById('live-options');
+        if (e.target.value === 'live') { box.hidden = false; checkLiveStatus(); }
+        else { box.hidden = true; }
+      });
+    })();
+    </script>
 
-    <button type="submit">Generate HTML</button>
-  </form>
+    <form method="post" action="/reports/{{ name }}/convert">
+      <label>Where the data comes from</label>
+      <div class="radios">
+        <label style="margin:0"><input type="radio" name="mode" value="snapshot" checked onchange="document.getElementById('hah-options').hidden=true;"> Snapshot (embedded data)</label>
+        <label style="margin:0"><input type="radio" name="mode" value="live" onchange="document.getElementById('hah-options').hidden=true;"> Live (needs the service running)</label>
+        <label style="margin:0"><input type="radio" name="mode" value="hah" onchange="document.getElementById('hah-options').hidden=false;"> HAH (HTML App Host)</label>
+      </div>
+      <div id="hah-options" hidden>
+        <label for="hah_env">HAH environment</label>
+        <select id="hah_env" name="hah_env">
+          <option value="dev">dev</option>
+          <option value="uat">uat</option>
+          <option value="prd">prd</option>
+        </select>
+        {% call warn() %}The chart library is embedded in the file (HAH serves no ECharts) and the SQL
+          endpoint is worked out from the URL HAH serves the report from — see ADR-004. The numbers still
+          have to be validated.{% endcall %}
+      </div>
+
+      {% if roles %}
+      <label for="role">Role / permission</label>
+      <select id="role" name="role">
+        <option value="">— pick a role —</option>
+        {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+      {% endif %}
+
+      {% if spec.parameters %}
+      <details style="margin:10px 0">
+        <summary style="cursor:pointer">Filter parameters ({{ spec.parameters|length }}) — leave closed to use the defaults</summary>
+        <div style="margin-top:4px">
+        {% for pname, p in spec.parameters.items() %}
+        <label for="param__{{ pname }}">{{ p.get('label') or pname }}{% if p.get('multi') %} (separate multiple values with commas){% endif %}</label>
+        <input type="{{ 'number' if p.get('type') == 'int' else 'text' }}" id="param__{{ pname }}"
+               name="param__{{ pname }}" value="{{ p.get('default') if p.get('default') is not none else '' }}">
+        {% endfor %}
+        </div>
+      </details>
+      {% endif %}
+
+      {% if not has_teradata and demo_available %}
+      <div class="notice warn">
+        <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+          d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path
+          d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+        <p><strong>No Teradata is configured in <code>.env</code>.</strong>
+          <label for="use_demo" style="display:inline; color:inherit; font-size:14px; margin:0">
+            <input type="checkbox" id="use_demo" name="use_demo"> Use test data instead — only to preview
+            the design; nobody should read these numbers as real.</label></p>
+      </div>
+      {% elif not has_teradata %}
+        {% call warn() %}No Teradata configured in <code>.env</code>; snapshot mode won't be able to
+          fetch real data.{% endcall %}
+      {% endif %}
+
+      <button type="submit">Generate HTML</button>
+    </form>
+
+  {#  ---- 4. validate --------------------------------------------------------- #}
+  {% elif s.id == 'validate' %}
+    <p class="muted" style="margin-top:0">Runs each visual's <code>sql</code> and compares it against
+       <code>reference_sql</code> (or the reference CSV), with the tolerance defined in the yaml.</p>
+    <form method="post" action="/reports/{{ name }}/validate" style="margin:0">
+      <button type="submit" style="margin-top:0">Validate</button>
+    </form>
   {% endif %}
+
+  </div>
+</details>
+{% endif %}
+{% endfor %}
+
+{#  2b and 2c stop pretending to be steps: they improve the result, they block nothing. #}
+<div class="card">
+  <div class="step"><h2 style="margin:0">Optional setup</h2>
+    <span class="muted" style="font-size:12px">— open at any point, no step waits for it</span></div>
+
+  <div class="optional-row">
+    <span class="s-title">Map Power BI tables to Teradata</span>
+    <span class="muted" style="font-size:13px; margin-left:auto">{% if n_mapped %}{{ n_mapped }} mapped{% else %}not mapped yet{% endif %}</span>
+    <a class="btn secondary" href="/reports/{{ name }}/table-map" style="margin-top:0">Map tables</a>
+    <span class="s-metric" style="flex:1 1 100%">Power BI's logical table names don't exist as such in
+      Teradata. Map each one once and step 2 pre-fills the SQL's <code>FROM</code> instead of leaving it
+      empty.</span>
+  </div>
+
+  <div class="optional-row">
+    <span class="s-title">Custom theme</span>
+    {% if has_theme %}<span class="badge yes" style="margin-left:auto">custom theme set</span>
+    {% else %}<span class="muted" style="font-size:13px; margin-left:auto">the report's own theme</span>{% endif %}
+    <a class="btn secondary" href="/reports/{{ name }}/theme" style="margin-top:0">Set theme</a>
+    <span class="s-metric" style="flex:1 1 100%">Many reports name a built-in Power BI theme with no colour
+      values in it, so colours and font fall back to a generic default instead of matching the original.</span>
+  </div>
 </div>
 
 {% if generated %}
-<div class="card">
-  <div class="step"><span class="n">3b</span><h2>Finished reports</h2></div>
-  <p class="muted">Every HTML generated for this report. <strong>Download</strong> gives you the
-     file to email or drop in a shared folder — that's the copy other people open, and it needs
-     nothing installed at their end.</p>
-  <table>
-    <tr><th>File</th><th>Generated</th><th>Size</th><th></th></tr>
-    {% for f in generated %}
-    <tr>
-      <td><code>{{ f.name }}</code></td>
-      <td class="muted">{{ f.when }}</td>
-      <td class="muted">{{ f.size }}</td>
-      <td style="white-space:nowrap">
-        <a class="btn secondary" href="/files/{{ f.name }}" target="_blank">Open</a>
-        <a class="btn" href="/files/{{ f.name }}?download=1">Download</a>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
+<details class="step-card">
+  <summary>
+    <span class="s-what">
+      <span class="s-title">Generated files</span>
+      <span class="s-metric">{{ generated|length }} · newest {{ generated[0].when }}</span>
+    </span>
+    <span class="fold"></span>
+  </summary>
+  <div class="body">
+    <p class="muted" style="margin:0 0 10px"><strong>Download</strong> gives you the file to email or drop in
+       a shared folder — that's the copy other people open, and it needs nothing installed at their end.</p>
+    <table>
+      <tr><th>File</th><th>Generated</th><th>Size</th><th></th></tr>
+      {% for f in generated %}
+      <tr>
+        <td><code>{{ f.name }}</code></td>
+        <td class="muted">{{ f.when }}</td>
+        <td class="muted">{{ f.size }}</td>
+        <td style="white-space:nowrap">
+          <a class="btn secondary" href="/files/{{ f.name }}" target="_blank">Open</a>
+          <a class="btn" href="/files/{{ f.name }}?download=1">Download</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</details>
 {% endif %}
-
-<div class="card">
-  <div class="step"><span class="n">4</span><h2>Validate against Power BI</h2></div>
-  {% if not spec %}
-    <p class="muted">Finish step 2 first.</p>
-  {% elif not has_teradata %}
-    <p class="muted">Needs Teradata configured in <code>.env</code> (ask the technical team).</p>
-  {% else %}
-    <p class="muted">Runs each visual's <code>sql</code> and compares it against <code>reference_sql</code>
-       (or the reference CSV), with the tolerance defined in the yaml.</p>
-    <form method="post" action="/reports/{{ name }}/validate">
-      <button type="submit">Validate</button>
-    </form>
-  {% endif %}
-</div>
 {% endblock %}
