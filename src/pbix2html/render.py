@@ -582,11 +582,83 @@ def build_spec(layout: dict, spec: ReportSpec, values: dict[str, Any], include_h
     return {"report": spec.report, "theme": theme, "pages": pages, "parameters": parameters}
 
 
+# HAH's upload validator rejects the dynamic `Function()` constructor and strips scripts it does
+# not recognise, so a library that uses it would be removed from the file after upload and every
+# chart would die. ECharts 5 has exactly one occurrence: a JSON.parse fallback for browsers
+# without JSON, inside the GeoJSON map loader. It is unreachable in any browser that can run
+# ECharts at all (the ternary prefers JSON.parse), and nothing here draws geo maps, so rewriting
+# it to the branch that is actually taken changes no behaviour.
+_JSON_VIA_FUNCTION = re.compile(r'new Function\("return \("\+(\w+)\+"\);"\)\(\)')
+_DYNAMIC_CODE = re.compile(r"(?<![\w$.])(?:new\s+Function|Function|eval)\s*\(")
+
+
+def no_dynamic_code(js: str, where: str) -> str:
+    """The library with `Function()`/`eval()` removed, or a refusal to ship it (ADR-004)."""
+    js = _JSON_VIA_FUNCTION.sub(r"JSON.parse(\1)", js)
+    left = {m.group(0).strip() for m in _DYNAMIC_CODE.finditer(js)}
+    if left:
+        raise ValueError(
+            f"{where} still uses {', '.join(sorted(left))} after patching. HAH's upload validator "
+            f"rejects dynamic code and removes the script, which would leave every chart blank, so "
+            f"this build is not embedded. Use a build without it, or --echarts hah-static / "
+            f"--echarts <url> and have HAH serve a library itself (ADR-004)."
+        )
+    return js
+
+
+def echarts_source(value: str | None, *, mode: str = "snapshot") -> tuple[str | None, str | None]:
+    """`--echarts` → (library source to embed, url to point a <script src> at).
+
+    Both None means "leave the template's own default alone" (the CDN for snapshot/live, HAH's
+    `/static/` for hah). `download` fetches the configured build once into `echarts_cache` and
+    embeds it; a path embeds that file; a URL becomes the `<script src>`.
+
+    **hah embeds by default.** A real HAH answered `/static/echarts.min.js` with nothing — it
+    serves Chart.js, Plotly and Mermaid (ADR-004) — so a report that counts on that path draws no
+    charts at all. Embedding needs the build once per machine; if it cannot be had, the report
+    still ships and falls back to HAH's copy and its alternatives at run time. `hah-static` asks
+    for that behaviour on purpose.
+    """
+    if value in ("hah-static", "none"):
+        return None, None
+    if not value and mode == "hah":
+        try:
+            return echarts_source("download")
+        except Exception as e:                                   # noqa: BLE001  (any failure is non-fatal)
+            log.warning("could not embed ECharts (%s): the report will look for it on HAH "
+                        "instead, which may not serve it — see ADR-004", e)
+            return None, None
+    if not value:
+        return None, None
+    if value in ("download", "embed"):
+        cache = Path(settings.echarts_cache)
+        if not cache.exists():
+            from urllib.request import urlopen            # only needed on a cache miss
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            log.info("downloading %s -> %s", settings.echarts_cdn, cache)
+            with urlopen(settings.echarts_cdn, timeout=60) as resp:     # noqa: S310  (a configured https URL)
+                cache.write_bytes(resp.read())
+        value = str(cache)
+    path = Path(value)
+    if path.exists():
+        js = path.read_text(encoding="utf-8")
+        if "echarts" not in js[:4000].lower():
+            raise ValueError(f"{path} does not look like an ECharts build")
+        # `</script` anywhere in the source would end the tag early; the sequence cannot occur
+        # in valid JS outside a string, so escaping it is safe.
+        return no_dynamic_code(js, str(path)).replace("</script", "<\\/script"), None
+    if value.startswith(("http://", "https://", "/")):
+        return None, value
+    raise FileNotFoundError(f"--echarts: no such file {value!r} (nor a url, nor 'download')")
+
+
 def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: dict[str, dict] | None,
                 mode: str = "snapshot", role: str | None = None, include_hidden: bool = False,
-                hah_base: str | None = None, slicer_data: dict[str, dict] | None = None) -> str:
+                hah_base: str | None = None, slicer_data: dict[str, dict] | None = None,
+                echarts: str | None = None) -> str:
     env = Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape(["html", "j2"]))
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    echarts_inline, echarts_url = echarts_source(echarts, mode=mode)
 
     if mode == "hah":
         # ADR-004: unverified against a real HAH environment.
@@ -595,6 +667,7 @@ def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: di
         return tpl.render(
             spec=page_spec, theme=page_spec["theme"], mode=mode, role=role, generated_at=generated_at,
             hah_base=hah_base, sql_api=f"{hah_base}/api/execute", static_base=f"{hah_base}/static",
+            echarts_inline=echarts_inline, echarts_url=echarts_url, echarts_cdn=settings.echarts_cdn,
             spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
             slicer_js=_SLICER_JS,
         )
@@ -603,7 +676,8 @@ def render_html(layout: dict, spec: ReportSpec, values: dict[str, Any], data: di
     page_spec = build_spec(layout, spec, values, include_hidden)
     return tpl.render(
         spec=page_spec, theme=page_spec["theme"], mode=mode, role=role, generated_at=generated_at,
-        echarts_cdn=settings.echarts_cdn, api_base=settings.api_base,
+        echarts_cdn=echarts_url or settings.echarts_cdn, echarts_inline=echarts_inline,
+        api_base=settings.api_base,
         spec_json=json.dumps(page_spec, ensure_ascii=False).replace("</", "<\\/"),
         data_json=json.dumps(data or {}, ensure_ascii=False, default=str).replace("</", "<\\/"),
         slicer_json=json.dumps(slicer_data or {}, ensure_ascii=False, default=str).replace("</", "<\\/"),

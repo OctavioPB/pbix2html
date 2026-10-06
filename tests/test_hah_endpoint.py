@@ -7,11 +7,15 @@ reported. So the endpoint is resolved from the page's own URL at call time, and 
 that down with a server that actually serves the report the way HAH does.
 """
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
+from pbix2html import render, verify
+from pbix2html.config import settings
 from pbix2html.render import render_html
 from pbix2html.semantic import ReportSpec, VisualSpec
 from tests.test_verify import _browser
@@ -22,18 +26,30 @@ PLAIN_PATH = "/static-site/report.html"                   # served over http, bu
 STATIC_ECHARTS = "/dev-html-app-host/static/echarts.min.js"
 
 
-def _hah_html(base="https://wrong.example/other-app"):
-    """A one-card report built for the wrong host — the mistake that produces "Failed to fetch"."""
-    card = {"id": "c1", "type": "card", "hidden": False, "is_group": False, "parent_group": None,
-            "groups": [], "x": 40, "y": 40, "width": 300, "height": 150, "z": 1, "title": "Total",
-            "style": {}, "sort": None, "cond_formats": [], "n_fields": None, "col_align": [],
-            "y_fields": [], "action": None}
+def _visual(vid, vtype, **kw):
+    v = {"id": vid, "type": vtype, "hidden": False, "is_group": False, "parent_group": None,
+         "groups": [], "x": 40, "y": 40, "width": 300, "height": 150, "z": 1, "title": vid,
+         "style": {}, "sort": None, "cond_formats": [], "n_fields": None, "col_align": [],
+         "y_fields": [], "action": None}
+    v.update(kw)
+    return v
+
+
+def _hah_html(base="https://wrong.example/other-app", *, chart=False, echarts=None):
+    """A report built for the wrong host — the mistake that produces "Failed to fetch"."""
+    vis = [_visual("c1", "card")]
+    kinds = {"c1": "card"}
+    if chart:
+        vis.append(_visual("b1", "columnChart", x=400, y=40, width=500, height=300,
+                           projections={"Category": ["t.cat"], "Y": ["t.value"]}))
+        kinds["b1"] = "column"
     layout = {"theme": {"custom_json": {"dataColors": ["#118DFF"]}},
-              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": [card]}]}
+              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": vis}]}
     spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={}, roles={},
-                      visuals={"c1": VisualSpec(id="c1", kind="card", title=None,
-                                                sql="SELECT COUNT(*) AS value FROM t")}, raw={})
-    return render_html(layout, spec, {}, None, mode="hah", hah_base=base)
+                      visuals={k: VisualSpec(id=k, kind=kind, title=None,
+                                             sql="SELECT cat, value FROM t")
+                               for k, kind in kinds.items()}, raw={})
+    return render_html(layout, spec, {}, None, mode="hah", hah_base=base, echarts=echarts)
 
 
 class _Hah(BaseHTTPRequestHandler):
@@ -139,12 +155,14 @@ def test_without_a_serving_origin_it_falls_back_to_the_build_time_base_and_can_b
 
 
 def test_the_chart_library_also_falls_back_to_the_serving_origin(hah_server):
-    """`<script src>` carries the same build-time guess as the SQL endpoint: a report built for the
-    wrong host loads no ECharts either, and every chart dies with "echarts is not defined"."""
+    """For a report that loads the library from HAH (`hah-static`), `<script src>` carries the same
+    build-time guess as the SQL endpoint: built for the wrong host it loads no ECharts either, and
+    every chart dies with "echarts is not defined"."""
     if not _browser():
         pytest.skip("no Chromium available")
     sync = pytest.importorskip("playwright.sync_api")
-    _Hah.html = _hah_html()                       # built for wrong.example, served from HAH
+    # built for wrong.example, served from HAH, and told to take the library from HAH
+    _Hah.html = _hah_html(echarts="hah-static")
     port = hah_server.server_address[1]
     with sync.sync_playwright() as pw:
         br = pw.chromium.launch()
@@ -157,6 +175,98 @@ def test_the_chart_library_also_falls_back_to_the_serving_origin(hah_server):
     assert STATIC_ECHARTS in _Hah.gets, _Hah.gets          # asked the origin serving it
     assert loaded                                          # and the library is there
     assert "wrong.example" in failed                       # after the configured copy failed
+
+
+def test_hah_embeds_the_library_by_default_and_can_be_told_not_to():
+    """The panel's users cannot pass flags, and a hah report that relies on HAH's /static/ copy
+    draws no charts, so embedding is the default for this mode — not something to remember."""
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js (run once with network: --echarts download)")
+    assert "echarts.apache.org" in _hah_html() or "Apache Software Foundation" in _hah_html()
+    static = _hah_html(echarts="hah-static")
+    assert "Apache Software Foundation" not in static
+    assert "/static/echarts.min.js" in static        # back to asking HAH for it
+    # snapshot and live are unaffected: they keep the CDN tag unless asked otherwise
+    layout = {"theme": {"custom_json": {"dataColors": ["#118DFF"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": []}]}
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={},
+                      roles={}, visuals={}, raw={})
+    assert "<script src=\"https://cdn" in render_html(layout, spec, {}, None, mode="snapshot")
+
+
+def test_the_library_can_travel_with_the_report_so_hah_need_not_serve_it(hah_server):
+    """A real HAH answered /static/echarts.min.js with nothing: it serves Chart.js, Plotly and
+    Mermaid. `--echarts download` embeds the build in the HTML, so the report draws its charts with
+    no library request at all — the only way this works on a platform that has no ECharts."""
+    if not _browser():
+        pytest.skip("no Chromium available")
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js (run once with network: --echarts download)")
+    sync = pytest.importorskip("playwright.sync_api")
+    _Hah.html = _hah_html(chart=True, echarts="download")
+    port = hah_server.server_address[1]
+    outside = []
+    with sync.sync_playwright() as pw:
+        br = pw.chromium.launch()
+        pg = br.new_page()
+        # nothing may leave the HAH origin: no CDN, no /static/ — the file has to be self-sufficient
+        pg.route("**", lambda r: (r.continue_() if f"127.0.0.1:{port}" in r.request.url
+                                   else (outside.append(r.request.url), r.abort())))
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"http://127.0.0.1:{port}{VIEW_PATH}")
+        pg.wait_for_timeout(1500)
+        drew = pg.evaluate("() => !!document.querySelector('.visual[data-kind=column] .chart canvas')")
+        err = pg.evaluate("() => (document.querySelector('.error-state, .error') || {}).textContent || ''")
+        br.close()
+    assert not errors, errors
+    assert not outside, f"the report reached outside HAH for {outside}"
+    assert STATIC_ECHARTS not in _Hah.gets, "it asked HAH for the library it already carries"
+    assert drew, f"the chart did not draw: {err}"
+
+
+def test_what_hah_uploads_reject_is_not_in_the_file():
+    """HAH's upload validator rejects the dynamic `Function()` constructor and *removes* scripts it
+    does not recognise (it only rewrites Chart.js, Plotly and Mermaid to its own copies). Either
+    verdict silently guts the report, so the file it produces must be clean before upload."""
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js (run once with network: --echarts download)")
+    html = _hah_html(chart=True)
+    assert not re.search(r"(?<![\w$.])(?:new\s+Function|Function|eval)\s*\(", html)
+    assert not re.search(r"<script[^>]*\bsrc=", html)        # nothing external left to remove
+    assert not verify.hah_upload_checks(html)
+    # the ECharts build on its own is not clean: it is patched on the way in, and refused if that
+    # is not enough, because a stripped library means a report with no charts at all
+    raw = Path(settings.echarts_cache).read_text(encoding="utf-8")
+    assert re.search(r"(?<![\w$.])new\s+Function\s*\(", raw), "upstream changed; re-check the patch"
+    with pytest.raises(ValueError, match="dynamic code"):
+        render.no_dynamic_code("var x = eval('1');", "fake.js")
+
+
+def test_the_patched_library_still_draws(hah_server):
+    """The patch edits a minified third-party file, so "it still works" is a browser question, not a
+    grep: the rewritten branch is ECharts' GeoJSON JSON.parse fallback, dead on any modern engine."""
+    if not _browser():
+        pytest.skip("no Chromium available")
+    if not Path(settings.echarts_cache).exists():
+        pytest.skip("no cached echarts.min.js")
+    sync = pytest.importorskip("playwright.sync_api")
+    _Hah.html = _hah_html(chart=True)
+    port = hah_server.server_address[1]
+    with sync.sync_playwright() as pw:
+        br = pw.chromium.launch()
+        pg = br.new_page()
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"http://127.0.0.1:{port}{VIEW_PATH}")
+        pg.wait_for_timeout(1500)
+        drew = pg.evaluate("() => { const c = document.querySelector('.visual[data-kind=column] "
+                           ".chart canvas'); return !!c && c.width > 50 && c.height > 50; }")
+        version = pg.evaluate("() => window.echarts && window.echarts.version")
+        br.close()
+    assert not errors, errors
+    assert version, "the patched build defined no echarts"
+    assert drew, "the chart canvas was not painted"
 
 
 def test_a_dead_endpoint_says_where_it_tried_and_why(hah_server):

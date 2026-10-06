@@ -127,6 +127,21 @@ comment fix (a syntax check only: none has been run on Teradata). **Still open**
 - [x] Mapping report in the panel (2026-09-30): `GET /reports/{r}/mapping.md` renders it on
       demand from the already-extracted layout/model/table-map (no separate "run mapping"
       step), linked from step 1 once Extract has run.
+- [x] **The panel's report page, rebuilt around a state model (2026-10-03).** It had grown to nine
+      cards, all open, all equally loud: ~15 explanatory paragraphs, five warnings in three different
+      styles, the two optional steps numbered 2b/2c *between* steps 2 and 3 as if the order mattered,
+      and two destructive actions wearing checkboxes that looked like preferences. Nothing said where
+      you were, and a step that could not run said nothing about why.
+      `gui.flow_steps()` now answers that: each of the four steps reports `done | next | ready |
+      blocked`, one metric, and — when blocked — what would unblock it. It is pure and takes only
+      primitives, so the states are tested without a request, a browser or a .pbix (7 tests).
+      The page follows: a chip strip for the whole flow, one `<details>` per step whose summary row
+      *is* the step when folded, exactly one card open (the one the flow points at, never decided in
+      the template), blocked steps as a row with no body, one `.notice` shape for every warning inside
+      the step it belongs to, the advanced and destructive actions behind one disclosure, and the two
+      optional steps moved out of the chain into "Optional setup" with their own state.
+      Every route, form and label is unchanged — this is layout, not behaviour. Three of the four
+      proposals offered were mocked up first; the user picked the single-column one.
 
 ## Findings from a third real report, composite model (2026-09-29)
 
@@ -914,9 +929,34 @@ them lines, the dominant real-world use).
     from its own URL (`?sqlApi=` overrides; the build-time base is the last resort), and the same
     fallback covers `static/echarts.min.js`. Errors name the URL and say whether the call was
     cross-origin. See ADR-004 and `tests/test_hah_endpoint.py`.
-    *Still unconfirmed on a real HAH:* whether `/api/execute` is the right path at all, and whether
-    HAH serves an ECharts UMD build under `/static/`. If the next attempt fails, the message in the
-    visual now names the URL it used — that is the one fact needed to settle both.
+  - **Second round: `/api/execute` works, and HAH serves no ECharts.** Every chart failed after
+    four candidate URLs, which settles what ADR-004 had always listed as unverified: `/static/`
+    carries Chart.js, Plotly and Mermaid. The library now travels inside the report
+    (`--echarts download`, **the default for `--mode hah`**), so charts no longer depend on the
+    platform hosting it; a hah HTML grows by ~1 MB (a real report: 2.4 MB). `--echarts hah-static`
+    keeps the old behaviour.
+  - **Third round: HAH validates the upload.** No dynamic `Function()`; known CDN libraries
+    (Chart.js, Plotly, Mermaid) are rewritten to self-hosted URLs and **unrecognised scripts are
+    removed** — both silent, so the file uploads and the code that draws it is gone. ECharts has
+    exactly one `Function()` use (a dead pre-JSON fallback in the GeoJSON loader); it is patched out
+    when the library is embedded, and embedding is refused if anything dynamic survives. The report
+    now ships with no external `<script src>` at all. `pbix2html convert --mode hah` reports what
+    the validator would object to **before** upload (`verify.hah_upload_checks`); a default build
+    reports nothing, `--echarts hah-static` reports its removable script as an error.
+    *Still unconfirmed on a real HAH:* whether a ~1 MB inline script survives "auto fix", whether
+    the upload size is accepted, and whether the numbers the visuals draw are right — that last one
+    is `validate.py`'s gap, not HAH's.
+    *Fallback if the inline library has to go:* reference Plotly from a CDN (HAH rewrites it to its
+    own copy) and port the chart renderers — see ADR-004.
+  - **Fourth round: it works on HAH.** Two rendering defects came back with it, both now fixed:
+    - the per-visual row count (fixv1 §3) read as a second little card saying "1 row" inside every
+      visual — removed; `.truncated` still appears when rows were actually dropped, which is the
+      only case where the count changes what the number means;
+    - **a callout the report sized in points did not fit its card** — in *both* modes, not just
+      hah. The inline `font-size` from `value_css` overrides the container-relative `clamp()`, so a
+      40pt callout needed 108px of a 79px card and `overflow: hidden` cut the number off. `fitText`
+      only ever shrank on width, so it never fired. It now has a second, height-based pass for
+      cards and KPIs (see skill `html-renderer`), verified in a browser at three viewport widths.
   - Also from that round: hah mode was restyling the report (teal stripes on cards, every chart
     1.2rem short, a grey frame around every visual, a 5px-taller bar shrinking the canvas). The
     canvas is now identical to a snapshot render and two tests keep it that way.

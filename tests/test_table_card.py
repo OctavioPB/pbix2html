@@ -312,6 +312,79 @@ def _one_page_report(width=1280, height=720, mode="snapshot"):
                        mode=mode, hah_base="https://h.example")
 
 
+def _scorecards(mode="snapshot"):
+    """The scorecards a real report has: the .pbix sets the callout size (and sometimes the title
+    size) in points, so neither follows the card's box."""
+    from pbix2html.semantic import ReportSpec, VisualSpec
+
+    def card(cid, title, style, x, w=150, h=70):
+        return {"id": cid, "type": "card", "hidden": False, "is_group": False, "parent_group": None,
+                "groups": [], "x": x, "y": 40, "width": w, "height": h, "z": 1, "title": title,
+                "style": style, "sort": None, "cond_formats": [], "n_fields": None,
+                "col_align": [], "y_fields": [], "action": None}
+
+    vis = [card("plain", "Starting Headcount", {}, 20),
+           card("c40", "Starting Headcount", {"value_size": 40}, 200),
+           card("c60", "Total Spend", {"value_size": 60}, 380),
+           card("bigttl", "Headcount by Leader and Month", {"value_size": 32, "title_size": 20}, 560)]
+    layout = {"theme": {"custom_json": {"dataColors": ["#FF5F02"]}},
+              "pages": [{"display_name": "P", "width": 1280, "height": 720, "visuals": vis}]}
+    ids = [v["id"] for v in vis]
+    spec = ReportSpec(report="T", source=None, connection="", delivery="", parameters={}, roles={},
+                      visuals={i: VisualSpec(id=i, kind="card", title=None, sql="s") for i in ids}, raw={})
+    data = {i: {"columns": ["value"], "rows": [[1234567]]} for i in ids}
+    return render_html(layout, spec, {}, data, mode=mode, hah_base="https://h.example")
+
+
+def test_a_callout_the_report_sized_in_points_still_fits_its_card():
+    """A card's number carries an inline `font-size` from the .pbix, which overrides the
+    container-relative clamp(): a 40pt callout asked for 108px of a 79px card and `overflow:
+    hidden` cut off the very number the card exists to show. Nothing was too *wide*, so the
+    width-based shrink never fired."""
+    browser = _browser()
+    if not browser:
+        pytest.skip("no Chromium available")
+    sync = pytest.importorskip("playwright.sync_api")
+    import tempfile
+    from pathlib import Path as P
+    f = P(tempfile.mkdtemp()) / "r.html"
+    f.write_text(_scorecards(), encoding="utf-8")
+    # what the card needs, measured the way the fix does: rects, not clientHeight
+    probe = """() => { const r = {};
+      const h = n => { const b = n.getBoundingClientRect(), s = getComputedStyle(n);
+        return b.height + parseFloat(s.marginTop) + parseFloat(s.marginBottom); };
+      document.querySelectorAll('.visual').forEach(n => {
+        const card = n.querySelector('.card'), t = n.querySelector('.title'), s = getComputedStyle(card);
+        r[n.dataset.visual] = {
+          over: (t ? h(t) : 0) + [...card.children].reduce((a, c) => a + h(c), 0)
+                + parseFloat(s.paddingTop) + parseFloat(s.paddingBottom) - n.clientHeight,
+          value: parseFloat(getComputedStyle(n.querySelector('.value')).fontSize),
+          title: parseFloat(getComputedStyle(t).fontSize)}; });
+      return r; }"""
+    with sync.sync_playwright() as pw:
+        try:
+            br = pw.chromium.launch(executable_path=browser)
+        except Exception as e:                                       # noqa: BLE001
+            pytest.skip(str(e))
+        seen = {}
+        for w in (1500, 1100, 900):
+            pg = br.new_page(viewport={"width": w, "height": 900})
+            pg.goto(f.as_uri())
+            pg.wait_for_timeout(700)
+            seen[w] = pg.evaluate(probe)
+            pg.close()
+        br.close()
+    for w, r in seen.items():
+        for cid, d in r.items():
+            assert d["over"] <= 1, f"{cid} overflows its card by {d['over']:.0f}px at {w}px"
+            # the shrink has a floor; below ~9px the page itself is scaled down that far (a card
+            # with no size of its own follows `clamp(calc(1rem * --scale), ...)`)
+            assert d["value"] >= 9, f"{cid}: the number shrank to {d['value']}px at {w}px"
+    # the number is what gets shrunk, not the title that was already small
+    assert seen[1500]["c40"]["title"] == seen[1500]["plain"]["title"]
+    assert seen[1500]["c40"]["value"] > seen[1500]["plain"]["value"]    # still the bigger callout
+
+
 @pytest.mark.parametrize("mode", ["snapshot", "live", "hah"])
 def test_the_canvas_has_a_view_size_control_in_every_mode(mode):
     html = _one_page_report(mode=mode)
@@ -796,7 +869,7 @@ def test_hah_mode_does_not_alter_the_canvas_design():
     how it was delivered — hah used to add a teal stripe to every card and shorten every chart by
     1.2rem to make room for a row count."""
     main, hah = _canvas_css("report.html.j2"), _canvas_css("report_hah.html.j2")
-    extra = {"card-footer"}                 # hah-only, and an overlay: it reserves no space
+    extra: set[str] = set()                 # nothing inside the canvas is hah's alone any more
     for sel, body in main.items():
         assert sel in hah, f"{sel} is missing from the hah canvas"
         assert hah[sel] == body, f"{sel} differs:\n  snapshot: {body}\n  hah:      {hah[sel]}"
@@ -817,6 +890,21 @@ def _visual_tag(name):
     start = src.index('<div class="visual')
     end = src.index('<div class="body"></div>', start)
     return " ".join(re.sub(r"\{#.*?#\}", "", src[start:end], flags=re.S).split())
+
+
+def _fit_text_source(name):
+    """`fitText`'s body as the template writes it — the two copies must not drift."""
+    src = (Path(__file__).resolve().parents[1] / "src/pbix2html/templates" / name).read_text(encoding="utf-8")
+    start = src.index("function fitText(vis)")
+    end = src.index("// Power BI sizes are px", start)
+    return " ".join(src[start:end].split())
+
+
+def test_both_templates_share_one_fitText():
+    """Every visual's text sizing lives in this one function, duplicated per template. Three JS bugs
+    have come from a block being lifted into one copy and not the other, and pytest saw none of
+    them — so the copies are compared here instead."""
+    assert _fit_text_source("report_hah.html.j2") == _fit_text_source("report.html.j2")
 
 
 def test_hah_builds_each_visual_from_the_same_markup_as_snapshot_mode():

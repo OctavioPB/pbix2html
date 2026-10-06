@@ -230,6 +230,10 @@ def _real_roles(spec: semantic.ReportSpec | None) -> list[str]:
 def _page(request: Request, pbix: Path, result: dict[str, Any] | None = None) -> HTMLResponse:
     name = pbix.stem
     spec, yaml_error = _load_spec(name)
+    readiness = semantic.readiness(spec) if spec else None
+    generated = _generated_files(name)
+    has_extract = (OUT_DIR / ex.safe_name(name) / "model.json").exists()
+    mapped, _map_problem = semantic.read_table_map(name)
     ctx = {
         "request": request,
         "name": name,
@@ -241,11 +245,19 @@ def _page(request: Request, pbix: Path, result: dict[str, Any] | None = None) ->
         "has_teradata": settings.has_teradata,
         "demo_available": DEMO_FIXTURE.exists(),
         "api_base": settings.api_base,   # cheap: a string read, no network call — see /live/status for that
-        "readiness": semantic.readiness(spec) if spec else None,
+        "readiness": readiness,
         "backups": [{"name": b.name, "when": _backup_when(b.name)} for b in semantic.list_backups(name)[:10]],
-        "generated": _generated_files(name),
-        "has_extract": (OUT_DIR / ex.safe_name(name) / "model.json").exists(),
+        "generated": generated,
+        "has_extract": has_extract,
         "result": result,
+        # the optional setup, with its own state: these two improve the result but block nothing
+        "n_mapped": len(mapped or {}),
+        "has_theme": semantic.theme_path(name).exists(),
+        "steps": flow_steps(
+            has_extract=has_extract, extract_metric=_extract_metric(name),
+            has_yaml=semantic.yaml_path(name).exists(), readiness=readiness,
+            n_generated=len(generated), newest_html=generated[0]["when"] if generated else "",
+            has_teradata=settings.has_teradata, has_spec=spec is not None),
     }
     return templates.TemplateResponse("report.html", ctx)
 
@@ -266,6 +278,105 @@ def _generated_files(name: str) -> list[dict[str, Any]]:
             "size": f"{stat.st_size / 1024:,.0f} KB" if stat.st_size >= 1024 else f"{stat.st_size} B",
         })
     return rows
+
+
+# ----------------------------------------------------------------------------
+# The flow, as data
+# ----------------------------------------------------------------------------
+# The panel used to show nine cards, all open, all equally loud: nothing said where you
+# were, the two optional steps sat between 2 and 3 as if the order mattered, and every
+# step carried its explanation at full volume whether or not you were about to run it.
+# The page now asks this function instead. Each step reports one of four states and, when
+# it cannot run, *what would unblock it* — a step that stays quiet about why it is dead is
+# the thing that made the panel feel arbitrary.
+#
+#   done    it has run, and there is nothing to decide right now
+#   next    the one step to do now: the only card that opens by itself
+#   ready   it can run, but it is not where the flow is pointing
+#   blocked it cannot run yet; `blocked` says what is missing
+#
+# Pure and primitive-only on purpose: the states are the part worth testing, and testing
+# them must not need a browser, a .pbix or a request.
+
+_FLOW = (("extract", "1", "Extract the report's structure"),
+         ("queries", "2", "Queries per visual"),
+         ("html", "3", "Generate the HTML"),
+         ("validate", "4", "Validate against Power BI"))
+
+
+def flow_steps(*, has_extract: bool, extract_metric: str = "", has_yaml: bool = False,
+               readiness: dict[str, Any] | None = None, n_generated: int = 0,
+               newest_html: str = "", has_teradata: bool = False,
+               has_spec: bool = False) -> list[dict[str, Any]]:
+    """The four steps with their state, their one-line metric, and what blocks them."""
+    r = readiness or {}
+    todo, ready_count = r.get("todo", 0), r.get("ready", 0)
+    state: dict[str, tuple[str, str, str]] = {}      # id -> (state, metric, blocked)
+
+    state["extract"] = (("done", extract_metric or "already extracted", "") if has_extract
+                        else ("next", "", ""))
+
+    if not has_extract:
+        state["queries"] = ("blocked", "", "Extract the report's structure first.")
+    elif not has_yaml or not has_spec:
+        state["queries"] = ("next", "no queries written yet", "")
+    elif todo or not ready_count:
+        drafted = f" · {r['drafted']} drafted, unreviewed" if r.get("drafted") else ""
+        state["queries"] = ("next", f"{ready_count} of {r.get('needs_sql', 0)} ready{drafted}", "")
+    else:
+        drafted = f" · {r['drafted']} drafted, unreviewed" if r.get("drafted") else ""
+        state["queries"] = ("done", f"all {ready_count} visuals have a query{drafted}", "")
+
+    if not has_spec:
+        state["html"] = ("blocked", "", "Needs the queries from step 2.")
+    elif not ready_count:
+        state["html"] = ("blocked", "", "No visual has a query yet — finish step 2.")
+    else:
+        metric = (f"{n_generated} file{'s' if n_generated != 1 else ''}"
+                  + (f" · newest {newest_html}" if newest_html else "")) if n_generated else ""
+        state["html"] = ("done" if n_generated else "ready", metric, "")
+
+    if not has_spec:
+        state["validate"] = ("blocked", "", "Needs the queries from step 2.")
+    elif not has_teradata:
+        state["validate"] = ("blocked", "", "Needs a Teradata connection in .env — ask the technical team.")
+    else:
+        state["validate"] = ("ready", "not run yet", "")
+
+    # the strip at the top of the page: a short name plus the one number that matters
+    chip = {"extract": "Extract",
+            "queries": f"Queries {ready_count}/{r['needs_sql']}" if r.get("needs_sql") else "Queries",
+            "html": f"HTML · {n_generated}" if n_generated else "HTML",
+            "validate": "Validate"}
+    steps = [{"id": sid, "n": n, "title": title, "chip": chip[sid],
+              "state": state[sid][0], "metric": state[sid][1], "blocked": state[sid][2]}
+             for sid, n, title in _FLOW]
+
+    # Exactly one card opens by itself. The first step that is actually next, or — once the
+    # flow is finished — the one you came back to repeat, which is always generating again.
+    opened = next((s["id"] for s in steps if s["state"] == "next"), None)
+    if opened is None:
+        html = next(s for s in steps if s["id"] == "html")
+        opened = "html" if html["state"] != "blocked" else None
+    for s in steps:
+        s["open"] = s["id"] == opened
+    return steps
+
+
+def _extract_metric(name: str) -> str:
+    """What the last extract found, for step 1's one-liner. Written by `action_extract`;
+    a report extracted before that existed falls back to when its model.json was written,
+    rather than reparsing a multi-megabyte layout.json on every page view."""
+    rdir = OUT_DIR / ex.safe_name(name)
+    summary, model = rdir / "summary.json", rdir / "model.json"
+    try:
+        s = json.loads(summary.read_text(encoding="utf-8"))
+        when = f" · {s['at']}" if s.get("at") else ""
+        return (f"{s['pages']} pages · {s['visuals']} visuals · {s['measures']} measures{when}")
+    except Exception:                                                   # noqa: BLE001
+        if model.exists():
+            return "extracted " + datetime.fromtimestamp(model.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        return ""
 
 
 def _backup_when(filename: str) -> str:
@@ -352,6 +463,11 @@ def action_extract(request: Request, name: str):
         n_vis = sum(len(p["visuals"]) for p in layout["pages"])
         n_meas = len(model.get("measures") or []) if isinstance(model.get("measures"), list) else 0
         detail = [f"Model warning: {model['error']}"] if model.get("error") else []
+        # Step 1's one-liner on the report page. Kept as its own small file so the page
+        # never reparses layout.json (megabytes, on every view) just to print three counts.
+        (rdir / "summary.json").write_text(json.dumps(
+            {"pages": len(layout["pages"]), "visuals": n_vis, "measures": n_meas,
+             "at": datetime.now().strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
 
         # Auto-fill the table mapping (step 2b) from each table's own Power Query M
         # source where it's unambiguous (semantic.detect_table_map_from_power_query) —
@@ -889,9 +1005,11 @@ def _convert_impl(request: Request, pbix: Path, spec: semantic.ReportSpec, mode:
             detail.append(f"{n_err} visual(s) had an error fetching data (shown inside the HTML).")
         if mode == "hah":
             detail.append(
-                f"HTML generated for HAH ({hah_env}, {hah_base}); not tested against a real HAH "
-                f"yet (see ADR-004). Upload it with the teradata-report skill's create_report "
-                f"tool before trusting it for production."
+                f"HTML generated for HAH ({hah_env}, {hah_base}); upload it with the "
+                f"teradata-report skill's create_report tool. The SQL endpoint is worked out from "
+                f"the URL HAH serves it from, so this environment choice only matters as a "
+                f"fallback, and the chart library is embedded in the file because HAH does not "
+                f"serve ECharts — which makes it about 1 MB bigger (ADR-004)."
             )
         if mode == "live":
             live_status = _live_status(settings.api_base, name)

@@ -450,7 +450,7 @@ def test_generated_html_can_be_opened_and_downloaded(tmp_path, monkeypatch, fake
 
     # Listed persistently on the report page, not only in the banner right after convert.
     page = c.get(f"/reports/{name}").text
-    assert f"{name}.html" in page and "Finished reports" in page
+    assert f"{name}.html" in page and "Generated files" in page
     assert f"/files/{name}.html?download=1" in page
 
     opened = c.get(f"/files/{name}.html")
@@ -679,3 +679,79 @@ def test_live_stop_calls_stop_process(tmp_path, monkeypatch, fake_pbix):
     assert r.status_code == 200
     assert stopped == [True]
     assert "Live service stopped" in r.text
+
+
+# ---------------------------------------------------------------------------
+# The flow's state model (gui.flow_steps)
+# ---------------------------------------------------------------------------
+# What made the old panel feel arbitrary was not the styling: nine cards were open at
+# once, none said where you were, and a step that could not run said nothing about why.
+# These states are the fix, so they are tested on their own — no request, no .pbix.
+
+def _by_id(steps):
+    return {s["id"]: s for s in steps}
+
+
+def test_a_fresh_report_points_at_extract_and_blocks_the_rest_with_a_reason():
+    s = _by_id(gui.flow_steps(has_extract=False))
+    assert s["extract"]["state"] == "next" and s["extract"]["open"]
+    assert [s[k]["state"] for k in ("queries", "html", "validate")] == ["blocked"] * 3
+    # a blocked step must say what would unblock it, or the panel reads as broken
+    assert all(s[k]["blocked"] for k in ("queries", "html", "validate"))
+    assert "Extract" in s["queries"]["blocked"]
+    assert sum(1 for x in s.values() if x["open"]) == 1
+
+
+def test_after_extracting_the_flow_points_at_the_queries_and_shows_what_it_found():
+    s = _by_id(gui.flow_steps(has_extract=True, extract_metric="7 pages · 42 visuals"))
+    assert s["extract"]["state"] == "done" and "42 visuals" in s["extract"]["metric"]
+    assert s["queries"]["state"] == "next" and s["queries"]["open"]
+    assert not s["extract"]["open"]                      # done folds up
+
+
+def test_unwritten_queries_keep_the_flow_on_step_2_and_count_what_is_left():
+    s = _by_id(gui.flow_steps(
+        has_extract=True, has_yaml=True, has_spec=True,
+        readiness={"needs_sql": 71, "ready": 68, "drafted": 41, "todo": 3, "percent": 96}))
+    assert s["queries"]["state"] == "next"
+    assert "68 of 71" in s["queries"]["metric"] and "41 drafted" in s["queries"]["metric"]
+    # generating is possible meanwhile — 68 visuals do have a query — but it is not the focus
+    assert s["html"]["state"] == "ready" and not s["html"]["open"]
+
+
+def test_once_every_visual_has_a_query_the_flow_moves_on_to_generating():
+    s = _by_id(gui.flow_steps(
+        has_extract=True, has_yaml=True, has_spec=True,
+        readiness={"needs_sql": 71, "ready": 71, "drafted": 0, "todo": 0, "percent": 100}))
+    assert s["queries"]["state"] == "done"
+    assert s["html"]["state"] == "ready" and s["html"]["open"]      # nothing is "next": pick the repeat
+
+
+def test_generating_again_is_what_a_finished_report_opens_on():
+    s = _by_id(gui.flow_steps(
+        has_extract=True, has_yaml=True, has_spec=True,
+        readiness={"needs_sql": 2, "ready": 2, "drafted": 0, "todo": 0, "percent": 100},
+        n_generated=3, newest_html="2026-10-03 09:12"))
+    assert s["html"]["state"] == "done" and s["html"]["open"]
+    assert "3 files" in s["html"]["metric"] and "2026-10-03 09:12" in s["html"]["metric"]
+
+
+def test_validate_says_it_needs_teradata_rather_than_offering_a_button_that_fails():
+    ready = {"needs_sql": 2, "ready": 2, "drafted": 0, "todo": 0, "percent": 100}
+    without = _by_id(gui.flow_steps(has_extract=True, has_yaml=True, has_spec=True, readiness=ready))
+    assert without["validate"]["state"] == "blocked" and ".env" in without["validate"]["blocked"]
+    with_td = _by_id(gui.flow_steps(has_extract=True, has_yaml=True, has_spec=True,
+                                    readiness=ready, has_teradata=True))
+    assert with_td["validate"]["state"] == "ready" and not with_td["validate"]["blocked"]
+
+
+def test_the_report_page_opens_one_step_and_folds_the_finished_one(tmp_path, monkeypatch, fake_pbix):
+    """The point of the layout: one card open, the rest one line each."""
+    c, name = _client(tmp_path, monkeypatch, fake_pbix)
+    c.post(f"/reports/{name}/extract")
+    page = c.get(f"/reports/{name}").text
+    assert page.count('<details class="step-card') >= 2
+    assert page.count(" open>") == 1                       # exactly one step expanded
+    # and it is the step with work in it, not the one already done
+    opened = page[page.index(" open>"):]
+    assert "Queries per visual" in opened[:opened.index("</details>")]
