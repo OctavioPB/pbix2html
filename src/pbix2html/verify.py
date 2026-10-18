@@ -355,13 +355,52 @@ def _dedupe(items: list[Finding]) -> list[Finding]:
 # orchestration and report
 # -------------------------------------------------------------------------------------------------------
 
+# What HAH's upload validator refuses (reported by a real HAH, 2026-10-02): dynamic code, and
+# scripts it does not recognise — those it removes, which would leave the report without the code
+# that draws it. Checked here because it is cheaper to read than an upload that silently loses
+# half the file. The "known" CDNs are the ones HAH rewrites to its own copies instead of removing.
+_HAH_DYNAMIC = re.compile(r"(?<![\w$.])(?:new\s+Function|Function|eval)\s*\(")
+_HAH_KNOWN_LIBS = ("chart.js", "plotly", "mermaid")
+
+
+def hah_upload_checks(html: str) -> list[Finding]:
+    """What HAH's validator would object to in this file (ADR-004). Only meaningful for hah mode."""
+    out: list[Finding] = []
+
+    def f(sev, rule, msg, hint=""):
+        out.append(Finding(sev, rule, "(report)", None, msg, hint))
+
+    for m in _HAH_DYNAMIC.finditer(html):
+        line = html.count("\n", 0, m.start()) + 1
+        f("error", "hah_dynamic_code",
+          f"`{m.group(0).strip()}` on line {line}: HAH's validator disallows the dynamic Function() "
+          f"constructor and eval, and removes the script that uses them.",
+          "Rewrite it without dynamic code; a library that needs it cannot be embedded.")
+        break                       # one finding is the point; the file is either clean or not
+    for m in re.finditer(r"<script[^>]*\bsrc=[\"']([^\"']+)[\"']", html, re.I):
+        url = m.group(1)
+        if url.startswith(("http://", "https://", "//")) and not any(k in url.lower() for k in _HAH_KNOWN_LIBS):
+            f("error", "hah_unknown_script",
+              f"External script {url}: HAH only rewrites Chart.js, Plotly and Mermaid to its own "
+              f"copies — anything else it removes.",
+              "Embed the library instead (`--echarts download`, the default for --mode hah).")
+    # `b.document.write(...)` into a window.open() is ECharts' save-as-image, not this document
+    if re.search(r"(?<![\w$.])document\.write\s*\(", html):
+        f("warn", "hah_document_write", "`document.write` runs while the page parses; a validator "
+          "that rewrites scripts can break it.", "Build the element instead.")
+    return out
+
+
 def verify_html(html_path: Path, out_dir: Path | None = None, *, static_only: bool = False, width: int = 1440,
                 echarts: str | None = None, browser: str | None = None, screenshots: bool = True) -> VerifyResult:
     html_path = Path(html_path)
     out_dir = Path(out_dir) if out_dir else html_path.parent / f"{html_path.stem}.verify"
-    spec, data, slicer_data = read_embedded(html_path.read_text(encoding="utf-8"))
+    text = html_path.read_text(encoding="utf-8")
+    spec, data, slicer_data = read_embedded(text)
     res = VerifyResult(pages=len(spec["pages"]))
     res.findings = static_checks(spec, data, slicer_data)
+    if "__PBIX2HTML_SQL_API__" in text:          # a hah file, whatever it was asked to check
+        res.findings += hah_upload_checks(text)
     if not static_only:
         try:
             found, shots, used = browser_checks(html_path, spec, out_dir, width=width, echarts=echarts,

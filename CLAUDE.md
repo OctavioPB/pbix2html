@@ -76,6 +76,7 @@ git history if you ever need it.)
     pytest -q                          # tests (use a synthetic .pbix; no Teradata)
     pbix2html extract <pbix|folder>    # inventory only → out/
     pbix2html convert <pbix> [--mode snapshot|live|hah] [--role X] [--params k=v] [--include-hidden] [--no-verify] [--no-redraft]
+                             [--echarts PATH|URL|download|hah-static]   # hah embeds the library by default: HAH doesn't serve ECharts (ADR-004)
     pbix2html mapping <pbix>           # why each visual could / couldn't be drafted, filters not applied, drill-through/hidden pages → out/<Report>/mapping_report.md
     pbix2html scaffold <pbix> [--overwrite]   # metrics yaml (--overwrite backs up the old one and re-drafts)
     pbix2html verify <html> [--out D] [--strict]   # HTML verifier: overlaps, unreadable text, failed visuals, chart labels (ADR-009; needs `pip install .[verify]` for the rendered checks)

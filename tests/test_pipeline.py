@@ -518,7 +518,8 @@ def test_hah_html_renders(fake_pbix):
     needs (sql/params per visual, the SQL_API endpoint) — not verified against a real HAH."""
     L = ex.extract_layout(fake_pbix)
     spec = semantic.load("Executive_Dashboard")
-    html = render_html(L, spec, {"year": 2026}, None, mode="hah", hah_base="https://hah.example/dev")
+    html = render_html(L, spec, {"year": 2026}, None, mode="hah", hah_base="https://hah.example/dev",
+                       echarts="hah-static")       # the default embeds the library (ADR-004)
     assert "https://hah.example/dev/static/echarts.min.js" in html
     assert '"https://hah.example/dev/api/execute"' in html
     assert '"sql":' in html and 'SELECT SUM' in html   # visual sql embedded for client-side fetch

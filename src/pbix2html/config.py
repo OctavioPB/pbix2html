@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +23,10 @@ class Settings:
     # than quietly showing a partial table. 0 means no limit.
     max_rows: int = int(os.getenv("MAX_ROWS", "20000"))
     echarts_cdn: str = os.getenv("ECHARTS_CDN", "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js")
+    # Where `--echarts download` keeps the build it embeds. HAH does not serve ECharts under
+    # /static/ (ADR-004), so a hah report has to carry the library itself; downloading it once
+    # per machine beats a 1 MB file in the repo.
+    echarts_cache: str = os.getenv("ECHARTS_CACHE", str(Path.home() / ".pbix2html" / "echarts.min.js"))
     api_base: str = os.getenv("API_BASE", "http://localhost:8000")
     hah_base_dev: str = os.getenv("HAH_BASE_DEV", "https://transcend-k8s-dev.td.teradata.com/dev-html-app-host")
     hah_base_uat: str = os.getenv("HAH_BASE_UAT", "https://transcend-k8s-dev.td.teradata.com/html-app-host")

@@ -48,6 +48,54 @@
   .badge.yes { background: var(--ok-bg); color: var(--ok-text); }
   .badge.no { background: #eef1f5; color: var(--muted); }
   .badge.optional { background: #fff4e0; color: #9a6700; text-transform: uppercase; letter-spacing: .02em; }
+  .badge.now { background: #e7f0fb; color: #0b58b0; font-weight: 700; }
+  .badge.blocked { background: #eef1f5; color: var(--muted); }
+
+  /* The flow at a glance, so a long page still answers "where am I". */
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 18px; padding: 0; list-style: none; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
+          padding: 5px 12px; font-size: 13px; background: #eef1f5; color: var(--muted); }
+  .chip.done { background: var(--ok-bg); color: var(--ok-text); font-weight: 600; }
+  .chip.now { background: #e7f0fb; color: #0b58b0; font-weight: 700; }
+
+  /* One step per card: the summary row is the whole step when it is folded up, and only
+     the step you are on opens by itself. A blocked step is the same row without a body —
+     there is nothing to open, so it must not look as if there were. */
+  .step-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+               margin-bottom: 12px; }
+  .step-card.now { box-shadow: 0 1px 3px rgba(31, 35, 40, .07); }
+  .step-card > summary { list-style: none; cursor: pointer; padding: 14px 20px;
+                         display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .step-card > summary::-webkit-details-marker { display: none; }
+  .step-card > summary:hover .s-title { color: var(--accent); }
+  .step-card[open] > summary { border-bottom: 1px solid var(--border); }
+  .step-card > .body { padding: 16px 20px 18px; }
+  .step-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 20px; }
+  .s-what { flex: 1 1 260px; min-width: 0; }
+  .s-title { font-size: 15px; font-weight: 600; }
+  .s-metric { display: block; color: var(--muted); font-size: 13px; }
+  .s-n { background: #f5f6f8; color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+         width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center;
+         font-size: 12px; font-weight: 700; flex: none; }
+  .s-n.now { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .s-n.done { background: var(--ok-bg); color: var(--ok-text); border-color: transparent; }
+  .fold { color: var(--muted); font-size: 13px; flex: none; }
+  .step-card[open] > summary .fold::after { content: "Hide"; }
+  .step-card:not([open]) > summary .fold::after { content: "Open"; }
+
+  /* Every warning and aside uses this one shape, inside the step it belongs to — they used
+     to be loose paragraphs scattered down the page in three different styles. */
+  .notice { display: flex; gap: 10px; align-items: flex-start; border-radius: 8px;
+            padding: 12px 14px; margin: 14px 0 0; font-size: 14px; }
+  .notice p, .notice ul { margin: 0; }
+  .notice.warn { background: #fff4e0; color: #7a4f00; }
+  .notice.info { background: #f5f6f8; color: #434a53; }
+  .notice.bad { background: var(--err-bg); color: var(--err-text); }
+  .notice .ico { flex: none; margin-top: 2px; }
+  details.more { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  details.more > summary { cursor: pointer; font-size: 14px; color: var(--accent); font-weight: 600; }
+  .optional-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+                  border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
   table { width: 100%; border-collapse: collapse; }
   td, th { padding: 8px 6px; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
   a.link { color: var(--accent); }

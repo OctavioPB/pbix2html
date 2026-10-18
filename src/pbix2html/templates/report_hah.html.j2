@@ -4,20 +4,48 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ spec.report }}</title>
-<!-- ADR-004: self-hosted from HAH, no CDN. Assumes HAH's static path serves an ECharts
-     UMD build under this name — unverified, see ADR-004. -->
-<script src="{{ static_base }}/echarts.min.js" onerror="window.__ECHARTS_SRC_FAILED__ = this.src"></script>
+{% if echarts_inline %}
+<!-- ADR-004: the library travels with the report (`--echarts download`). HAH serves Chart.js,
+     Plotly and Mermaid under /static/ — not ECharts — so nothing here depends on the platform. -->
+<script>{{ echarts_inline|safe }}</script>
+{% else %}
+<!-- ADR-004: loaded from HAH's static path, which a real HAH answered with 404 — if these all
+     fail, rebuild with `--echarts download` and the library is embedded in the file instead. -->
+<script src="{{ echarts_url or static_base + '/echarts.min.js' }}"
+        onerror="window.__ECHARTS_SRC_FAILED__ = this.src"></script>
 <script>
-  // Same reasoning as the SQL endpoint below: `--hah-base` is a build-time guess, and a report
-  // built for one HAH and opened on another loads its charts from a host that is not there. If the
-  // configured copy did not load, try the origin actually serving this page. `document.write` runs
-  // during parsing and blocks it, so echarts is defined before any renderer can ask for it.
-  if (!window.echarts && (location.protocol === 'http:' || location.protocol === 'https:')) {
-    var cut = location.pathname.indexOf('/api/');     // …/dev-html-app-host/api/reports/42/view
-    var alt = cut >= 0 ? location.origin + location.pathname.slice(0, cut) + '/static/echarts.min.js' : null;
-    if (alt && alt !== window.__ECHARTS_SRC_FAILED__) document.write('<script src="' + alt + '"><\/script>');
-  }
+  // Nothing in this file can know where the library lives on a given HAH, so the page tries, in
+  // order: the configured path above, then the same names under the origin that is actually
+  // serving the report (`--hah-base` is a build-time guess; see sqlEndpoint() for the same
+  // problem with the SQL API), then the CDN in case this environment has egress. Every URL tried
+  // is recorded, so a chart that cannot be drawn can name all of them instead of saying
+  // "echarts is not defined".
+  window.__ECHARTS_TRIED = window.__ECHARTS_SRC_FAILED__ ? [window.__ECHARTS_SRC_FAILED__] : [];
+  window.__ECHARTS_READY = (function () {
+    if (window.echarts) return Promise.resolve();
+    const urls = [];
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      const cut = location.pathname.indexOf('/api/');   // …/dev-html-app-host/api/reports/42/view
+      const mount = location.origin + (cut >= 0 ? location.pathname.slice(0, cut) : '');
+      ['/static/echarts.min.js', '/static/js/echarts.min.js', '/static/echarts/echarts.min.js',
+       '/static/libs/echarts.min.js'].forEach(p => urls.push(mount + p));
+    }
+    urls.push({{ echarts_cdn|tojson }});
+    const load = src => new Promise((ok, fail) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = ok; s.onerror = () => fail(new Error(src));
+      document.head.appendChild(s);
+    });
+    return urls.reduce((chain, src) => chain.catch(async () => {
+      if (window.echarts) return;
+      if (window.__ECHARTS_TRIED.includes(src)) throw new Error('already tried');
+      window.__ECHARTS_TRIED.push(src);
+      await load(src);
+      if (!window.echarts) throw new Error(src + ' loaded but defined no echarts');
+    }), Promise.reject(new Error('start')));
+  })();
 </script>
+{% endif %}
 <style>
   :root {
     --bg: {{ theme.background }};
@@ -158,11 +186,10 @@
   .loading { color: var(--muted); font-size: calc(.75rem * var(--scale, 1)); padding: .5rem .6rem; }
   .truncated { position: absolute; right: 0; bottom: 0; padding: 0 .3rem; font-size: calc(.65rem * var(--scale, 1));
                color: var(--muted); background: var(--bg); border-top-left-radius: 3px; pointer-events: auto; }
-  /* The row count (fixv1 §3) is a corner overlay, like `.truncated` next to it, and not a strip
-     across the bottom of the visual: a reserved strip shortened every chart by 1.2rem and made
-     the canvas differ from the same report rendered as a snapshot. */
-  .card-footer { position: absolute; left: 0; bottom: 0; padding: 0 .3rem; font-size: calc(.65rem * var(--scale, 1));
-                 color: var(--muted); background: var(--bg); border-top-right-radius: 3px; pointer-events: none; }
+  /* No row-count footer (fixv1 §3 asks for one). On a real report it read as a second little card
+     saying "1 row" inside every visual — a card whose whole point is one number does not need to
+     be told it got one row. `.truncated` above still appears when rows were actually dropped,
+     which is the only case where the count changes what the number means. */
   .spinner { width: 1.1rem; height: 1.1rem; margin: .8rem; border: 2px solid var(--border);
              border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -547,9 +574,11 @@
 
   function chart(el, v, option) {
     if (!window.echarts) {        // "echarts is not defined" on every chart explains nothing
-      throw new Error('The chart library did not load from '
-        + (window.__ECHARTS_SRC_FAILED__ || 'the HAH static path')
-        + ' — HAH must serve an ECharts UMD build as /static/echarts.min.js (ADR-004).');
+      throw new Error('No ECharts build loaded. Tried: '
+        + ((window.__ECHARTS_TRIED || []).join(', ') || 'nothing')
+        + '. HAH does not serve ECharts under /static/ — rebuild the report with '
+        + '`pbix2html convert … --mode hah --echarts download` and the library travels with it '
+        + '(ADR-004).');
     }
     el.innerHTML = '<div class="chart"></div>';
     const c = echarts.init(el.firstChild, null, { renderer: 'canvas' });
@@ -575,6 +604,32 @@
       for (let i = 0; i < 60 && px > (title ? 11 : 9) && over(); i++) { px -= 1; n.style.fontSize = px + 'px'; }
       if (title && over()) n.classList.add('wrap');          // still too long: two lines, then "…"
     });
+    // A card's number is sized by the report in points (`value_css`), and that inline font-size
+    // overrides the container-relative clamp(): a 40pt callout asks for 108px of a 79px card and
+    // `overflow: hidden` cuts off the very number the card exists to show. The loop above cannot
+    // see it - nothing is too *wide* - so the stack is shrunk until it fits the height it has.
+    // Measured with getBoundingClientRect, not clientHeight: in a flex column a child's own
+    // clientHeight is already squeezed by its siblings and never reports the overflow.
+    const card = vis.querySelector('.card');
+    if (card) {
+      const nodes = [vis.querySelector('.title'), ...card.children].filter(Boolean);
+      const cs = getComputedStyle(card);
+      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const fs = n => parseFloat(getComputedStyle(n).fontSize);
+      // 10, not the width pass's 9: when space runs out the number is the last thing to
+      // become unreadable. Above 9 so the two passes can never both refuse to act.
+      const floor = n => n.classList.contains('value') ? 10 : 8;
+      const need = () => pad + nodes.reduce((h, n) => {
+        const b = n.getBoundingClientRect(), s = getComputedStyle(n);
+        return h + b.height + parseFloat(s.marginTop) + parseFloat(s.marginBottom);
+      }, 0);
+      for (let i = 0; i < 60 && need() > vis.clientHeight; i++) {
+        // the largest line first, so a 10px title is not shrunk to make room for a 60px number
+        const worst = nodes.filter(n => fs(n) > floor(n)).sort((a, b) => fs(b) - fs(a))[0];
+        if (!worst) break;
+        worst.style.fontSize = (fs(worst) - 1) + 'px';
+      }
+    }
   }
   // Power BI sizes are px at the page's design width: --scale is how much the page is shrunk or grown here
   const scalePage = pg => { if (pg && pg.clientWidth) pg.style.setProperty('--scale', (pg.clientWidth / (parseFloat(pg.dataset.w) || pg.clientWidth)).toFixed(4)); };
@@ -865,11 +920,10 @@
           if (tb.rows.length && tb.columns.length === block.columns.length) block.total = tb.rows[0];
         } catch (e) { console.warn('total row skipped:', e.message); }
       }
+      // the chart library may still be coming from one of the fallback URLs; a few microseconds
+      // here beats every chart failing because the first query came back first
+      await (window.__ECHARTS_READY || Promise.resolve()).catch(() => {});
       paint(v.id, block);
-      const footer = document.createElement('div');
-      footer.className = 'card-footer';
-      footer.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'}`;
-      el.appendChild(footer);
     } catch (e) {
       el.innerHTML = `<div class="error-state">⚠ ${e.message}</div>`;
     }

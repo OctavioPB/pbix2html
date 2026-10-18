@@ -168,7 +168,7 @@ def cmd_convert(args):
     if args.mode == "hah" and not args.hah_base:
         sys.exit("--mode hah needs --hah-base <url of the HTML App Host>")
     html = render_html(layout, spec, values, data, mode=args.mode, role=role, include_hidden=args.include_hidden,
-                       slicer_data=slicer_data, hah_base=args.hah_base)
+                       slicer_data=slicer_data, hah_base=args.hah_base, echarts=args.echarts)
     out = Path(args.html) if args.html else Path(args.out) / (f"{layout['report']}" + (f".{role}" if role else "") + ".html")
     out.write_text(html, encoding="utf-8")
     n_ok = sum(1 for d in (data or {}).values() if d.get("rows")) if data else 0
@@ -229,6 +229,11 @@ def main(argv=None) -> int:
     p.add_argument("--html", help="explicit output path")
     p.add_argument("--mode", choices=["snapshot", "live", "hah"], default="snapshot")
     p.add_argument("--hah-base", help="base URL of the HTML App Host (mode hah), e.g. https://hah.example.com")
+    p.add_argument("--echarts", metavar="PATH|URL|download|hah-static",
+                   help="where the report gets ECharts: a local echarts.min.js to embed in the HTML, "
+                        "a URL to load it from, or 'download' to fetch the configured build once and "
+                        "embed it. --mode hah embeds it by default, because HAH does not serve "
+                        "ECharts (ADR-004); 'hah-static' loads it from HAH anyway")
     p.add_argument("--role")
     p.add_argument("--params", nargs="*", help="k=v (yaml parameters)")
     p.add_argument("--fake-data", help="json {columns,rows} for development without Teradata")
